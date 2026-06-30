@@ -1,0 +1,92 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             x:Class="Deduplicator.App.Views.DiskHealthView">
+
+    <Grid RowDefinitions="Auto,*" Margin="28,24">
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock Classes="h1" Text="{x:Static loc:Strings.HealthTitle}"/>
+                <TextBlock Classes="muted" Text="{x:Static loc:Strings.HealthSubtitle}" Margin="0,4,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Top">
+                <!-- #20: видимая обратная связь во время многосекундного WMI-запроса -->
+                <ProgressBar IsIndeterminate="True" Width="90" VerticalAlignment="Center" IsVisible="{Binding IsBusy}"/>
+                <Button Classes="ghost" Command="{Binding RefreshCommand}" IsEnabled="{Binding !IsBusy}"
+                        ToolTip.Tip="Заново прочитать состояние подключённых дисков">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <PathIcon Data="{StaticResource IconRefresh}"/>
+                        <TextBlock Text="{x:Static loc:Strings.Refresh}"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1">
+            <StackPanel Spacing="14">
+                <Border Classes="card" IsVisible="{Binding AnyPredictFailure}"
+                        Background="{DynamicResource WarningBrush}">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <PathIcon Data="{StaticResource IconWarning}" Foreground="White"/>
+                        <TextBlock Text="{x:Static loc:Strings.HealthPredict}" Foreground="White" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
+                <Border Classes="card" IsVisible="{Binding Message, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                    <TextBlock Text="{Binding Message}" Classes="muted" TextWrapping="Wrap"/>
+                </Border>
+
+                <ItemsControl x:Name="OnboardingHealthList" ItemsSource="{Binding Disks}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Classes="card" Margin="0,0,0,12">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <Border Grid.Column="0" Width="52" Height="52" CornerRadius="12"
+                                            Background="{DynamicResource AccentSoft}" VerticalAlignment="Top">
+                                        <PathIcon Data="{StaticResource IconHdd}" Width="26" Height="26"
+                                                  Foreground="{DynamicResource AccentBrush}"/>
+                                    </Border>
+
+                                    <StackPanel Grid.Column="1" Margin="16,0" Spacing="6">
+                                        <StackPanel Orientation="Horizontal" Spacing="10">
+                                            <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="SemiBold"/>
+                                            <Border CornerRadius="6" Padding="8,2" Background="{Binding HealthBrush}" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding HealthText}" FontSize="11" Foreground="White"/>
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Classes="caption">
+                                            <Run Text="{Binding MediaType}"/><Run Text="  ·  "/>
+                                            <Run Text="{x:Static loc:Strings.HealthBus}"/><Run Text=": "/><Run Text="{Binding BusType}"/><Run Text="  ·  "/>
+                                            <Run Text="{Binding SizeText}"/>
+                                        </TextBlock>
+                                        <TextBlock Classes="caption">
+                                            <Run Text="{x:Static loc:Strings.HealthSerial}"/><Run Text=": "/><Run Text="{Binding SerialText}"/>
+                                        </TextBlock>
+
+                                        <WrapPanel>
+                                            <Border IsVisible="{Binding HasTemp}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                                <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthTemp}"/><Run Text=": "/><Run Text="{Binding TempText}"/></TextBlock>
+                                            </Border>
+                                            <Border IsVisible="{Binding HasPowerOn}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                                <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthPowerOn}"/><Run Text=": "/><Run Text="{Binding PowerOnText}"/></TextBlock>
+                                            </Border>
+                                            <Border IsVisible="{Binding HasWear}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                                <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthWear}"/><Run Text=": "/><Run Text="{Binding WearText}"/></TextBlock>
+                                            </Border>
+                                            <Border IsVisible="{Binding HasReadErrors}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                                <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthReadErrors}"/><Run Text=": "/><Run Text="{Binding ReadErrorsText}"/></TextBlock>
+                                            </Border>
+                                            <Border IsVisible="{Binding HasRpm}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                                <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthRpm}"/><Run Text=": "/><Run Text="{Binding RpmText}"/></TextBlock>
+                                            </Border>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

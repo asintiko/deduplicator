@@ -1,0 +1,65 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             x:Class="Deduplicator.App.Views.ExplorerView">
+
+    <Grid RowDefinitions="Auto,Auto,*" Margin="28,24">
+        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+            <TextBlock Classes="h1" Text="{x:Static loc:Strings.ExplorerTitle}"/>
+            <TextBlock Classes="muted" Text="{x:Static loc:Strings.ExplorerHint}" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12" Margin="0,0,0,14">
+            <TextBlock Text="{x:Static loc:Strings.SelectVolume}" VerticalAlignment="Center" Classes="muted"/>
+            <ComboBox MinWidth="280" ItemsSource="{Binding Volumes}"
+                      ToolTip.Tip="Выберите подключённый диск или сохранённый список отключённого диска"
+                      SelectedItem="{Binding SelectedVolume, Mode=TwoWay}">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconHdd}" Width="16" Height="16"/>
+                            <TextBlock Text="{Binding DisplayName}"/>
+                            <TextBlock Text="{Binding StatusText}" Classes="caption" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+            <ProgressBar IsIndeterminate="True" Width="120" IsVisible="{Binding IsBusy}" VerticalAlignment="Center"/>
+            <Border CornerRadius="6" Padding="8,3" VerticalAlignment="Center" Background="{DynamicResource AccentSoft}"
+                    IsVisible="{Binding SourceHint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <TextBlock Text="{Binding SourceHint}" FontSize="12" Foreground="{DynamicResource AccentBrush}"/>
+            </Border>
+        </StackPanel>
+
+        <Border Grid.Row="2" Classes="card" Padding="6">
+            <Panel>
+                <TextBlock Text="{Binding Status}" Classes="muted" Margin="14"
+                           IsVisible="{Binding Status, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                <TreeView ItemsSource="{Binding Root}" Background="Transparent"
+                          DoubleTapped="OnNodeDoubleTapped">
+                    <TreeView.Styles>
+                        <!-- Ленивая подгрузка папок при раскрытии. -->
+                        <Style Selector="TreeViewItem">
+                            <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                        </Style>
+                    </TreeView.Styles>
+                    <TreeView.ItemTemplate>
+                        <TreeDataTemplate ItemsSource="{Binding Children}">
+                            <Grid ColumnDefinitions="*,120,160,110" Height="28">
+                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                                    <PathIcon Data="{Binding Icon}" Width="16" Height="16"
+                                              Foreground="{DynamicResource TextSecondary}"/>
+                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" Text="{Binding SizeText}" Classes="caption" VerticalAlignment="Center"/>
+                                <TextBlock Grid.Column="2" Text="{Binding CreatedText}" Classes="caption" VerticalAlignment="Center"
+                                           ToolTip.Tip="{x:Static loc:Strings.ColumnCreated}"/>
+                                <TextBlock Grid.Column="3" Text="{Binding CategoryText}" Classes="caption" VerticalAlignment="Center"/>
+                            </Grid>
+                        </TreeDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Panel>
+        </Border>
+    </Grid>
+</UserControl>

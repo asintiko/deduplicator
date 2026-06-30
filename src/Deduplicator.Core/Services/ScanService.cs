@@ -1,0 +1,912 @@
+using System.Text.Json;
+using Deduplicator.Core.Audio;
+using Deduplicator.Core.Data;
+using Deduplicator.Core.Engine;
+using Deduplicator.Core.Hashing;
+using Deduplicator.Core.Imaging;
+using Deduplicator.Core.Matching;
+using Deduplicator.Core.Models;
+using Deduplicator.Core.Util;
+// У продукта и движка одноимённые типы (ScanOptions/ScanProgress/FileEntry) — движковые только через алиас.
+// Алиас Fde (не Engine), чтобы не конфликтовать с пространством имён Deduplicator.Core.Engine.
+using Fde = FastDedup.Engine;
+
+namespace Deduplicator.Core.Services;
+
+public interface IScanService
+{
+    ScanProgress Progress { get; }
+    event Action<ScanProgress>? ProgressChanged;
+
+    bool IsRunning { get; }
+    bool IsPaused { get; }
+
+    Task RunAsync(ScanOptions options, CancellationToken ct);
+    void Pause();
+    void Resume();
+
+    /// <summary>Незавершённая сессия (для предложения возобновить).</summary>
+    ScanSession? GetResumableSession();
+}
+
+/// <summary>
+/// Оркестратор многоступенчатой воронки сканирования (раздел 7).
+/// Возобновляемый, отменяемый, с паузой; UI-поток не блокирует.
+/// </summary>
+public sealed class ScanService : IScanService, IDisposable
+{
+    private const int MetaBatch = 2000;
+    private const int HashBatch = 500;
+
+    private readonly VolumeRepository _volumes;
+    private readonly FileRepository _files;
+    private readonly ScanSessionRepository _sessions;
+    private readonly VolumeScanStateRepository _scanState;
+    private readonly IVolumeService _volumeService;
+    private readonly IImageMatchService _images;
+    private readonly IAudioMatchService _audio;
+    private readonly IDuplicateGrouper _grouper;
+    private readonly ISettingsService _settings;
+    private readonly Fde.FastFileLister _fastLister;
+    // Движок точных дубликатов v2 (потоковая воронка вместо старого HashFunnel с N+1 по размеру).
+    private readonly IExactDuplicateEngine _exactEngine;
+
+    private RepresentativeRule _representativeRule;
+    private bool _computePixelHash;
+    private ScanOptions _options = new();
+
+    private static readonly HashSet<string> SystemFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "$Recycle.Bin", "$RECYCLE.BIN", "System Volume Information", "$SysReset", "Recovery", "$WinREAgent"
+    };
+
+    private static readonly HashSet<string> MagicProbeExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".bin", ".dat", ".tmp", ".cache", ".part", ".download", ".unknown"
+    };
+
+    private readonly ManualResetEventSlim _gate = new(true);
+    private readonly object _progressLock = new();
+
+    // План чтения на каждый том (вместо одного глобального _parallelism). HDD/съёмные читаются
+    // последовательно, SSD/NVMe — параллельно; один HDD не заставляет SSD читать в один поток.
+    private Dictionary<long, VolumeReadPlan> _readPlans = new();
+    private int _maxVolumeParallelism = 1;
+
+    // Сглаживатель прогресса: per-file Report не дёргает UI на каждый файл.
+    private ProgressCoalescer<ScanProgress>? _coalescer;
+
+    // Накопленные уведомления о режиме перечисления по дискам (чтобы предупреждение одного диска
+    // не затиралось другим и не висело устаревшим). Доступ только из потока скана.
+    private readonly List<string> _enumNotices = new();
+
+    public ScanProgress Progress { get; private set; } = new();
+    public event Action<ScanProgress>? ProgressChanged;
+
+    // volatile — флаги читаются из UI-потока, пишутся из фонового (видимость без блокировок).
+    private volatile bool _isRunning;
+    private volatile bool _isPaused;
+    public bool IsRunning { get => _isRunning; private set => _isRunning = value; }
+    public bool IsPaused { get => _isPaused; private set => _isPaused = value; }
+
+    public ScanService(
+        VolumeRepository volumes, FileRepository files, ScanSessionRepository sessions,
+        IVolumeService volumeService, IHashService hash, IImageMatchService images,
+        IAudioMatchService audio, IDuplicateGrouper grouper, ISettingsService settings,
+        Fde.FastFileLister fastLister, VolumeScanStateRepository scanState)
+    {
+        _volumes = volumes;
+        _files = files;
+        _sessions = sessions;
+        _scanState = scanState;
+        _volumeService = volumeService;
+        _images = images;
+        _audio = audio;
+        _grouper = grouper;
+        _settings = settings;
+        _fastLister = fastLister;
+        // Зависим от абстракции IExactDuplicateEngine; конкретику собираем из уже внедрённых
+        // репозиториев/хэшера/группировщика, чтобы не менять сигнатуру конструктора и все вызовы.
+        _exactEngine = new ExactDuplicateEngineV2(files, hash, grouper);
+    }
+
+    public ScanSession? GetResumableSession() => _sessions.GetUnfinished();
+
+    public void Pause() { if (IsRunning) { IsPaused = true; _gate.Reset(); } }
+    public void Resume() { IsPaused = false; _gate.Set(); }
+
+    public Task RunAsync(ScanOptions options, CancellationToken ct) =>
+        Task.Run(() => RunCore(options, ct), ct);
+
+    private void RunCore(ScanOptions options, CancellationToken ct)
+    {
+        IsRunning = true;
+        IsPaused = false;
+        _gate.Set();
+        _representativeRule = _settings.Current.DefaultRepresentativeRule;
+        _computePixelHash = _settings.Current.ComputePixelHash;
+        _options = options;
+        _enumNotices.Clear();
+        // Диагностика: фиксируем версию движка в логе — так видно, не запущена ли старая сборка.
+        AppLog.Write($"Старт скана. Движок: {EngineBuildInfo.Summary}");
+        Progress = new ScanProgress { Stage = ScanStage.Enumerating };
+        // Реальная отправка событий в UI идёт через сглаживатель (троттлинг ~5/сек по ТЗ + немедленная
+        // отправка смены этапа/завершения). Создаём на каждый запуск, освобождаем в finally.
+        _coalescer = new ProgressCoalescer<ScanProgress>(snap => ProgressChanged?.Invoke(snap),
+            TimeSpan.FromMilliseconds(200));
+        long sessionId = _sessions.Create(JsonSerializer.Serialize(options));
+        bool succeeded = false;
+
+        try
+        {
+            // P0-A: «что искать» не должно быть пустым — иначе скан бессмыслен.
+            if (options.IncludedCategories.Count == 0)
+                throw new InvalidOperationException("Не выбран ни один тип файлов для поиска.");
+
+            // Привязка к подключённым носителям (точки монтирования).
+            var catalog = _volumeService.SyncAndGetCatalog();
+            var volumesById = catalog.ToDictionary(v => v.Id);
+            var mountById = catalog
+                .Where(v => v.IsConnected && v.MountPath is not null)
+                .ToDictionary(v => v.Id, v => v.MountPath!);
+
+            var targets = ResolveTargets(options, catalog);
+            var scanScope = BuildScanScope(targets, mountById);
+
+            // Инкрементальность через USN-журнал: тома, не менявшиеся с прошлого скана, не перечисляем
+            // заново (на 1M файлов это экономит весь обход). Любая неоднозначность → полный пересбор.
+            string optionsHash = OptionsHash(options);
+            var (skipVolumes, journalSnaps) = PlanIncremental(targets, volumesById, options, optionsHash);
+
+            // === Этап 1: обход и метаданные (пропуская неизменившиеся тома) ===
+            Enumerate(targets, mountById, ct, sessionId, skipVolumes);
+
+            // === Этапы 2–5: точные дубликаты через движок v2 ===
+            // Потоковая воронка (size→partial→full→byte-verify→группы), без N+1 по размеру.
+            // ScanService здесь — фасад: движок делает воронку и точную группировку, мы только
+            // прокидываем прогресс/паузу/сессии через ScanReporter.
+            // P0-A: группировка должна учитывать не только текущий скоуп (том/папка), но и ВЫБРАННЫЕ
+            // категории — иначе старые записи невыбранных типов (из прежнего полного скана, ещё в БД)
+            // всплыли бы как удаляемые exact-группы при скане «только фото». Категорийность тут — защита.
+            Func<FileRecord, bool> inScope =
+                f => scanScope.Contains(f) && options.IncludedCategories.Contains(f.Category);
+
+            var exactRequest = new ExactScanRequest
+            {
+                MountById = mountById,
+                VolumesById = volumesById,
+                InScope = inScope,
+                ReadPlans = _readPlans,
+                MaxVolumeParallelism = _maxVolumeParallelism,
+                RequestedParallelism = Math.Max(1, options.Parallelism),
+                Rule = _representativeRule,
+                SessionId = sessionId
+            };
+            var exactResult = _exactEngine.ScanExact(exactRequest, new ScanReporter(this, sessionId, ct), ct);
+            // Счётчик групп кумулятивен по всем типам: точные + похожие фото + похожая музыка.
+            long exactTotal = exactResult.GroupsCreated, imageTotal = 0;
+
+            // === Этап 6: перцептивные признаки (опционально) ===
+            // P0-A: считаем признаки только для включённых категорий (нет смысла на исключённых типах).
+            bool wantImages = options.IncludedCategories.Contains(FileCategory.Image);
+            bool wantAudio = options.IncludedCategories.Contains(FileCategory.Audio);
+            if (options.Depth >= ScanDepth.WithSimilarImages && wantImages)
+                ComputeImagePerceptual(mountById, scanScope, ct, sessionId);
+            if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && _audio.IsAvailable && wantAudio)
+                ComputeAudioPerceptual(mountById, scanScope, ct, sessionId);
+
+            // === Этап 7: группировка похожих (точные уже построены движком) ===
+            // P1.5: порог из профиля (если задан) переопределяет дефолтный.
+            double imgThreshold = options.ImageProfile?.ImageThreshold ?? options.ImageThreshold;
+            double audThreshold = options.AudioProfile?.AudioThreshold ?? options.AudioThreshold;
+            // P1.5 (ревью): профиль применяем И на группировке — иначе файл с КЭШИРОВАННЫМ (из прошлого
+            // скана) pHash/fp обошёл бы фильтр размера/даты/папки. Складываем профиль в предикат scope.
+            Func<FileRecord, bool> imgInScope = options.ImageProfile is { } ip
+                ? f => inScope(f) && SimilarityProfileService.Matches(f.Category, f.Size, f.Created, f.Mtime, f.RelPath, ip)
+                : inScope;
+            Func<FileRecord, bool> audInScope = options.AudioProfile is { } apr
+                ? f => inScope(f) && SimilarityProfileService.Matches(f.Category, f.Size, f.Created, f.Mtime, f.RelPath, apr)
+                : inScope;
+            if (options.Depth >= ScanDepth.WithSimilarImages && wantImages)
+            {
+                SetStage(ScanStage.Grouping, sessionId);
+                _grouper.BuildSimilarImageGroups(imgThreshold, imgInScope, _representativeRule,
+                    g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId);
+            }
+            if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && wantAudio)
+                _grouper.BuildSimilarAudioGroups(audThreshold, audInScope, _representativeRule,
+                    g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId);
+
+            // Отметить тома как просканированные.
+            foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
+                _volumes.MarkScanned(vid);
+
+            // Сохранить состояние USN-журнала для быстрого следующего скана (после успешного индексирования).
+            StoreJournalState(journalSnaps, optionsHash);
+
+            SetStage(ScanStage.Completed, sessionId);
+            _sessions.Finish(sessionId, ScanStage.Completed);
+            succeeded = true;
+        }
+        catch (OperationCanceledException)
+        {
+            // Отмена: убираем ЧАСТИЧНО построенные группы этой сессии, чтобы прерванный скан не
+            // показывался как готовый результат, из которого можно удалять файлы (ревью P0.1).
+            CleanupSessionGroups(sessionId, partialOnly: true);
+            SetStage(ScanStage.Cancelled, sessionId);
+            _sessions.Finish(sessionId, ScanStage.Cancelled);
+        }
+        catch (Exception ex)
+        {
+            CleanupSessionGroups(sessionId, partialOnly: true);
+            Report(p => { p.Stage = ScanStage.Failed; p.Message = ex.Message; }, immediate: true);
+            _sessions.Finish(sessionId, ScanStage.Failed);
+        }
+        finally
+        {
+            // Группы прошлых сессий убираем ТОЛЬКО на успехе: тогда в результатах остаются лишь группы
+            // текущего завершённого скана. На отмене/сбое прошлый ЗАВЕРШЁННЫЙ результат СОХРАНЯЕМ —
+            // частичные группы текущей сессии уже сняты в catch (ClearGroupsInSession). Это и есть
+            // «preserve previous completed results on cancel/fail»: ResultsViewModel всё равно показывает
+            // последнюю успешную сессию (GetLatestCompletedSessionId), поэтому пользователь не теряет
+            // прежние результаты из-за прерванного скана.
+            if (succeeded) CleanupSessionGroups(sessionId, partialOnly: false);
+
+            // Отдать последнее накопленное состояние и закрыть троттлинг до сброса флагов,
+            // чтобы UI получил финальные счётчики, а поздних событий после завершения не было.
+            _coalescer?.Flush();
+            _coalescer?.Dispose();
+            _coalescer = null;
+            IsRunning = false;
+            IsPaused = false;
+            _gate.Set();
+        }
+    }
+
+    /// <summary>Подчистка групп. partialOnly=true — только текущая сессия; иначе — прошлые сессии.
+    /// Обёрнуто в try/catch, чтобы сбой подчистки не маскировал исходную ошибку скана.</summary>
+    private void CleanupSessionGroups(long sessionId, bool partialOnly)
+    {
+        try
+        {
+            if (partialOnly) _grouper.ClearGroupsInSession(sessionId);
+            else _grouper.ClearGroupsNotInSession(sessionId);
+        }
+        catch (Exception ex) { AppLog.Error("CleanupSessionGroups", ex); }
+    }
+
+    // ---------------- Этап 1: обход ----------------
+
+    private void Enumerate(List<ScanTarget> targets, Dictionary<long, string> mountById,
+        CancellationToken ct, long sessionId, HashSet<long> skipVolumes)
+    {
+        SetStage(ScanStage.Enumerating, sessionId);
+
+        // P1.2: для ЧИСТОГО скана папок (без целых томов) заполняем область сессии — тогда воронка считает
+        // кандидатов по ней, а не по всей старой БД. Для скана тома область = весь том, выгоды нет → не пишем.
+        bool useScope = _options.Folders.Count > 0 && _options.VolumeIds.Count == 0;
+        HashSet<long>? scopeIds = null;
+        if (useScope)
+        {
+            try { _files.ClearScope(sessionId); scopeIds = new HashSet<long>(); }
+            catch (Exception ex) { AppLog.Error("ClearScope", ex); }
+        }
+
+        // Накапливаем seen и решение о прунинге на ВЕСЬ том. Иначе при сканировании двух папок
+        // одного диска (режим Folders) prune после второй папки удалял бы из индекса записи первой
+        // (PruneVolume чистит весь том по seen текущей цели).
+        foreach (var volumeGroup in targets.GroupBy(t => t.VolumeId))
+        {
+            long volumeId = volumeGroup.Key;
+            if (!mountById.TryGetValue(volumeId, out var mountRoot)) continue;
+
+            // Инкрементальность: том не менялся с прошлого скана (по USN-журналу) — не перечисляем
+            // заново, существующий индекс актуален. Воронка ниже отработает по сохранённым данным.
+            if (skipVolumes.Contains(volumeId))
+            {
+                AppLog.Write($"Том {volumeId}: без изменений по USN-журналу — перечисление пропущено.");
+                continue;
+            }
+
+            var seen = new HashSet<long>();
+            var batch = new List<FileRecord>(MetaBatch);
+            var existingByPath = _options.Incremental
+                ? _files.GetExistingMetaByVolume(volumeId)
+                : new Dictionary<string, ExistingFileMeta>(StringComparer.OrdinalIgnoreCase);
+            bool wholeVolume = false;
+
+            foreach (var target in volumeGroup)
+            {
+                // Полное сканирование тома (выбор носителя в UI) — можно прунинговать весь том.
+                if (IsSameRoot(target.ScanRoot, mountRoot)) wholeVolume = true;
+
+                int metaDop = _readPlans.TryGetValue(volumeId, out var rp)
+                    ? rp.MetadataDop : Math.Max(1, _options.Parallelism);
+                var listerOpts = new Fde.FastListerOptions
+                {
+                    StatParallelism = metaDop,
+                    SkipHiddenSystem = _options.SkipHiddenSystem,    // не заходить в скрытые/системные папки (P1.5)
+                    OnBackend = d => NoteBackend(d, sessionId),      // режим бэкенда по диску + диагностика
+                    // Ошибки перечисления — это уведомления/недоступные ПАПКИ (целые поддеревья) и откат
+                    // MFT, а не пропуск одного файла. Не накручиваем FilesSkipped (это счётчик файлов) —
+                    // логируем. Реальный пропуск файлов считается на этапе хэширования.
+                    OnError = e => AppLog.Write($"Перечисление: {e.Path} — {e.Message}")
+                };
+                foreach (var ef in _fastLister.Enumerate(target.ScanRoot, listerOpts, ct))
+                {
+                    WaitGate(ct);
+                    try
+                    {
+                        // Системные папки и skip-файлы раньше отсекал EnumerateFilesSafe/SkipDir/SkipFile.
+                        // В USN-режиме движок выдаёт плоский список всего тома — $Recycle.Bin и т.п. отсекаем тут.
+                        var relForSkip = Path.GetRelativePath(mountRoot, ef.FullPath);
+                        if (IsUnderSystemFolder(relForSkip)) continue;
+                        if (SkipFileByAttrs(ef.Attributes, ef.Size, ef.FullPath)) continue;
+
+                        var fi = new FileEntry(ef.FullPath, ef.Size,
+                            new DateTimeOffset(DateTime.FromFileTimeUtc(ef.LastWriteRaw), TimeSpan.Zero),
+                            new DateTimeOffset(DateTime.FromFileTimeUtc(ef.CreationRaw), TimeSpan.Zero));
+
+                        var cleanFull = fi.FullClean;
+                        var rel = Path.GetRelativePath(mountRoot, cleanFull);
+                        var ext = Path.GetExtension(cleanFull);
+                        var category = DetectCategory(cleanFull, ext);
+
+                        // P0-A «Что искать»: файлы невыбранных категорий не индексируем —
+                        // exact/похожие будут строиться только по выбранным типам.
+                        if (!_options.IncludedCategories.Contains(category))
+                        {
+                            Report(p => p.FilesSkipped++);
+                            continue;
+                        }
+
+                        var record = new FileRecord
+                        {
+                            VolumeId = volumeId,
+                            RelPath = rel,
+                            Name = Path.GetFileName(cleanFull),
+                            Ext = string.IsNullOrEmpty(ext) ? null : ext,
+                            Size = fi.Length,
+                            Mtime = fi.LastWrite,
+                            Created = fi.Created,
+                            Category = category,
+                            ScanState = ScanState.Meta,
+                            LastIndexed = DateTimeOffset.Now
+                        };
+
+                        // Инкрементальность: переиспользуем хэши только при СТРОГОМ совпадении отпечатка
+                        // (размер + mtime + дата создания — точно, без допуска ±2с). Любое расхождение →
+                        // перехэшируем. Допуск ±2с был небезопасен: файл могли переписать содержимым того
+                        // же размера, а sync/backup-инструмент — сохранить близкий timestamp (раздел P0).
+                        // existing.Created == default — строка из старой БД до миграции «created»
+                        // (значение не сохранялось): тогда сверяем только size+mtime, чтобы не гнать
+                        // ОДНОРАЗОВЫЙ полный перехэш всей базы после обновления. Для свежих строк —
+                        // строгая тройная сверка.
+                        if (_options.Incremental &&
+                            existingByPath.TryGetValue(rel, out var existing) &&
+                            existing.Size == record.Size &&
+                            existing.Mtime == record.Mtime &&
+                            (existing.Created == default || existing.Created == record.Created))
+                        {
+                            seen.Add(existing.Id);
+                            Report(p => p.FilesSeen++);
+                            continue; // оставляем существующую запись с её хэшами
+                        }
+
+                        batch.Add(record);
+                        Report(p => { p.FilesSeen++; p.CurrentFile = cleanFull; });
+
+                        if (batch.Count >= MetaBatch)
+                        {
+                            _files.UpsertMetaBatch(batch);
+                            foreach (var b in batch) seen.Add(b.Id);
+                            batch.Clear();
+                            var snap = Snapshot();
+                            _sessions.UpdateProgress(sessionId, ScanStage.Enumerating, snap.FilesSeen, snap.FilesSkipped);
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch
+                    {
+                        Report(p => p.FilesSkipped++);
+                    }
+                }
+            }
+
+            if (batch.Count > 0)
+            {
+                _files.UpsertMetaBatch(batch);
+                foreach (var b in batch) seen.Add(b.Id);
+                batch.Clear();
+            }
+
+            // Прунинг — только при полном сканировании тома И когда выбраны ВСЕ категории: удаляем записи,
+            // которых больше нет. Для папок и для фильтра по типам не прунингуем — иначе снесли бы индекс
+            // невыбранных категорий (P0-A) или файлов вне папки.
+            if (wholeVolume && _options.AllCategoriesIncluded)
+            {
+                try { _files.PruneVolume(volumeId, seen); }
+                catch (Exception ex) { AppLog.Error("PruneVolume", ex); }
+            }
+
+            // P1.2: копим in-scope файлы тома; область запишем ОДНОЙ транзакцией после всех томов.
+            if (scopeIds != null) scopeIds.UnionWith(seen);
+        }
+
+        // P1.2: единая запись области (всё-или-ничего). При любом сбое область очищается, и движок
+        // безопасно идёт по ГЛОБАЛЬНОМУ запросу — надмножество безопасно, частичное подмножество нет.
+        if (scopeIds is { Count: > 0 })
+        {
+            try { _files.AddScope(sessionId, scopeIds); }
+            catch (Exception ex)
+            {
+                AppLog.Error("AddScope", ex);
+                try { _files.ClearScope(sessionId); } catch { /* fallback на глобальный запрос */ }
+            }
+        }
+    }
+
+    /// <summary>Совпадает ли корень сканирования с корнем тома (полное сканирование тома).</summary>
+    private static bool IsSameRoot(string scanRoot, string mountRoot)
+    {
+        try
+        {
+            var a = Path.GetFullPath(scanRoot).TrimEnd('\\', '/');
+            var b = Path.GetFullPath(mountRoot).TrimEnd('\\', '/');
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Режим бэкенда по каждому диску: честное сообщение (для НЕ-NTFS НЕ предлагаем админа) + строка
+    /// диагностики в лог. Сообщения по дискам НАКАПЛИВАЮТСЯ — один диск не затирает другой.
+    /// </summary>
+    private void NoteBackend(Fde.BackendDecision d, long sessionId)
+    {
+        // Диагностика (раздел Diagnostics): по этой строке в логе видно, какой бэкенд реально выбран.
+        AppLog.Write($"Backend ScanSessionId={sessionId} Root={d.Root} VolumeRoot={d.VolumeRoot} " +
+                     $"FileSystem={d.FileSystem} DriveType={d.DriveType} Backend={d.Backend} " +
+                     $"Reason={d.Reason} IsAdmin={d.IsElevated}");
+
+        var line = Fde.BackendMessages.BuildUserNotice(d);
+        if (!_enumNotices.Contains(line)) _enumNotices.Add(line);
+        Report(p => p.Message = string.Join("  ·  ", _enumNotices));
+    }
+
+    // ---------------- Инкрементальность (USN-журнал) ----------------
+
+    /// <summary>Хэш фильтров скана: при их изменении переиспользовать индекс нельзя — полный пересбор.</summary>
+    private static string OptionsHash(ScanOptions o)
+    {
+        var exts = string.Join(",", o.ExcludedExtensions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+        // Категории — тоже фильтр «что индексировать»: их смена должна форсировать полный пересбор
+        // (иначе на неизменившемся томе вновь включённая категория не проиндексировалась бы).
+        var cats = string.Join(",", o.IncludedCategories.Select(c => (int)c).OrderBy(x => x));
+        var s = $"{o.MinFileSize}|{o.MaxFileSize}|{o.SkipHiddenSystem}|{(int)o.Depth}|{exts}|{cats}";
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(s));
+        return Convert.ToHexString(hash);
+    }
+
+    /// <summary>
+    /// Решает, какие тома можно НЕ перечислять (без изменений по USN-журналу), и возвращает снимки
+    /// журнала для последующего сохранения. Только целый том NTFS под админом попадает в план; иначе
+    /// журнал недоступен и том сканируется полностью. Любая неоднозначность → полный пересбор.
+    /// </summary>
+    private (HashSet<long> skip, Dictionary<long, Fde.UsnJournalSnapshot> snaps) PlanIncremental(
+        List<ScanTarget> targets, Dictionary<long, VolumeRecord> volumesById, ScanOptions options, string optionsHash)
+    {
+        var skip = new HashSet<long>();
+        var snaps = new Dictionary<long, Fde.UsnJournalSnapshot>();
+        if (!options.Incremental || !OperatingSystem.IsWindows()) return (skip, snaps);
+
+        foreach (var grp in targets.GroupBy(t => t.VolumeId))
+        {
+            long vid = grp.Key;
+            if (grp.Count() != 1) continue;                                   // несколько целей на томе — не усложняем
+            if (!volumesById.TryGetValue(vid, out var vol) || vol.MountPath is null) continue;
+            if (!IsSameRoot(grp.First().ScanRoot, vol.MountPath)) continue;   // не целый том (папка) — без журнала
+
+            if (!Fde.UsnJournalReader.TryQuery(vol.MountPath, out var snap)) continue; // нет прав/не NTFS/нет журнала
+            snaps[vid] = snap;
+
+            var saved = _scanState.Get(vid);
+            var decision = IncrementalScanPlanner.Decide(
+                saved, journalAvailable: true, unchecked((long)snap.JournalId), snap.FirstUsn, snap.NextUsn,
+                IncrementalScanPlanner.EngineVersion, optionsHash);
+            AppLog.Write($"Инкрементальность тома «{vol.DisplayName}»: {decision.Kind} — {decision.Reason}.");
+            if (decision.Kind == ScanPlanKind.Unchanged) skip.Add(vid);
+            // Incremental (точечный реконсайл по записям журнала) пока не реализован → полный пересбор (безопасно).
+        }
+        return (skip, snaps);
+    }
+
+    /// <summary>
+    /// Сохранить снимок USN-журнала после успешного индексирования (для быстрого след. скана).
+    /// Намеренно храним NextUsn НА МОМЕНТ НАЧАЛА скана (нижняя граница): перечисление — это снимок
+    /// тома примерно на старте, а любое изменение во время/после скана продвигает журнал выше этого
+    /// значения, поэтому следующий скан увидит USN &gt; сохранённого и сделает пересбор (не пропустит
+    /// изменение). Хранить NextUsn конца скана было бы ОПАСНО: изменения, случившиеся во время обхода
+    /// и не попавшие в индекс, оказались бы «ниже водяного знака» и были бы пропущены как «без изменений».
+    /// </summary>
+    private void StoreJournalState(Dictionary<long, Fde.UsnJournalSnapshot> snaps, string optionsHash)
+    {
+        foreach (var (vid, snap) in snaps)
+        {
+            try
+            {
+                _scanState.Upsert(new VolumeScanState
+                {
+                    VolumeId = vid,
+                    JournalId = unchecked((long)snap.JournalId),
+                    NextUsn = snap.NextUsn,
+                    IndexedAt = DateTimeOffset.Now,
+                    EngineVersion = IncrementalScanPlanner.EngineVersion,
+                    OptionsHash = optionsHash
+                });
+            }
+            catch (Exception ex) { AppLog.Error("StoreJournalState", ex); }
+        }
+    }
+
+    private FileCategory DetectCategory(string fullPath, string? ext)
+    {
+        var categoryFromExt = CategoryDetector.FromExt(ext);
+        if (categoryFromExt != FileCategory.Other && !NeedsMagicProbe(ext))
+            return categoryFromExt;
+
+        try
+        {
+            using var fs = new FileStream(LongPath.Fix(fullPath), FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            Span<byte> head = stackalloc byte[CategoryDetector.ProbeBytes];
+            int read = 0;
+            while (read < head.Length)
+            {
+                int n = fs.Read(head.Slice(read));
+                if (n == 0) break;
+                read += n;
+            }
+            return CategoryDetector.Detect(head.Slice(0, read), ext);
+        }
+        catch
+        {
+            return CategoryDetector.FromExt(ext);
+        }
+    }
+
+    // ---------------- Этапы 2–4: хэш-воронка ----------------
+
+    private static bool NeedsMagicProbe(string? ext)
+        => string.IsNullOrWhiteSpace(ext) || MagicProbeExtensions.Contains(ext);
+
+    /// <summary>
+    /// Адаптер прогресса/управления для <see cref="IExactDuplicateEngine"/>. Троттлинг (через
+    /// <c>Report</c>/coalescer), сессии и пауза/отмена остаются здесь — движок только дёргает методы.
+    /// Вложенный класс имеет доступ к приватным членам <see cref="ScanService"/>.
+    /// </summary>
+    private sealed class ScanReporter : IExactScanReporter
+    {
+        private readonly ScanService _s;
+        private readonly long _sessionId;
+        private readonly CancellationToken _ct;
+
+        public ScanReporter(ScanService s, long sessionId, CancellationToken ct)
+        {
+            _s = s;
+            _sessionId = sessionId;
+            _ct = ct;
+        }
+
+        public void WaitGate() => _s.WaitGate(_ct);
+        public void Stage(ScanStage stage) => _s.SetStage(stage, _sessionId);
+        public void StageQuiet(ScanStage stage) => _s.SetStageQuiet(stage);
+        public void FileHashed(string path, long bytes) =>
+            _s.Report(p => { p.FilesHashed++; p.BytesProcessed += bytes; p.CurrentFile = path; });
+        public void Skipped() => _s.Report(p => p.FilesSkipped++);
+        public void ChangedSkipped() => _s.Report(p => { p.FilesSkipped++; p.FilesChangedSkipped++; });
+        public void Fraction(double value) => _s.Report(p => p.Fraction = value);
+        public void ExactGroups(long count) => _s.Report(p => p.GroupsFound = count);
+        public void SessionTick()
+        {
+            var snap = _s.Snapshot();
+            _s._sessions.UpdateProgress(_sessionId, snap.Stage, snap.FilesSeen, snap.FilesSkipped);
+        }
+    }
+
+    // ---------------- Этап 6: перцептивные признаки ----------------
+
+    private void ComputeImagePerceptual(Dictionary<long, string> mountById, ScanScope scanScope,
+        CancellationToken ct, long sessionId)
+    {
+        long total = _files.CountNeedingPerceptual(FileCategory.Image, sessionId);
+        if (total == 0) return; // нет работы — не мигаем этапом «Анализ похожих»
+        SetStage(ScanStage.Perceptual, sessionId);
+
+        // P1.5: профиль похожести — предфильтр по размеру/дате/папке ДО расчёта pHash (экономим работу).
+        var profile = _options.ImageProfile;
+        long skippedByProfile = 0, computed = 0;
+
+        // Постранично (keyset по id): не держим всю библиотеку изображений в памяти.
+        long processedImages = 0, afterId = 0;
+        while (true)
+        {
+            WaitGate(ct);
+            var page = _files.GetNeedingPerceptualPage(FileCategory.Image, afterId, HashBatch, sessionId);
+            if (page.Count == 0) break;
+            afterId = page[^1].Id;
+
+            var chunk = page.Where(f => mountById.ContainsKey(f.VolumeId) && scanScope.Contains(f)).ToList();
+            if (profile is not null)
+            {
+                int before = chunk.Count;
+                chunk = chunk.Where(f => SimilarityProfileService.Matches(
+                    f.Category, f.Size, f.Created, f.Mtime, f.RelPath, profile)).ToList();
+                skippedByProfile += before - chunk.Count;
+            }
+            ComputeParallel(chunk, mountById, (f, path) =>
+            {
+                f.PHash = _images.ComputePHash(path, ct);
+                if (_computePixelHash) f.PixelHash = _images.ComputePixelHash(path, ct);
+                if (f.PHash is not null && f.ScanState < ScanState.Perceptual)
+                    f.ScanState = ScanState.Perceptual;
+            }, ct);
+            var done = chunk.Where(f => f.PHash is not null).ToList();
+            _files.UpdateComputedBatch(done);
+            computed += done.Count;
+
+            processedImages += page.Count;
+            Report(p => p.Fraction = Math.Min(1.0, processedImages / (double)total));
+        }
+
+        // Debug-счётчики (раздел P1.5: «почему похожие не нашлись»).
+        AppLog.Write($"Похожие фото: кандидатов {total}, отфильтровано профилем {skippedByProfile}, " +
+                     $"посчитано pHash {computed}, порог {(profile?.ImageThreshold ?? _options.ImageThreshold):0.00}");
+    }
+
+    private void ComputeAudioPerceptual(Dictionary<long, string> mountById, ScanScope scanScope,
+        CancellationToken ct, long sessionId)
+    {
+        long total = _files.CountNeedingPerceptual(FileCategory.Audio, sessionId);
+        if (total == 0) return; // нет работы — не мигаем этапом «Анализ похожих»
+        SetStage(ScanStage.Perceptual, sessionId);
+
+        var profile = _options.AudioProfile;
+        long skippedByProfile = 0, computed = 0;
+
+        // Постранично (keyset по id): не держим всю фонотеку в памяти.
+        long processedAudio = 0, afterId = 0;
+        while (true)
+        {
+            WaitGate(ct);
+            var page = _files.GetNeedingPerceptualPage(FileCategory.Audio, afterId, HashBatch, sessionId);
+            if (page.Count == 0) break;
+            afterId = page[^1].Id;
+
+            // fpcalc — внешний процесс; параллелизм держим умеренным (последовательно по chunk).
+            foreach (var f in page)
+            {
+                WaitGate(ct);
+                if (!mountById.ContainsKey(f.VolumeId) || !scanScope.Contains(f)) continue;
+                // P1.5: профиль аудио — предфильтр по размеру/дате/папке до дорогого fpcalc.
+                if (profile is not null &&
+                    !SimilarityProfileService.Matches(f.Category, f.Size, f.Created, f.Mtime, f.RelPath, profile))
+                { skippedByProfile++; continue; }
+                var path = FullPath(f, mountById);
+                if (path is null) continue;
+                f.AudioFp = _audio.ComputeFingerprint(path, ct);
+                if (f.AudioFp is not null) { f.ScanState = ScanState.Perceptual; computed++; }
+                Report(p => { p.FilesHashed++; p.CurrentFile = path; });
+            }
+            _files.UpdateComputedBatch(page.Where(f => f.AudioFp is not null).ToList());
+
+            processedAudio += page.Count;
+            Report(p => p.Fraction = Math.Min(1.0, processedAudio / (double)total));
+        }
+
+        AppLog.Write($"Похожая музыка: кандидатов {total}, отфильтровано профилем {skippedByProfile}, " +
+                     $"посчитано отпечатков {computed}, порог {(profile?.AudioThreshold ?? _options.AudioThreshold):0.00}");
+    }
+
+    // ---------------- Вспомогательное ----------------
+
+    private void ComputeParallel(List<FileRecord> files, Dictionary<long, string> mountById,
+        Action<FileRecord, string> compute, CancellationToken ct)
+    {
+        // Та же воронка параллелизма на каждый том, что и в exact-движке (общий VolumeParallelExecutor):
+        // HDD читается последовательно, SSD параллельно, общий потолок не даёт переподписки по томам.
+        VolumeParallelExecutor.RunByVolume(
+            files,
+            f => f.VolumeId,
+            vid => _readPlans.TryGetValue(vid, out var plan) ? plan.ContentDop : Math.Max(1, _options.Parallelism),
+            _maxVolumeParallelism,
+            ct,
+            f =>
+            {
+                WaitGate(ct);
+                var path = FullPath(f, mountById);
+                if (path is null || !File.Exists(LongPath.Fix(path))) return;
+                try
+                {
+                    compute(f, path);
+                    Report(p => { p.FilesHashed++; p.BytesProcessed += f.Size; p.CurrentFile = path; });
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (FileChangedDuringScanException)
+                {
+                    // Файл писали во время сверки: не смешиваем старый размер с новым содержимым.
+                    // Хэш не сохраняется (остаётся null) — файл попадёт в следующий инкрементальный скан.
+                    Report(p => { p.FilesSkipped++; p.FilesChangedSkipped++; });
+                }
+                catch { Report(p => p.FilesSkipped++); } // битый/занятый файл — пропуск (NFR-1)
+            });
+    }
+
+    private static string? FullPath(FileRecord f, Dictionary<long, string> mountById) =>
+        mountById.TryGetValue(f.VolumeId, out var mp) ? Path.Combine(mp, f.RelPath) : null;
+
+    private static string NormalizeRelPath(string? relPath)
+    {
+        if (string.IsNullOrWhiteSpace(relPath) || relPath == ".") return string.Empty;
+        return relPath
+            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+            .TrimStart(Path.DirectorySeparatorChar)
+            .TrimEnd(Path.DirectorySeparatorChar);
+    }
+
+    private void WaitGate(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        _gate.Wait(ct);
+    }
+
+    private void SetStage(ScanStage stage, long sessionId)
+    {
+        // Смена этапа — немедленно (минуя троттлинг): пользователь сразу видит «Полный хэш» и т.п.
+        Report(p => { p.Stage = stage; p.Fraction = null; }, immediate: true);
+        var snap = Snapshot();
+        _sessions.UpdateProgress(sessionId, stage, snap.FilesSeen, snap.FilesSkipped);
+    }
+
+    /// <summary>Снимок прогресса под локом — для согласованного чтения счётчиков из фонового потока.</summary>
+    private ScanProgress Snapshot()
+    {
+        lock (_progressLock) return Progress.Clone();
+    }
+
+    public void Dispose()
+    {
+        _coalescer?.Dispose();
+        _gate.Dispose();
+    }
+
+    private void SetStageQuiet(ScanStage stage)
+    {
+        // Внутри воронки этот метод зовётся часто; реально отдаём событие только при смене этапа.
+        bool changed;
+        lock (_progressLock) changed = Progress.Stage != stage;
+        if (changed) Report(p => p.Stage = stage, immediate: true);
+    }
+
+    private void Report(Action<ScanProgress> mutate, bool immediate = false)
+    {
+        ScanProgress snapshot;
+        lock (_progressLock)
+        {
+            mutate(Progress);
+            snapshot = Progress.Clone();
+        }
+        var coalescer = _coalescer;
+        if (coalescer is null) ProgressChanged?.Invoke(snapshot); // вне скана (на всякий случай)
+        else coalescer.Report(snapshot, immediate);
+    }
+
+    // ---------------- Цели сканирования ----------------
+
+    private sealed record ScanTarget(long VolumeId, string ScanRoot);
+
+    private sealed class ScanScope
+    {
+        private readonly HashSet<long> _wholeVolumes = new();
+        private readonly Dictionary<long, List<string>> _folderRelPaths = new();
+
+        public void AddWholeVolume(long volumeId) => _wholeVolumes.Add(volumeId);
+
+        public void AddFolder(long volumeId, string relPath)
+        {
+            if (!_folderRelPaths.TryGetValue(volumeId, out var list))
+            {
+                list = new List<string>();
+                _folderRelPaths[volumeId] = list;
+            }
+
+            list.Add(NormalizeRelPath(relPath));
+        }
+
+        public bool Contains(FileRecord file)
+        {
+            if (_wholeVolumes.Contains(file.VolumeId)) return true;
+            if (!_folderRelPaths.TryGetValue(file.VolumeId, out var folders)) return false;
+
+            var relPath = NormalizeRelPath(file.RelPath);
+            return folders.Any(folder =>
+                string.IsNullOrEmpty(folder) ||
+                string.Equals(relPath, folder, StringComparison.OrdinalIgnoreCase) ||
+                relPath.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private static ScanScope BuildScanScope(List<ScanTarget> targets, Dictionary<long, string> mountById)
+    {
+        var scope = new ScanScope();
+        foreach (var target in targets)
+        {
+            if (!mountById.TryGetValue(target.VolumeId, out var mountRoot)) continue;
+
+            if (IsSameRoot(target.ScanRoot, mountRoot))
+            {
+                scope.AddWholeVolume(target.VolumeId);
+                continue;
+            }
+
+            var rel = Path.GetRelativePath(mountRoot, target.ScanRoot);
+            if (rel == ".") scope.AddWholeVolume(target.VolumeId);
+            else scope.AddFolder(target.VolumeId, rel);
+        }
+
+        return scope;
+    }
+
+    private List<ScanTarget> ResolveTargets(ScanOptions options, List<VolumeRecord> catalog)
+    {
+        var byId = catalog.ToDictionary(v => v.Id);
+        var targets = new List<ScanTarget>();
+
+        foreach (var vid in options.VolumeIds)
+            if (byId.TryGetValue(vid, out var v) && v.IsConnected && v.MountPath is not null)
+                targets.Add(new ScanTarget(vid, v.MountPath));
+
+        foreach (var folder in options.Folders)
+        {
+            var root = Path.GetPathRoot(folder);
+            if (root is null) continue;
+            var vol = catalog.FirstOrDefault(v =>
+                v.IsConnected && v.MountPath is not null &&
+                string.Equals(Path.GetPathRoot(v.MountPath), Path.GetPathRoot(root), StringComparison.OrdinalIgnoreCase));
+            if (vol is not null)
+                targets.Add(new ScanTarget(vol.Id, folder));
+        }
+
+        // NFR-7: план чтения на каждый том. HDD/съёмные — последовательно, SSD/NVMe — параллельно.
+        // Раньше один HDD среди целей делал весь скан однопоточным и убивал SSD/NVMe.
+        _readPlans = VolumeReadPlanner.Build(
+            targets.Select(t => t.VolumeId), byId, Math.Max(1, options.Parallelism));
+        _maxVolumeParallelism = Math.Max(1, _readPlans.Count);
+        foreach (var p in _readPlans.Values)
+            AppLog.Write($"План чтения тома «{p.Label}»: {(p.PreferSequential ? "последовательно" : "параллельно")}, " +
+                         $"метаданные DOP={p.MetadataDop}, содержимое DOP={p.ContentDop}");
+        return targets;
+    }
+
+    // Порт старых SkipFile/SystemFolders на атрибуты (USN/GetFileAttributesEx дают uint attrs, а не FileInfo).
+    private bool SkipFileByAttrs(uint attrs, long size, string path)
+    {
+        const uint HIDDEN = 0x2, SYSTEM = 0x4;
+        if (_options.SkipHiddenSystem && (attrs & (HIDDEN | SYSTEM)) != 0) return true;
+        if (size < _options.MinFileSize) return true;
+        if (_options.MaxFileSize is long max && max > 0 && size > max) return true;
+        if (_options.ExcludedExtensions.Count > 0 &&
+            _options.ExcludedExtensions.Contains(Path.GetExtension(path))) return true;
+        return false;
+    }
+
+    /// <summary>Файл лежит в системной папке ($Recycle.Bin, System Volume Information и т.п.) — пропустить.</summary>
+    private static bool IsUnderSystemFolder(string relPath)
+    {
+        foreach (var seg in relPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            if (seg.Length > 0 && SystemFolders.Contains(seg)) return true;
+        return false;
+    }
+
+    private readonly record struct FileEntry(string FullClean, long Length, DateTimeOffset LastWrite, DateTimeOffset Created);
+}

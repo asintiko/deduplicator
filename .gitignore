@@ -1,0 +1,23 @@
+## Build output
+bin/
+obj/
+dist/
+artifacts/
+*.user
+
+## Scratch / manual test corpora / local agent config (never in repo)
+.codex_manual/
+.claude/
+scratchpad/
+
+## Rider / VS
+.idea/
+.vs/
+
+## Optional external binary (drop it in, see tools/README.txt)
+tools/fpcalc.exe
+
+## App runtime data (created under %LOCALAPPDATA%, never in repo)
+*.db
+*.db-wal
+*.db-shm

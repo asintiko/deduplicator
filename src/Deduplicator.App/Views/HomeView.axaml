@@ -1,0 +1,275 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Deduplicator.App.Views.HomeView">
+
+    <UserControl.Styles>
+        <Style Selector="Button.homeAction">
+            <Setter Property="MinHeight" Value="150"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="18"/>
+            <Setter Property="Background" Value="{DynamicResource SurfaceBackground}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource SurfaceBorder}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+        </Style>
+        <Style Selector="Button.homeAction:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource SurfaceAlt}"/>
+        </Style>
+        <Style Selector="Button.homeSmall">
+            <Setter Property="MinHeight" Value="44"/>
+            <Setter Property="Padding" Value="14,8"/>
+        </Style>
+        <Style Selector="Border.metric">
+            <Setter Property="Background" Value="{DynamicResource SurfaceBackground}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource SurfaceBorder}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="16"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="Auto,*" Margin="28,24">
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Classes="h1" Text="Главная"/>
+                <TextBlock Classes="muted" Text="Основные действия с дисками и дубликатами" Margin="0,4,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Top">
+                <ProgressBar IsIndeterminate="True" Width="90" VerticalAlignment="Center" IsVisible="{Binding IsBusy}"/>
+                <Button Classes="ghost" Command="{Binding RefreshCommand}" IsEnabled="{Binding !IsBusy}"
+                        ToolTip.Tip="Обновить список подключённых дисков и статистику">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <PathIcon Data="{StaticResource IconRefresh}"/>
+                        <TextBlock Text="Обновить"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1">
+            <StackPanel Spacing="18">
+                <Border Classes="card" Padding="20">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <Border Grid.Column="0" Width="56" Height="56" CornerRadius="14"
+                                Background="{DynamicResource AccentSoft}" VerticalAlignment="Top">
+                            <PathIcon Data="{StaticResource IconCheckCircle}" Width="30" Height="30"
+                                      Foreground="{DynamicResource AccentBrush}"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="16,0" Spacing="6">
+                            <TextBlock Text="{Binding StatusTitle}" FontSize="21" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding StatusText}" Classes="muted" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding SafetyText}" FontSize="13"
+                                       Foreground="{DynamicResource SuccessBrush}" TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Spacing="4" MinWidth="180" VerticalAlignment="Center">
+                            <TextBlock Classes="caption" Text="Можно освободить"/>
+                            <TextBlock FontSize="26" FontWeight="SemiBold" Text="{Binding ReclaimableText}"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Grid ColumnDefinitions="*,*,*,*">
+                    <Border Grid.Column="0" Classes="metric">
+                        <StackPanel Spacing="4">
+                            <TextBlock Classes="caption" Text="Подключено"/>
+                            <TextBlock FontSize="25" FontWeight="SemiBold" Text="{Binding ConnectedDisksText}"/>
+                            <TextBlock Classes="caption" Text="дисков сейчас"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="1" Classes="metric" Margin="12,0,0,0">
+                        <StackPanel Spacing="4">
+                            <TextBlock Classes="caption" Text="В архиве"/>
+                            <TextBlock FontSize="25" FontWeight="SemiBold" Text="{Binding CatalogDisksText}"/>
+                            <TextBlock Classes="caption" Text="знакомых дисков"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="2" Classes="metric" Margin="12,0,0,0">
+                        <StackPanel Spacing="4">
+                            <TextBlock Classes="caption" Text="Запомнено"/>
+                            <TextBlock FontSize="25" FontWeight="SemiBold" Text="{Binding IndexedFilesText}"/>
+                            <TextBlock Classes="caption" Text="файлов"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="3" Classes="metric" Margin="12,0,0,0">
+                        <StackPanel Spacing="4">
+                            <TextBlock Classes="caption" Text="Найдено"/>
+                            <TextBlock FontSize="25" FontWeight="SemiBold" Text="{Binding DuplicateGroupsText}"/>
+                            <TextBlock Classes="caption" Text="групп дублей"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto">
+                    <Button x:Name="OnboardingHomeDuplicates"
+                            Grid.Row="0" Grid.Column="0" Classes="homeAction" Command="{Binding OpenDuplicateSearchCommand}"
+                            ToolTip.Tip="Выбрать диски и найти одинаковые файлы, похожие фото и музыку">
+                        <Grid RowDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Border Width="44" Height="44" CornerRadius="12" Background="{DynamicResource AccentSoft}">
+                                    <PathIcon Data="{StaticResource IconSearch}" Width="24" Height="24"
+                                              Foreground="{DynamicResource AccentBrush}"/>
+                                </Border>
+                                <TextBlock Text="Найти дубликаты" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="1" Text="Фото, музыка, видео, документы"
+                                       Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
+                            <TextBlock Grid.Row="2" Text="Начать проверку" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource AccentBrush}"/>
+                        </Grid>
+                    </Button>
+
+                    <Button Grid.Row="0" Grid.Column="1" Classes="homeAction" Command="{Binding OpenCleanupCommand}" Margin="14,0,0,0"
+                            ToolTip.Tip="Найти временные файлы, пустые папки и битые ярлыки">
+                        <Grid RowDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Border Width="44" Height="44" CornerRadius="12" Background="#EAF7ED">
+                                    <PathIcon Data="{StaticResource IconBroom}" Width="24" Height="24"
+                                              Foreground="{DynamicResource SuccessBrush}"/>
+                                </Border>
+                                <TextBlock Text="Очистить мусор" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="1" Text="Пустые папки, временные файлы, битые ярлыки"
+                                       Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
+                            <TextBlock Grid.Row="2" Text="Найти лишнее" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource SuccessBrush}"/>
+                        </Grid>
+                    </Button>
+
+                    <Button Grid.Row="1" Grid.Column="0" Classes="homeAction" Command="{Binding OpenDiskHealthCommand}" Margin="0,14,0,0"
+                            ToolTip.Tip="Проверить состояние подключённых накопителей">
+                        <Grid RowDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Border Width="44" Height="44" CornerRadius="12" Background="#FFF3E2">
+                                    <PathIcon Data="{StaticResource IconHealth}" Width="24" Height="24"
+                                              Foreground="{DynamicResource WarningBrush}"/>
+                                </Border>
+                                <TextBlock Text="Проверить диски" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="1" Text="Состояние накопителей и предупреждения"
+                                       Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
+                            <TextBlock Grid.Row="2" Text="Открыть проверку" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource WarningBrush}"/>
+                        </Grid>
+                    </Button>
+
+                    <Button Grid.Row="1" Grid.Column="1" Classes="homeAction" Command="{Binding OpenDiskArchiveCommand}" Margin="14,14,0,0"
+                            ToolTip.Tip="Посмотреть диски, которые программа уже запомнила">
+                        <Grid RowDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <Border Width="44" Height="44" CornerRadius="12" Background="#EEF0FF">
+                                    <PathIcon Data="{StaticResource IconDatabase}" Width="24" Height="24"
+                                              Foreground="#5865D9"/>
+                                </Border>
+                                <TextBlock Text="Архив дисков" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="1" Text="Каталог файлов остаётся доступен после отключения"
+                                       Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
+                            <TextBlock Grid.Row="2" Text="Посмотреть диски" FontWeight="SemiBold"
+                                       Foreground="#5865D9"/>
+                        </Grid>
+                    </Button>
+                </Grid>
+
+                <Grid ColumnDefinitions="*,Auto">
+                    <Border Classes="card" Padding="18">
+                        <Grid RowDefinitions="Auto,*">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel>
+                                    <TextBlock Text="Последние диски" FontSize="19" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding LastSnapshotText}" Classes="caption" Margin="0,3,0,0"/>
+                                </StackPanel>
+                                <Button Grid.Column="1" Classes="ghost homeSmall" Command="{Binding OpenSavedFilesCommand}"
+                                        ToolTip.Tip="Открыть сохранённый список файлов">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <PathIcon Data="{StaticResource IconFolder}" Width="16" Height="16"/>
+                                        <TextBlock Text="Файлы"/>
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <StackPanel Grid.Row="1" Margin="0,14,0,0" Spacing="8">
+                                <TextBlock Text="{Binding NoDisksText}" Classes="muted"
+                                           IsVisible="{Binding NoDisksText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <ItemsControl ItemsSource="{Binding RecentDisks}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,3">
+                                                <Border Grid.Column="0" Width="34" Height="34" CornerRadius="9"
+                                                        Background="{DynamicResource SurfaceAlt}">
+                                                    <PathIcon Data="{StaticResource IconHdd}" Width="18" Height="18"
+                                                              Foreground="{DynamicResource TextSecondary}"/>
+                                                </Border>
+                                                <StackPanel Grid.Column="1" Margin="10,0" Spacing="2">
+                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis" MaxWidth="280"/>
+                                                        <TextBlock Text="{Binding StatusText}" Classes="caption"/>
+                                                    </StackPanel>
+                                                    <TextBlock Classes="caption">
+                                                        <Run Text="{Binding FilesText}"/><Run Text="  ·  "/>
+                                                        <Run Text="{Binding LastScanText}"/>
+                                                    </TextBlock>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="2" Text="{Binding CapacityText}" Classes="caption"
+                                                           VerticalAlignment="Center"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <StackPanel Grid.Column="1" Width="230" Spacing="10" Margin="14,0,0,0">
+                        <TextBlock Text="Дополнительно" FontSize="17" FontWeight="SemiBold" Margin="2,0,0,2"/>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenDuplicateResultsCommand}"
+                                ToolTip.Tip="Открыть уже найденные дубликаты">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconLayers}" Width="16" Height="16"/>
+                                <TextBlock Text="Результаты"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenSavedFilesCommand}"
+                                ToolTip.Tip="Открыть файлы из архива дисков">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconFolder}" Width="16" Height="16"/>
+                                <TextBlock Text="Файлы в архиве"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenCrossDiskCommand}"
+                                ToolTip.Tip="Найти одинаковые файлы на разных дисках по сохранённому списку">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconDatabase}" Width="16" Height="16"/>
+                                <TextBlock Text="Между дисками"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenCleanArchiveCommand}"
+                                ToolTip.Tip="Собрать по одной копии каждого файла в отдельную папку">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconArchive}" Width="16" Height="16"/>
+                                <TextBlock Text="Чистый архив"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenStatisticsCommand}"
+                                ToolTip.Tip="Посмотреть итоги проверок и сколько места можно освободить">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconChart}" Width="16" Height="16"/>
+                                <TextBlock Text="Итоги"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost homeSmall" Command="{Binding OpenJournalCommand}"
+                                ToolTip.Tip="История удаления и восстановления файлов">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconHistory}" Width="16" Height="16"/>
+                                <TextBlock Text="История"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

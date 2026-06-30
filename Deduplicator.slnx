@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Deduplicator.App/Deduplicator.App.csproj" />
+    <Project Path="src/Deduplicator.Core/Deduplicator.Core.csproj" />
+    <Project Path="src/FastDedup.Engine/FastDedup.Engine.csproj" />
+    <Project Path="src/FastDedup.Cli/FastDedup.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Deduplicator.Core.Tests/Deduplicator.Core.Tests.csproj" />
+  </Folder>
+</Solution>

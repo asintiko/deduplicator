@@ -1,0 +1,139 @@
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Deduplicator.App.Infrastructure;
+using Deduplicator.App.Localization;
+using Deduplicator.App.ViewModels.Items;
+using Deduplicator.Core.Data;
+using Deduplicator.Core.Services;
+
+namespace Deduplicator.App.ViewModels;
+
+/// <summary>Главный экран — каталог носителей и сводка по базе (экран 1).</summary>
+public partial class VolumesViewModel : PageViewModel
+{
+    private readonly IVolumeService _volumes;
+    private readonly VolumeRepository _volumeRepo;
+    private readonly FileRepository _files;
+    private readonly IDriveWatcher _watcher;
+    private readonly NavigationService _nav;
+    private bool _loading;
+
+    public override string Title => Strings.VolumesTitle;
+
+    public ObservableCollection<VolumeItemViewModel> Volumes { get; } = new();
+
+    [ObservableProperty] private bool _isBusy;
+    [ObservableProperty] private int _totalVolumes;
+    [ObservableProperty] private string _totalFilesText = "0";
+    [ObservableProperty] private string _totalSizeText = "—";
+
+    [ObservableProperty] private bool _showRemoveConfirm;
+    private VolumeItemViewModel? _pendingRemove;
+
+    public VolumesViewModel(IVolumeService volumes, VolumeRepository volumeRepo, FileRepository files,
+        IDriveWatcher watcher, NavigationService nav)
+    {
+        _volumes = volumes;
+        _volumeRepo = volumeRepo;
+        _files = files;
+        _watcher = watcher;
+        _nav = nav;
+        // Живое обновление каталога при подключении/извлечении носителя.
+        _watcher.DrivesChanged += () => Dispatcher.UIThread.Post(() => { if (!_loading) _ = RefreshAsync(); });
+    }
+
+    public override void OnNavigatedTo() => _ = RefreshAsync();
+
+    /// <summary>Уход со страницы сбрасывает незавершённый диалог удаления — иначе он «всплывёт» при возврате.</summary>
+    public override void OnNavigatedFrom()
+    {
+        ShowRemoveConfirm = false;
+        _pendingRemove = null;
+    }
+
+    [RelayCommand]
+    private async Task RefreshAsync()
+    {
+        if (_loading) return;
+        _loading = true;
+        IsBusy = true;
+        try
+        {
+            var (items, total) = await Task.Run(() =>
+            {
+                var catalog = _volumes.SyncAndGetCatalog();
+                var (files, bytes) = _files.TotalIndexed();
+                return (catalog.Select(v => new VolumeItemViewModel(v)).ToList(), (files, bytes));
+            });
+
+            Volumes.Clear();
+            foreach (var i in items) Volumes.Add(i);
+            TotalVolumes = items.Count;
+            TotalFilesText = $"{total.files:N0}";
+            TotalSizeText = Format.Bytes(total.bytes);
+        }
+        finally
+        {
+            IsBusy = false;
+            _loading = false;
+        }
+    }
+
+    [RelayCommand]
+    private void Remove(VolumeItemViewModel? item)
+    {
+        if (item is null) return;
+        _pendingRemove = item;
+        ShowRemoveConfirm = true;
+    }
+
+    [RelayCommand]
+    private void CancelRemove() { ShowRemoveConfirm = false; _pendingRemove = null; }
+
+    [RelayCommand]
+    private async Task ConfirmRemoveAsync()
+    {
+        ShowRemoveConfirm = false;
+        var item = _pendingRemove;
+        _pendingRemove = null;
+        if (item is null) return;
+        await Task.Run(() => _volumeRepo.Delete(item.Id));
+        await RefreshAsync();
+    }
+
+    [RelayCommand]
+    private void Scan(VolumeItemViewModel? item)
+    {
+        if (item is null) return;
+        _nav.Get<ScanViewModel>().Preselect(item.Id);
+        _nav.To<ScanViewModel>();
+    }
+
+    [RelayCommand]
+    private void OpenInExplorer(VolumeItemViewModel? item)
+    {
+        if (item?.MountPath is null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = item.MountPath,
+                UseShellExecute = true
+            });
+        }
+        catch { /* нет прав/носитель занят — игнорируем */ }
+    }
+
+    [RelayCommand]
+    private void Explore(VolumeItemViewModel? item)
+    {
+        if (item is null) return;
+        _nav.Get<ExplorerViewModel>().Select(item.Id);
+        _nav.To<ExplorerViewModel>();
+    }
+}

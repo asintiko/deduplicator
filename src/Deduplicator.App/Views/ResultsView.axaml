@@ -1,0 +1,377 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             xmlns:conv="clr-namespace:Deduplicator.App.Converters"
+             x:Class="Deduplicator.App.Views.ResultsView">
+
+    <UserControl.Resources>
+        <!-- ===== Плитка файла ===== -->
+        <DataTemplate x:Key="FileTile">
+            <Border Width="194" Margin="6" CornerRadius="10" ClipToBounds="True"
+                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1"
+                    Background="{DynamicResource SurfaceAlt}">
+                <StackPanel>
+                    <Panel Height="130" Background="{DynamicResource HoverBackground}">
+                        <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
+                        <PathIcon Data="{Binding CategoryIcon}" Width="40" Height="40"
+                                  Foreground="{DynamicResource TextTertiary}"
+                                  IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNull}}"/>
+                        <Border IsVisible="{Binding IsRepresentative}" VerticalAlignment="Top" HorizontalAlignment="Left"
+                                Margin="8" CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <PathIcon Data="{StaticResource IconStar}" Width="12" Height="12" Foreground="White"/>
+                                <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                            </StackPanel>
+                        </Border>
+                        <CheckBox IsChecked="{Binding IsMarked, Mode=TwoWay}" VerticalAlignment="Top"
+                                  HorizontalAlignment="Right" Margin="6" IsEnabled="{Binding CanMark}"
+                                  ToolTip.Tip="{x:Static loc:Strings.MarkForDeletion}"/>
+                    </Panel>
+                    <StackPanel Margin="10,8" Spacing="3">
+                        <TextBlock Text="{Binding Name}" FontWeight="Medium" FontSize="13"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding VolumeText}" Classes="caption" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding RelPath}" Classes="caption" TextTrimming="CharacterEllipsis"/>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="{Binding SizeText}" Classes="caption"/>
+                            <Border IsVisible="{Binding ShowSimilarity}" CornerRadius="5" Padding="6,1"
+                                    Background="{DynamicResource AccentSoft}">
+                                <TextBlock Text="{Binding SimilarityText}" FontSize="11"
+                                           Foreground="{DynamicResource AccentBrush}"/>
+                            </Border>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Button Classes="ghost" Padding="3" IsEnabled="{Binding IsAvailable}"
+                                    Command="{Binding $parent[UserControl].DataContext.OpenContainingCommand}"
+                                    CommandParameter="{Binding}" ToolTip.Tip="{x:Static loc:Strings.OpenFolder}">
+                                <PathIcon Data="{StaticResource IconFolder}" Width="13" Height="13"/>
+                            </Button>
+                            <Border IsVisible="{Binding IsProtected}" CornerRadius="5" Padding="6,1" VerticalAlignment="Center"
+                                    Background="{DynamicResource SuccessBrush}">
+                                <TextBlock Text="{x:Static loc:Strings.Protected}" FontSize="10" Foreground="White"/>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+
+        <!-- ===== Карточка группы ===== -->
+        <DataTemplate x:Key="GroupCard">
+            <Border Classes="card" Margin="0,0,0,14" Padding="16">
+                <StackPanel Spacing="10">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding CountText}" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding ReclaimText}" Classes="muted" VerticalAlignment="Center"/>
+                            <Border IsVisible="{Binding ShowConfidence}" CornerRadius="6" Padding="8,2"
+                                    Background="{DynamicResource AccentSoft}" VerticalAlignment="Center">
+                                <TextBlock VerticalAlignment="Center" Foreground="{DynamicResource AccentBrush}" FontSize="12">
+                                    <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ConfidenceText}"/>
+                                </TextBlock>
+                            </Border>
+                        </StackPanel>
+                        <!-- FR-30: пакетная отметка/ссылки доступны только для точных дубликатов,
+                             похожие отмечаются строго вручную. -->
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" IsVisible="{Binding ShowBatchActions}">
+                            <Button Classes="ghost" Command="{Binding MarkAllButRepresentativeCommand}"
+                                    ToolTip.Tip="Оставить одну копию в группе, остальные отметить как лишние">
+                                <TextBlock Text="{x:Static loc:Strings.SelectAllButRepresentative}" FontSize="13"/>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                    <TextBlock Text="{Binding Warning}" Foreground="{DynamicResource DangerBrush}" FontSize="12"
+                               IsVisible="{Binding Warning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                    <!-- P0.2: непроверенная точная группа (часть файлов офлайн/не прочитана) — удаление отключено. -->
+                    <Border IsVisible="{Binding ShowUnverifiedWarning}" CornerRadius="6" Padding="10,6"
+                            Background="{DynamicResource AccentSoft}">
+                        <TextBlock Text="{Binding UnverifiedWarningText}" TextWrapping="Wrap" FontSize="12"
+                                   Foreground="{DynamicResource AccentBrush}"/>
+                    </Border>
+                    <ItemsControl ItemsSource="{Binding Files}" ItemTemplate="{StaticResource FileTile}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="28,24">
+        <Grid RowDefinitions="Auto,Auto,*">
+            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Classes="h1" Text="{x:Static loc:Strings.ResultsTitle}" VerticalAlignment="Center"/>
+                    <TextBlock Classes="muted" Text="Сначала отметьте лишние копии, затем проверьте список и уберите отмеченное в корзину." Margin="0,4,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Button x:Name="OnboardingAutoSelect"
+                            Classes="primary" Command="{Binding AutoSelectAllCommand}"
+                            ToolTip.Tip="Автоматически отметить лишние точные копии, не удаляя их сразу">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconCheck}" Foreground="White"/>
+                            <TextBlock Text="{x:Static loc:Strings.AutoSelect}" Foreground="White"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Classes="ghost" Command="{Binding ExportCsvCommand}"
+                            ToolTip.Tip="Сохранить список найденных дублей в CSV-файл">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconExport}"/>
+                            <TextBlock Text="{x:Static loc:Strings.Export}"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <!-- P0.4: видимый баннер результата операции (rename/delete) — не прячется с диалогом -->
+            <StackPanel Grid.Row="1" Spacing="8" Margin="0,0,0,12">
+                <Border IsVisible="{Binding OperationErrorText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                        Background="#22D9534F" CornerRadius="8" Padding="14,10">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="{Binding OperationErrorText}" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource DangerBrush}"/>
+                        <Button Grid.Column="1" Classes="ghost" VerticalAlignment="Top"
+                                Command="{Binding DismissOperationBannerCommand}" Content="✕"/>
+                    </Grid>
+                </Border>
+                <Border IsVisible="{Binding OperationSuccessText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                        Background="{DynamicResource AccentSoft}" CornerRadius="8" Padding="14,10">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="{Binding OperationSuccessText}" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource AccentBrush}"/>
+                        <Button Grid.Column="1" Classes="ghost" VerticalAlignment="Top"
+                                Command="{Binding DismissOperationBannerCommand}" Content="✕"/>
+                    </Grid>
+                </Border>
+            </StackPanel>
+
+            <TabControl Grid.Row="2" SelectedIndex="{Binding SelectedTab, Mode=TwoWay}">
+                <!-- Точные дубликаты -->
+                <TabItem>
+                    <TabItem.Header>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconLayers}" Width="16" Height="16"/>
+                            <TextBlock Text="{x:Static loc:Strings.TabExact}"/>
+                            <TextBlock Text="{Binding ExactCountText}" Classes="caption" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </TabItem.Header>
+                    <Grid RowDefinitions="Auto,*">
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12" Margin="0,12">
+                            <Button x:Name="OnboardingDeleteSelected"
+                                    Classes="danger" Command="{Binding DeleteSelectedCommand}"
+                                    ToolTip.Tip="Переместить отмеченные файлы в корзину после подтверждения">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <PathIcon Data="{StaticResource IconTrash}" Foreground="White"/>
+                                    <TextBlock Text="{x:Static loc:Strings.DeleteSelected}"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Classes="ghost" Command="{Binding RenameSelectedCommand}"
+                                    ToolTip.Tip="Дать выбранным файлам общее имя с нумерацией (с предпросмотром)">
+                                <TextBlock Text="{x:Static loc:Strings.RenameSelected}"/>
+                            </Button>
+                            <Button Classes="ghost" Command="{Binding DistributeSelectedCommand}"
+                                    ToolTip.Tip="Разложить выбранные файлы по папкам: отчёт или безопасное копирование">
+                                <TextBlock Text="{x:Static loc:Strings.DistributeSelected}"/>
+                            </Button>
+                        </StackPanel>
+                        <ScrollViewer Grid.Row="1">
+                            <StackPanel>
+                                <TextBlock Text="{Binding ExactEmpty}" Classes="muted" Margin="2,20"
+                                           IsVisible="{Binding ExactEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <ItemsControl ItemsSource="{Binding ExactGroups}" ItemTemplate="{StaticResource GroupCard}"/>
+                                <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
+                                        Command="{Binding ShowMoreExactCommand}" IsVisible="{Binding CanShowMoreExact}"
+                                        Content="{x:Static loc:Strings.ShowMore}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+
+                <!-- Похожие фото -->
+                <TabItem>
+                    <TabItem.Header>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconImage}" Width="16" Height="16"/>
+                            <TextBlock Text="{x:Static loc:Strings.TabSimilarImages}"/>
+                            <TextBlock Text="{Binding ImageCountText}" Classes="caption" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </TabItem.Header>
+                    <Grid RowDefinitions="Auto,Auto,*">
+                        <Border Grid.Row="0" Classes="card" Margin="0,12" Padding="14">
+                            <StackPanel Spacing="8">
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <TextBlock Text="{x:Static loc:Strings.Threshold}" VerticalAlignment="Center"/>
+                                    <Slider Width="260" Minimum="0.5" Maximum="1.0" Value="{Binding ImageThreshold, Mode=TwoWay}"
+                                            ToolTip.Tip="Сдвиньте вправо, чтобы показывать только более похожие фото"/>
+                                    <TextBlock VerticalAlignment="Center" FontWeight="SemiBold"
+                                               Text="{Binding ImageThreshold, Converter={x:Static conv:Converters.Percent}}"/>
+                                    <Button Classes="danger" Command="{Binding DeleteSelectedCommand}"
+                                            ToolTip.Tip="Переместить вручную отмеченные файлы в корзину после подтверждения">
+                                        <TextBlock Text="{x:Static loc:Strings.DeleteSelected}"/>
+                                    </Button>
+                                </StackPanel>
+                                <TextBlock Text="{x:Static loc:Strings.SimilarManualHint}" Classes="caption"/>
+                            </StackPanel>
+                        </Border>
+                        <ScrollViewer Grid.Row="2">
+                            <StackPanel>
+                                <TextBlock Text="{Binding ImageEmpty}" Classes="muted" Margin="2,20"
+                                           IsVisible="{Binding ImageEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <ItemsControl ItemsSource="{Binding SimilarImageGroups}" ItemTemplate="{StaticResource GroupCard}"/>
+                                <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
+                                        Command="{Binding ShowMoreSimilarImagesCommand}" IsVisible="{Binding CanShowMoreSimilarImages}"
+                                        Content="{x:Static loc:Strings.ShowMore}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+
+                <!-- Похожая музыка -->
+                <TabItem>
+                    <TabItem.Header>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconMusic}" Width="16" Height="16"/>
+                            <TextBlock Text="{x:Static loc:Strings.TabSimilarAudio}"/>
+                            <TextBlock Text="{Binding AudioCountText}" Classes="caption" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </TabItem.Header>
+                    <Grid RowDefinitions="Auto,*">
+                        <Border Grid.Row="0" Classes="card" Margin="0,12" Padding="14">
+                            <StackPanel Spacing="8">
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <TextBlock Text="{x:Static loc:Strings.Threshold}" VerticalAlignment="Center"/>
+                                    <Slider Width="260" Minimum="0.5" Maximum="1.0" Value="{Binding AudioThreshold, Mode=TwoWay}"
+                                            ToolTip.Tip="Сдвиньте вправо, чтобы показывать только более похожую музыку"/>
+                                    <TextBlock VerticalAlignment="Center" FontWeight="SemiBold"
+                                               Text="{Binding AudioThreshold, Converter={x:Static conv:Converters.Percent}}"/>
+                                    <Button Classes="danger" Command="{Binding DeleteSelectedCommand}"
+                                            ToolTip.Tip="Переместить вручную отмеченные файлы в корзину после подтверждения">
+                                        <TextBlock Text="{x:Static loc:Strings.DeleteSelected}"/>
+                                    </Button>
+                                </StackPanel>
+                                <TextBlock Text="{x:Static loc:Strings.SimilarManualHint}" Classes="caption"/>
+                            </StackPanel>
+                        </Border>
+                        <ScrollViewer Grid.Row="1">
+                            <StackPanel>
+                                <TextBlock Text="{Binding AudioEmpty}" Classes="muted" Margin="2,20"
+                                           IsVisible="{Binding AudioEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <ItemsControl ItemsSource="{Binding SimilarAudioGroups}" ItemTemplate="{StaticResource GroupCard}"/>
+                                <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
+                                        Command="{Binding ShowMoreSimilarAudioCommand}" IsVisible="{Binding CanShowMoreSimilarAudio}"
+                                        Content="{x:Static loc:Strings.ShowMore}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <!-- ===== Подтверждение удаления ===== -->
+        <Border IsVisible="{Binding ShowDeleteConfirm}" Background="#80000000">
+            <Border Classes="card" Width="440" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+                <StackPanel Spacing="16">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.ConfirmDeleteTitle}"/>
+                    <TextBlock Text="{Binding DeleteConfirmText}" TextWrapping="Wrap" Classes="muted"/>
+                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
+                        <Button Command="{Binding CancelDeleteCommand}">
+                            <TextBlock Text="{x:Static loc:Strings.Cancel}"/>
+                        </Button>
+                        <Button Classes="danger" Command="{Binding ConfirmDeleteCommand}">
+                            <TextBlock Text="{x:Static loc:Strings.Delete}"/>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ===== P0-B: Групповое переименование ===== -->
+        <Border IsVisible="{Binding ShowRenameDialog}" Background="#80000000">
+            <Border Classes="card" Width="520" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+                <StackPanel Spacing="14">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.RenameTitle}"/>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.RenameBaseLabel}" Classes="muted"/>
+                        <TextBox Text="{Binding RenameBaseName, Mode=TwoWay}" Watermark="Отпуск_2025"/>
+                    </StackPanel>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.RenameStartLabel}" Classes="muted"/>
+                        <NumericUpDown Value="{Binding RenameStartNumber, Mode=TwoWay}" Minimum="0" Maximum="100000" Increment="1" Width="140" HorizontalAlignment="Left"/>
+                    </StackPanel>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.RenamePreviewLabel}" Classes="muted"/>
+                        <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10" MaxHeight="220">
+                            <ScrollViewer>
+                                <TextBlock Text="{Binding RenamePreviewText}" FontFamily="Consolas,monospace" FontSize="12" TextWrapping="NoWrap"/>
+                            </ScrollViewer>
+                        </Border>
+                        <TextBlock Text="{Binding RenameConflictText}" Foreground="{DynamicResource DangerBrush}" FontSize="12"
+                                   IsVisible="{Binding RenameConflictText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
+                        <Button Command="{Binding CancelRenameCommand}">
+                            <TextBlock Text="{x:Static loc:Strings.Cancel}"/>
+                        </Button>
+                        <Button Classes="primary" Command="{Binding ConfirmRenameCommand}" IsEnabled="{Binding RenameCanApply}">
+                            <TextBlock Text="{x:Static loc:Strings.RenameApply}"/>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ===== P1.6: Распределение результатов ===== -->
+        <Border IsVisible="{Binding ShowDistributeDialog}" Background="#80000000">
+            <Border Classes="card" Width="560" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+                <StackPanel Spacing="14">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.DistributeTitle}"/>
+                    <TextBlock Text="{x:Static loc:Strings.DistributeReportMode}" Classes="muted"
+                               IsVisible="{Binding !DistributeCopyMode}"/>
+                    <CheckBox IsChecked="{Binding DistributeCopyMode, Mode=TwoWay}"
+                              Content="{x:Static loc:Strings.DistributeCopyMode}"/>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button Command="{Binding PickDistributeFolderCommand}" Content="{x:Static loc:Strings.DistributeChooseFolder}"/>
+                        <TextBlock Text="{Binding DistributeDestination}" Classes="muted" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10" MaxHeight="200">
+                        <ScrollViewer>
+                            <TextBlock Text="{Binding DistributePreviewText}" FontFamily="Consolas,monospace" FontSize="12"/>
+                        </ScrollViewer>
+                    </Border>
+                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
+                        <Button Command="{Binding CancelDistributeCommand}" Content="{x:Static loc:Strings.Cancel}"/>
+                        <Button Classes="primary" Command="{Binding RunDistributeCommand}" IsEnabled="{Binding DistributeCanRun}"
+                                Content="{x:Static loc:Strings.DistributeRun}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ===== Индикатор загрузки результатов ===== -->
+        <Border IsVisible="{Binding IsBusy}" Background="#33000000">
+            <Border Classes="card" Width="240" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="22">
+                <StackPanel Spacing="12" HorizontalAlignment="Center">
+                    <ProgressBar IsIndeterminate="True" Width="180"/>
+                    <TextBlock Text="{Binding BusyStatus}" HorizontalAlignment="Center" Classes="muted" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ===== Подтверждение замены жёсткими ссылками ===== -->
+        <Border IsVisible="{Binding ShowHardlinkConfirm}" Background="#80000000">
+            <Border Classes="card" Width="470" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+                <StackPanel Spacing="16">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.HardlinkTitle}"/>
+                    <TextBlock Text="{Binding HardlinkConfirmText}" TextWrapping="Wrap" Classes="muted"/>
+                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
+                        <Button Command="{Binding CancelHardlinkCommand}"><TextBlock Text="{x:Static loc:Strings.Cancel}"/></Button>
+                        <Button Classes="primary" Command="{Binding ConfirmHardlinkCommand}"><TextBlock Text="{x:Static loc:Strings.HardlinkAction}"/></Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+    </Grid>
+</UserControl>

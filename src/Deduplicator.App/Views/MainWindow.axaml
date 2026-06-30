@@ -1,0 +1,133 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:Deduplicator.App.ViewModels"
+        xmlns:conv="clr-namespace:Deduplicator.App.Converters"
+        x:Class="Deduplicator.App.Views.MainWindow"
+        Width="1180" Height="780" MinWidth="960" MinHeight="640"
+        Background="{DynamicResource AppBackground}"
+        FontFamily="{DynamicResource ContentControlThemeFontFamily}"
+        Icon="/Assets/app-icon-256.png"
+        Title="Deduplicator">
+
+    <Grid ColumnDefinitions="248,*">
+
+        <!-- ===== Боковая панель ===== -->
+        <Border Grid.Column="0" Background="{DynamicResource SidebarBackground}"
+                BorderThickness="0,0,1,0"
+                BorderBrush="{DynamicResource SurfaceBorder}">
+            <DockPanel LastChildFill="True">
+                <!-- Логотип -->
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="20,22,20,18" Spacing="12">
+                    <Border Width="40" Height="40" CornerRadius="10" Background="{DynamicResource AccentBrush}">
+                        <PathIcon Data="{StaticResource IconLogo}" Foreground="White" Width="22" Height="22"/>
+                    </Border>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{Binding AppName}" FontSize="17" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding AppTagline}" Classes="caption" TextWrapping="Wrap" MaxWidth="150"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <Button DockPanel.Dock="Bottom" Classes="ghost"
+                        Margin="14,10,14,18"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Left"
+                        Command="{Binding ShowOnboardingCommand}"
+                        ToolTip.Tip="Показать короткое обучение заново">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <PathIcon Data="{StaticResource IconCheckCircle}" Width="17" Height="17"/>
+                        <TextBlock Text="{Binding HelpText}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+
+                <!-- Навигация -->
+                <ListBox x:Name="OnboardingMainNav"
+                         Classes="nav" ItemsSource="{Binding NavItems}"
+                         SelectedItem="{Binding SelectedNav, Mode=TwoWay}"
+                         Margin="6,8">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal" Spacing="12" ToolTip.Tip="{Binding Tip}">
+                                <PathIcon Data="{Binding IconKey, Converter={x:Static conv:Converters.Icon}}"
+                                          Width="18" Height="18"/>
+                                <TextBlock Text="{Binding Title}" VerticalAlignment="Center" FontSize="14"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <!-- ===== Контент ===== -->
+        <Border Grid.Column="1" Padding="0">
+            <TransitioningContentControl Content="{Binding CurrentPage}" Margin="0">
+                <TransitioningContentControl.PageTransition>
+                    <CrossFade Duration="0:0:0.22" />
+                </TransitioningContentControl.PageTransition>
+            </TransitioningContentControl>
+        </Border>
+
+        <!-- ===== Первое обучение: подсветка реальных элементов ===== -->
+        <Canvas Grid.ColumnSpan="2" IsVisible="{Binding IsOnboardingVisible}">
+            <!-- Перехватывает клики по приложению позади (модальность) -->
+            <Rectangle x:Name="OnboardingBlocker" Fill="#01000000"/>
+            <!-- Затемнение с «окошком» вокруг подсвеченного элемента (Data ставится из code-behind) -->
+            <Path x:Name="OnboardingMask" Fill="#9E000000"/>
+            <!-- Пульсирующая рамка-подсветка вокруг цели (позиция/размер из code-behind) -->
+            <Border x:Name="OnboardingHighlight" IsHitTestVisible="False"
+                    CornerRadius="12" BorderThickness="3" BorderBrush="{DynamicResource AccentBrush}"
+                    BoxShadow="0 0 0 4 #5C007AFF">
+                <Border.Styles>
+                    <Style Selector="Border#OnboardingHighlight">
+                        <Style.Animations>
+                            <Animation Duration="0:0:1.5" IterationCount="INFINITE">
+                                <KeyFrame Cue="0%"><Setter Property="Opacity" Value="1"/></KeyFrame>
+                                <KeyFrame Cue="50%"><Setter Property="Opacity" Value="0.45"/></KeyFrame>
+                                <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1"/></KeyFrame>
+                            </Animation>
+                        </Style.Animations>
+                    </Style>
+                </Border.Styles>
+            </Border>
+            <!-- Карточка-пояснение рядом с целью (позиция из code-behind) -->
+            <Border x:Name="OnboardingCard" Classes="card" Width="400" Padding="22"
+                    BoxShadow="0 18 48 0 #66000000">
+                <StackPanel Spacing="14">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{Binding OnboardingProgressText}" Classes="caption"/>
+                        <TextBlock Text="{Binding OnboardingTitle}" FontSize="21" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <Border CornerRadius="8" Padding="11,8" Background="{DynamicResource AccentSoft}"
+                            IsVisible="{Binding OnboardingHasTarget}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconChevronRight}" Width="15" Height="15"
+                                      Foreground="{DynamicResource AccentBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding OnboardingHint}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource AccentBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="{Binding OnboardingBody}" Classes="muted" FontSize="14.5" LineHeight="22" TextWrapping="Wrap"/>
+
+                    <ProgressBar Height="5" Minimum="0" Maximum="100" Value="{Binding OnboardingProgress}"/>
+
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" Margin="0,2,0,0">
+                        <Button Grid.Column="0" Classes="ghost" Command="{Binding SkipOnboardingCommand}">
+                            <TextBlock Text="Пропустить"/>
+                        </Button>
+                        <Button Grid.Column="2" Command="{Binding PreviousOnboardingCommand}"
+                                IsVisible="{Binding CanGoBack}" Margin="0,0,10,0">
+                            <TextBlock Text="Назад"/>
+                        </Button>
+                        <Button Grid.Column="3" Classes="primary" Command="{Binding NextOnboardingCommand}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding OnboardingNextText}" Foreground="White"/>
+                                <PathIcon Data="{StaticResource IconChevronRight}" Foreground="White" Width="16" Height="16"/>
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Canvas>
+    </Grid>
+</Window>

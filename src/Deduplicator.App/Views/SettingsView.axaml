@@ -1,0 +1,222 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             x:Class="Deduplicator.App.Views.SettingsView">
+
+    <ScrollViewer>
+        <StackPanel Margin="28,24" Spacing="16" MaxWidth="760" HorizontalAlignment="Left">
+            <TextBlock Classes="h1" Text="{x:Static loc:Strings.SettingsTitle}"/>
+            <TextBlock Classes="muted" Text="Обычно менять ничего не нужно. Здесь можно настроить безопасность, скорость и похожесть файлов." TextWrapping="Wrap"/>
+
+            <!-- Пороги -->
+            <Border Classes="card">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="4">
+                        <TextBlock Classes="h2" Text="Качество поиска похожих файлов"/>
+                        <TextBlock Classes="caption" Text="Больше процент — строже сравнение и меньше случайных совпадений." TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <StackPanel Spacing="6">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{x:Static loc:Strings.SetImageThreshold}"/>
+                            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="{Binding ImagePercentText}"/>
+                        </Grid>
+                        <Slider Minimum="0.5" Maximum="1.0" Value="{Binding ImageThreshold, Mode=TwoWay}"
+                                ToolTip.Tip="Если показывает слишком много похожих фото, сдвиньте вправо"/>
+                    </StackPanel>
+                    <StackPanel Spacing="6">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{x:Static loc:Strings.SetAudioThreshold}"/>
+                            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="{Binding AudioPercentText}"/>
+                        </Grid>
+                        <Slider Minimum="0.5" Maximum="1.0" Value="{Binding AudioThreshold, Mode=TwoWay}"
+                                ToolTip.Tip="Если показывает слишком много похожей музыки, сдвиньте вправо"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Поведение -->
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <TextBlock Classes="h2" Text="Безопасность и внешний вид"/>
+                    <CheckBox IsChecked="{Binding UseRecycleBin, Mode=TwoWay}"
+                              Content="{x:Static loc:Strings.SetUseRecycle}"
+                              ToolTip.Tip="Рекомендуется оставить включённым: так проще вернуть файл"/>
+                    <CheckBox IsChecked="{Binding ComputePixelHash, Mode=TwoWay}"
+                              Content="{x:Static loc:Strings.SetPixelHash}"
+                              ToolTip.Tip="Включайте, если важнее точность, чем скорость"/>
+                    <CheckBox IsChecked="{Binding RotationInvariant, Mode=TwoWay}"
+                              Content="{x:Static loc:Strings.SetRotation}"
+                              ToolTip.Tip="Помогает находить повернутые копии фото"/>
+                    <Grid ColumnDefinitions="*,160">
+                        <TextBlock Text="{x:Static loc:Strings.SetParallelism}" VerticalAlignment="Center"/>
+                        <NumericUpDown Grid.Column="1" Minimum="1" Maximum="16" Increment="1"
+                                       Value="{Binding MaxParallelism, Mode=TwoWay}" ValueChanged="OnNumericChanged"
+                                       ToolTip.Tip="Больше число быстрее для SSD, но может сильнее нагружать компьютер"/>
+                    </Grid>
+                    <Grid ColumnDefinitions="*,260">
+                        <TextBlock Text="{x:Static loc:Strings.SetRule}" VerticalAlignment="Center"/>
+                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding Rules}"
+                                  SelectedItem="{Binding SelectedRule, Mode=TwoWay}"
+                                  ToolTip.Tip="Эта копия будет помечаться как главная в группе дублей">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate><TextBlock Text="{Binding Label}"/></DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </Grid>
+                    <Grid ColumnDefinitions="*,260">
+                        <TextBlock Text="{x:Static loc:Strings.SetTheme}" VerticalAlignment="Center"/>
+                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding Themes}"
+                                  SelectedItem="{Binding SelectedTheme, Mode=TwoWay}"
+                                  ToolTip.Tip="Выберите светлый, тёмный или системный режим">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate><TextBlock Text="{Binding Label}"/></DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Фильтры сканирования -->
+            <Border Classes="card">
+                <StackPanel Spacing="12">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.SetScanFilters}"/>
+                    <CheckBox IsChecked="{Binding SkipHiddenSystem, Mode=TwoWay}" Content="{x:Static loc:Strings.SetSkipHidden}"
+                              ToolTip.Tip="Рекомендуется оставить включённым"/>
+                    <Grid ColumnDefinitions="*,160">
+                        <TextBlock Text="{x:Static loc:Strings.SetMinSize}" VerticalAlignment="Center"/>
+                        <NumericUpDown Grid.Column="1" Minimum="0" Maximum="1000000" Increment="1"
+                                       Value="{Binding MinFileSizeMb, Mode=TwoWay}" ValueChanged="OnNumericChanged"
+                                       ToolTip.Tip="0 означает искать файлы любого размера"/>
+                    </Grid>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.SetExcludedExt}" Classes="muted"/>
+                        <TextBox Text="{Binding ExcludedExtensions, Mode=TwoWay}" Watermark=".tmp, .log, .bak"
+                                 ToolTip.Tip="Например: .tmp, .log, .bak"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Папки-эталоны -->
+            <Border Classes="card">
+                <StackPanel Spacing="12">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.SetReferenceFolders}"/>
+                    <ItemsControl ItemsSource="{Binding ReferenceFolders}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+                                    <TextBlock Text="{Binding}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                    <Button Grid.Column="1" Classes="ghost"
+                                            Command="{Binding $parent[ItemsControl].DataContext.RemoveReferenceFolderCommand}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip.Tip="Убрать папку из списка защищённых">
+                                        <TextBlock Text="{x:Static loc:Strings.Remove}" FontSize="12"/>
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Classes="ghost" HorizontalAlignment="Left" Command="{Binding AddReferenceFolderCommand}"
+                            ToolTip.Tip="Добавить папку, файлы из которой нельзя удалять автоматически">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconFolderPlus}"/>
+                            <TextBlock Text="{x:Static loc:Strings.AddFolder}"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Border>
+
+            <!-- Пути -->
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.SetQuarantine}" Classes="muted"/>
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Text="{Binding QuarantinePath, Mode=TwoWay}"/>
+                            <Button Grid.Column="1" Margin="8,0,0,0" Command="{Binding BrowseQuarantineCommand}"
+                                    ToolTip.Tip="Выбрать папку для карантина">
+                                <TextBlock Text="{x:Static loc:Strings.Browse}"/>
+                            </Button>
+                        </Grid>
+                    </StackPanel>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.SetFpcalc}" Classes="muted"/>
+                        <TextBox Text="{Binding FpcalcPath, Mode=TwoWay}" Watermark="fpcalc.exe"
+                                 ToolTip.Tip="Нужно только для поиска похожей музыки по звучанию"/>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Width="14" Height="14"
+                                      Data="{StaticResource IconCheckCircle}"
+                                      Foreground="{DynamicResource SuccessBrush}"
+                                      IsVisible="{Binding FpcalcAvailable}"/>
+                            <PathIcon Width="14" Height="14"
+                                      Data="{StaticResource IconWarning}"
+                                      Foreground="{DynamicResource WarningBrush}"
+                                      IsVisible="{Binding !FpcalcAvailable}"/>
+                            <TextBlock Text="{Binding FpcalcStatus}" Classes="caption" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Обновления -->
+            <Border Classes="card">
+                <StackPanel Spacing="12">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.SetUpdates}"/>
+                    <TextBlock Text="{Binding CurrentVersionText}" Classes="muted"/>
+                    <CheckBox IsChecked="{Binding CheckUpdatesEnabled, Mode=TwoWay}" Content="{x:Static loc:Strings.SetCheckUpdates}"
+                              ToolTip.Tip="Можно оставить выключенным для полностью офлайн-работы"/>
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Static loc:Strings.SetUpdateRepo}" Classes="muted"/>
+                        <TextBox Text="{Binding UpdateRepository, Mode=TwoWay}" Watermark="owner/Deduplicator"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Command="{Binding CheckUpdatesCommand}" ToolTip.Tip="Проверить, есть ли новая версия">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconUpdate}"/>
+                                <TextBlock Text="{x:Static loc:Strings.CheckNow}"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="primary" Command="{Binding OpenReleaseCommand}" IsVisible="{Binding CanOpenRelease}">
+                            <TextBlock Text="{x:Static loc:Strings.UpdateOpen}"/>
+                        </Button>
+                        <TextBlock Text="{Binding UpdateStatus}" Classes="muted" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Диагностика (ТЗ MVP): скопировать сведения о версии/режиме/правах/путях для поддержки -->
+            <Border Classes="card">
+                <StackPanel Spacing="12">
+                    <TextBlock Classes="h2" Text="{x:Static loc:Strings.SetDiagnostics}"/>
+                    <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10">
+                        <SelectableTextBlock Text="{Binding DiagnosticsText}" FontFamily="Consolas,monospace" FontSize="12"/>
+                    </Border>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button Command="{Binding CopyDiagnosticsCommand}"
+                                ToolTip.Tip="Скопировать версию, режим, права и пути логов — пригодится для поддержки">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <PathIcon Data="{StaticResource IconExport}"/>
+                                <TextBlock Text="{x:Static loc:Strings.CopyDiagnostics}"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Classes="ghost" Command="{Binding OpenLogFolderCommand}"
+                                Content="{x:Static loc:Strings.OpenLogFolder}"/>
+                        <TextBlock Text="{Binding DiagnosticsStatus}" Classes="muted" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Orientation="Horizontal" Spacing="14">
+                <Button Classes="primary" Command="{Binding SaveCommand}" ToolTip.Tip="Сохранить изменения настроек">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <PathIcon Data="{StaticResource IconCheck}" Foreground="White"/>
+                        <TextBlock Text="{x:Static loc:Strings.Save}" Foreground="White"/>
+                    </StackPanel>
+                </Button>
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" IsVisible="{Binding Saved}">
+                    <PathIcon Data="{StaticResource IconCheck}" Width="16" Height="16" Foreground="{DynamicResource SuccessBrush}"/>
+                    <TextBlock Text="Сохранено" Foreground="{DynamicResource SuccessBrush}"/>
+                </StackPanel>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

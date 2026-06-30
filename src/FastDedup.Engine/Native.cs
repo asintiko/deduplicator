@@ -1,0 +1,168 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+
+namespace FastDedup.Engine;
+
+/// <summary>
+/// Тонкий слой нативных вызовов Windows + утилиты для работы с путями и правами.
+/// Всё, что специфично для ОС, собрано здесь, чтобы остальной код оставался чистым.
+/// </summary>
+[SupportedOSPlatform("windows")]
+internal static class Native
+{
+    // --- Атрибуты файлов ---
+    public const uint FILE_ATTRIBUTE_READONLY = 0x00000001;
+    public const uint FILE_ATTRIBUTE_HIDDEN = 0x00000002;
+    public const uint FILE_ATTRIBUTE_SYSTEM = 0x00000004;
+    public const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+    public const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+
+    // --- Доступ / шаринг / создание ---
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+
+    // --- IOCTL / FSCTL коды ---
+    public const uint FSCTL_ENUM_USN_DATA = 0x000900b3;
+    public const uint FSCTL_QUERY_USN_JOURNAL = 0x000900f4;
+    public const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002d1400;
+
+    // --- Win32 ошибки ---
+    public const int ERROR_HANDLE_EOF = 38;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool DeviceIoControl(
+        SafeFileHandle hDevice, uint dwIoControlCode, IntPtr lpInBuffer, uint nInBufferSize,
+        IntPtr lpOutBuffer, uint nOutBufferSize, out uint lpBytesReturned, IntPtr lpOverlapped);
+
+    private enum GET_FILEEX_INFO_LEVELS { GetFileExInfoStandard = 0 }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FILETIME { public uint dwLowDateTime; public uint dwHighDateTime; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WIN32_FILE_ATTRIBUTE_DATA
+    {
+        public uint dwFileAttributes;
+        public FILETIME ftCreationTime;
+        public FILETIME ftLastAccessTime;
+        public FILETIME ftLastWriteTime;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint dwFileAttributes;
+        public FILETIME ftCreationTime;
+        public FILETIME ftLastAccessTime;
+        public FILETIME ftLastWriteTime;
+        public uint dwVolumeSerialNumber;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+        public uint nNumberOfLinks;
+        public uint nFileIndexHigh;
+        public uint nFileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetFileAttributesExW(
+        string lpFileName, GET_FILEEX_INFO_LEVELS fInfoLevelId, out WIN32_FILE_ATTRIBUTE_DATA lpFileInformation);
+
+    /// <summary>Открыть том на чтение (нужны права администратора). Для FSCTL_ENUM_USN_DATA.</summary>
+    public static SafeFileHandle OpenVolumeRead(string devicePath)
+    {
+        var h = CreateFileW(devicePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (h.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"CreateFile({devicePath})");
+        return h;
+    }
+
+    /// <summary>Открыть том только для запроса свойств (права администратора НЕ нужны).</summary>
+    public static SafeFileHandle OpenVolumeQuery(string devicePath)
+        => CreateFileW(devicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+
+    /// <summary>
+    /// Метаданные файла одним системным вызовом: размер, атрибуты, время создания и время
+    /// последней записи (raw FILETIME). Дешевле, чем открывать FileInfo. false, если файл недоступен.
+    /// LastWrite нужен продукту для инкрементальности (Mtime), которого USN-записи не дают.
+    /// </summary>
+    public static bool TryGetFileInfo(string path, out long size, out uint attrs,
+        out long creationRaw, out long lastWriteRaw)
+    {
+        size = 0; attrs = 0; creationRaw = 0; lastWriteRaw = 0;
+        if (!GetFileAttributesExW(LongPath(path), GET_FILEEX_INFO_LEVELS.GetFileExInfoStandard, out var d))
+            return false;
+        attrs = d.dwFileAttributes;
+        size = ((long)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+        creationRaw = ((long)d.ftCreationTime.dwHighDateTime << 32) | d.ftCreationTime.dwLowDateTime;
+        lastWriteRaw = ((long)d.ftLastWriteTime.dwHighDateTime << 32) | d.ftLastWriteTime.dwLowDateTime;
+        return true;
+    }
+
+    /// <summary>Старая 4-арг сигнатура — обёртка, чтобы существующие вызовы не ломались.</summary>
+    public static bool TryGetFileInfo(string path, out long size, out uint attrs, out long creationRaw)
+        => TryGetFileInfo(path, out size, out attrs, out creationRaw, out _);
+
+    /// <summary>
+    /// Получить физическую идентичность файла. Используется на финальном этапе,
+    /// чтобы hardlink-алиасы не считались отдельными физическими копиями.
+    /// </summary>
+    public static bool TryGetFileIdentity(string path, out FileIdentity identity)
+    {
+        identity = default;
+        try
+        {
+            using var handle = File.OpenHandle(LongPath(path), FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
+
+            if (!GetFileInformationByHandle(handle, out var info)) return false;
+            ulong fileIndex = ((ulong)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+            if (fileIndex == 0) return false;
+
+            identity = new FileIdentity(info.dwVolumeSerialNumber, fileIndex, info.nNumberOfLinks);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Префикс \\?\ снимает лимит MAX_PATH (260) — иначе длинные пути молча теряются.</summary>
+    public static string LongPath(string path)
+    {
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path;
+        if (path.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + path.Substring(2);
+        return @"\\?\" + path;
+    }
+
+    /// <summary>Запущены ли мы с правами администратора (нужно для MFT-режима).</summary>
+    public static bool IsElevated()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try
+        {
+            using var id = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch { return false; }
+    }
+}
