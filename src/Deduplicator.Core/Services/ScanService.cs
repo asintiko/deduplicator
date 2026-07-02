@@ -759,6 +759,22 @@ public sealed class ScanService : IScanService, IDisposable
         var profile = _options.ImageProfile;
         long skippedByProfile = 0, computed = 0;
 
+        // 2.6: EWMA скорости чтения по томам — состояние ТОЛЬКО этого этапа (между сканами не
+        // живёт). Продюсеры конвейера меряют каждое чтение; клэмп применяется к DOP чтения
+        // СЛЕДУЮЩЕЙ страницы (ReadDopFor вызывается исполнителем на старте каждой страницы).
+        var throughput = new System.Collections.Concurrent.ConcurrentDictionary<long, ThroughputEwma>();
+        int ClampedContentDop(long vid)
+        {
+            _readPlans.TryGetValue(vid, out var plan);
+            int baseDop = plan?.ContentDop ?? Math.Max(1, _options.Parallelism);
+            double mbps = throughput.TryGetValue(vid, out var ewma) ? ewma.Value : 0.0;
+            int dop = GovernorDecisions.ClampDop(baseDop, mbps, plan?.PreferSequential ?? false);
+            if (dop != baseDop)
+                AppLog.Write($"Губернатор: том «{plan?.Label ?? vid.ToString()}» читается ~{mbps:0} МБ/с " +
+                             $"(USB2/сеть?) — DOP чтения снижен {baseDop}→{dop}.");
+            return dop;
+        }
+
         // Постранично (keyset по id): не держим всю библиотеку изображений в памяти.
         long processedImages = 0, afterId = 0;
         while (true)
@@ -782,16 +798,33 @@ public sealed class ScanService : IScanService, IDisposable
             var hadStalePHash = chunk
                 .Where(f => f.PHash is not null && f.PHashVer < ImageMatchService.CurrentPHashVersion)
                 .Select(f => f.Id).ToHashSet();
-            ComputeParallel(chunk, mountById, (f, path) =>
+            // 2.4: конвейер чтение→декод вместо «чтение и декод в одном воркере». Продюсеры
+            // читают файл целиком в память по плану тома (HDD — последовательно, диск не ждёт
+            // декодера), декодеры считают pHash/pixel-hash из памяти на всех ядрах. Бюджет
+            // канала и число декодеров — от губернатора (2.6), пересчёт на старте КАЖДОЙ
+            // страницы: при высокой загрузке памяти канал сжимается до 32 МБ, декодеров — 2.
+            var budget = ResourceGovernor.CurrentBudget();
+            ImagePerceptualPipeline.Run(chunk, _images, new ImagePipelineOptions
             {
-                f.PHash = _images.ComputePHash(path, ct);
-                if (_computePixelHash) f.PixelHash = _images.ComputePixelHash(path, ct);
-                if (f.PHash is not null)
+                PathFor = f => FullPath(f, mountById),
+                ReadDopFor = ClampedContentDop,
+                Budget = budget,
+                MaxVolumeParallelism = _maxVolumeParallelism,
+                ComputePixelHash = _computePixelHash,
+                WaitGate = WaitGate,
+                OnComputed = (f, path) =>
                 {
-                    // Пересчитанный pHash — всегда текущей версии алгоритма (этап 2.2).
-                    f.PHashVer = ImageMatchService.CurrentPHashVersion;
-                    if (f.ScanState < ScanState.Perceptual) f.ScanState = ScanState.Perceptual;
-                }
+                    if (f.PHash is not null)
+                    {
+                        // Пересчитанный pHash — всегда текущей версии алгоритма (этап 2.2).
+                        f.PHashVer = ImageMatchService.CurrentPHashVersion;
+                        if (f.ScanState < ScanState.Perceptual) f.ScanState = ScanState.Perceptual;
+                    }
+                    Report(p => { p.FilesHashed++; p.BytesProcessed += f.Size; p.CurrentFile = path; });
+                },
+                OnSkipped = () => Report(p => p.FilesSkipped++),
+                OnReadMeasured = (vid, bytes, seconds) =>
+                    throughput.GetOrAdd(vid, static _ => new ThroughputEwma()).Update(bytes, seconds)
             }, ct);
             // Пишем успешные расчёты и сбросы устаревших v1-хэшей (у них f.PHash обнулён расчётом).
             var done = chunk.Where(f => f.PHash is not null || hadStalePHash.Contains(f.Id)).ToList();
@@ -861,38 +894,6 @@ public sealed class ScanService : IScanService, IDisposable
     }
 
     // ---------------- Вспомогательное ----------------
-
-    private void ComputeParallel(List<FileRecord> files, Dictionary<long, string> mountById,
-        Action<FileRecord, string> compute, CancellationToken ct)
-    {
-        // Та же воронка параллелизма на каждый том, что и в exact-движке (общий VolumeParallelExecutor):
-        // HDD читается последовательно, SSD параллельно, общий потолок не даёт переподписки по томам.
-        VolumeParallelExecutor.RunByVolume(
-            files,
-            f => f.VolumeId,
-            vid => _readPlans.TryGetValue(vid, out var plan) ? plan.ContentDop : Math.Max(1, _options.Parallelism),
-            _maxVolumeParallelism,
-            ct,
-            f =>
-            {
-                WaitGate(ct);
-                var path = FullPath(f, mountById);
-                if (path is null || !File.Exists(LongPath.Fix(path))) return;
-                try
-                {
-                    compute(f, path);
-                    Report(p => { p.FilesHashed++; p.BytesProcessed += f.Size; p.CurrentFile = path; });
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (FileChangedDuringScanException)
-                {
-                    // Файл писали во время сверки: не смешиваем старый размер с новым содержимым.
-                    // Хэш не сохраняется (остаётся null) — файл попадёт в следующий инкрементальный скан.
-                    Report(p => { p.FilesSkipped++; p.FilesChangedSkipped++; });
-                }
-                catch { Report(p => p.FilesSkipped++); } // битый/занятый файл — пропуск (NFR-1)
-            });
-    }
 
     private static string? FullPath(FileRecord f, Dictionary<long, string> mountById) =>
         mountById.TryGetValue(f.VolumeId, out var mp) ? Path.Combine(mp, f.RelPath) : null;

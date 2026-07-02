@@ -14,8 +14,18 @@ public interface IImageMatchService
     /// <summary>Перцептивный хэш изображения (64-битный pHash). null — если файл не читается.</summary>
     byte[]? ComputePHash(string fullPath, CancellationToken ct = default);
 
+    /// <summary>
+    /// pHash по уже прочитанному содержимому файла (конвейер чтение→декод, этап 2.4).
+    /// Байт в байт тот же результат, что по пути. Облачный guard — на совести читателя
+    /// (проверка атрибутов по пути ДО чтения содержимого).
+    /// </summary>
+    byte[]? ComputePHash(ReadOnlyMemory<byte> content, CancellationToken ct = default);
+
     /// <summary>Хэш декодированных пикселей (для одинаковых картинок с разными метаданными).</summary>
     byte[]? ComputePixelHash(string fullPath, CancellationToken ct = default);
+
+    /// <summary>Pixel-hash по содержимому в памяти (см. <see cref="ComputePHash(ReadOnlyMemory{byte},CancellationToken)"/>).</summary>
+    byte[]? ComputePixelHash(ReadOnlyMemory<byte> content, CancellationToken ct = default);
 
     /// <summary>Сгенерировать (если нужно) миниатюру и вернуть путь к кэшированному файлу.</summary>
     string? EnsureThumbnail(string fullPath, string cacheKey, int maxSize = 256);
@@ -56,43 +66,64 @@ public sealed class ImageMatchService : IImageMatchService
         {
             ct.ThrowIfCancellationRequested();
             using var fs = OpenRead(fullPath);
-
-            // Префильтр по метаданным (дёшево, пиксели не декодируются): битый файл здесь же
-            // бросит исключение → null, а иконки меньше 64×64 по меньшей стороне перцептивно
-            // не сравниваем — их pHash почти не различителен и только шумит в группировке.
-            var info = Image.Identify(fs);
-            if (Math.Min(info.Width, info.Height) < MinPHashSide) return null;
-            fs.Position = 0;
-
-            // Этап 2.2: декодируем сразу в маленький размер (scaled-IDCT для JPEG — в разы
-            // быстрее и без полноразмерного буфера; 24 МП ради 64×64 целиком не разжимаем).
-            // ВАЖНО: TargetSize задаём только когда исходник КРУПНЕЕ цели — ImageSharp иначе
-            // РАСТЯГИВАЕТ мелкие картинки до цели, и pHash уезжает на десяток бит (проверено:
-            // 160×160 → 256×256 давало ~14 бит сдвига и роняло похожесть ниже порога).
-            var opts = Math.Max(info.Width, info.Height) > PHashDecodeSize
-                ? new DecoderOptions { TargetSize = new Size(PHashDecodeSize, PHashDecodeSize) }
-                : new DecoderOptions();
-            using var img = Image.Load<Rgba32>(opts, fs);
-
-            if (!_rotationInvariant)
-                return BitConverter.GetBytes(HashAlgo.Hash(img));
-
-            // Канонический хэш = минимум по ориентациям (повороты + зеркало).
-            // Тогда повёрнутые/отражённые копии дают одинаковое значение и группируются.
-            // Все 8 ориентаций считаются на уже УЖАТОЙ копии — клоны копеечные.
-            // Полная диэдральная группа: 4 поворота × 2 отражения = 8 ориентаций.
-            ulong best = HashAlgo.Hash(img);
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate90, FlipMode.None));
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate180, FlipMode.None));
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate270, FlipMode.None));
-            best = Math.Min(best, HashOriented(img, RotateMode.None, FlipMode.Horizontal));
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate90, FlipMode.Horizontal));
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate180, FlipMode.Horizontal));
-            best = Math.Min(best, HashOriented(img, RotateMode.Rotate270, FlipMode.Horizontal));
-            return BitConverter.GetBytes(best);
+            return ComputePHashCore(fs);
         }
         catch (OperationCanceledException) { throw; }
         catch { return null; } // битый/нечитаемый файл — пропускаем (NFR-1)
+    }
+
+    /// <summary>
+    /// pHash из уже прочитанного содержимого (конвейер чтение→декод, этап 2.4). Облачный guard
+    /// здесь не нужен: содержимое уже в памяти, атрибуты проверяет продюсер ДО чтения.
+    /// Тот же ComputePHashCore, что и по пути, — результат байт в байт совпадает.
+    /// </summary>
+    public byte[]? ComputePHash(ReadOnlyMemory<byte> content, CancellationToken ct = default)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            using var ms = AsStream(content);
+            return ComputePHashCore(ms);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; } // битое содержимое — пропускаем (NFR-1)
+    }
+
+    private byte[]? ComputePHashCore(Stream stream)
+    {
+        // Префильтр по метаданным (дёшево, пиксели не декодируются): битый файл здесь же
+        // бросит исключение → null, а иконки меньше 64×64 по меньшей стороне перцептивно
+        // не сравниваем — их pHash почти не различителен и только шумит в группировке.
+        var info = Image.Identify(stream);
+        if (Math.Min(info.Width, info.Height) < MinPHashSide) return null;
+        stream.Position = 0;
+
+        // Этап 2.2: декодируем сразу в маленький размер (scaled-IDCT для JPEG — в разы
+        // быстрее и без полноразмерного буфера; 24 МП ради 64×64 целиком не разжимаем).
+        // ВАЖНО: TargetSize задаём только когда исходник КРУПНЕЕ цели — ImageSharp иначе
+        // РАСТЯГИВАЕТ мелкие картинки до цели, и pHash уезжает на десяток бит (проверено:
+        // 160×160 → 256×256 давало ~14 бит сдвига и роняло похожесть ниже порога).
+        var opts = Math.Max(info.Width, info.Height) > PHashDecodeSize
+            ? new DecoderOptions { TargetSize = new Size(PHashDecodeSize, PHashDecodeSize) }
+            : new DecoderOptions();
+        using var img = Image.Load<Rgba32>(opts, stream);
+
+        if (!_rotationInvariant)
+            return BitConverter.GetBytes(HashAlgo.Hash(img));
+
+        // Канонический хэш = минимум по ориентациям (повороты + зеркало).
+        // Тогда повёрнутые/отражённые копии дают одинаковое значение и группируются.
+        // Все 8 ориентаций считаются на уже УЖАТОЙ копии — клоны копеечные.
+        // Полная диэдральная группа: 4 поворота × 2 отражения = 8 ориентаций.
+        ulong best = HashAlgo.Hash(img);
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate90, FlipMode.None));
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate180, FlipMode.None));
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate270, FlipMode.None));
+        best = Math.Min(best, HashOriented(img, RotateMode.None, FlipMode.Horizontal));
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate90, FlipMode.Horizontal));
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate180, FlipMode.Horizontal));
+        best = Math.Min(best, HashOriented(img, RotateMode.Rotate270, FlipMode.Horizontal));
+        return BitConverter.GetBytes(best);
     }
 
     private static ulong HashOriented(Image<Rgba32> img, RotateMode rotate, FlipMode flip)
@@ -107,25 +138,43 @@ public sealed class ImageMatchService : IImageMatchService
         try
         {
             ct.ThrowIfCancellationRequested();
-            // Pixel-hash — «одинаковые пиксели, разные метаданные» (FR-14): декодируем
-            // ПОЛНОРАЗМЕРНО (ужатая копия дала бы другой хэш), но хэшируем потоково по строкам.
-            // Прежний byte[W*H*4] на >2 ГБ панорамах переполнял int и молча возвращал null;
-            // результат байтово совпадает с прежним (те же RGBA-строки сверху вниз).
             using var fs = OpenRead(fullPath);
-            using var img = Image.Load<Rgba32>(fs);
-            var hasher = new XxHash128();
-            img.ProcessPixelRows(acc =>
-            {
-                for (int y = 0; y < acc.Height; y++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    hasher.Append(System.Runtime.InteropServices.MemoryMarshal.AsBytes(acc.GetRowSpan(y)));
-                }
-            });
-            return hasher.GetCurrentHash();
+            return ComputePixelHashCore(fs, ct);
         }
         catch (OperationCanceledException) { throw; }
         catch { return null; }
+    }
+
+    /// <summary>Pixel-hash из памяти (конвейер 2.4) — тот же core, что и по пути, байт в байт.</summary>
+    public byte[]? ComputePixelHash(ReadOnlyMemory<byte> content, CancellationToken ct = default)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            using var ms = AsStream(content);
+            return ComputePixelHashCore(ms, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; }
+    }
+
+    private static byte[] ComputePixelHashCore(Stream stream, CancellationToken ct)
+    {
+        // Pixel-hash — «одинаковые пиксели, разные метаданные» (FR-14): декодируем
+        // ПОЛНОРАЗМЕРНО (ужатая копия дала бы другой хэш), но хэшируем потоково по строкам.
+        // Прежний byte[W*H*4] на >2 ГБ панорамах переполнял int и молча возвращал null;
+        // результат байтово совпадает с прежним (те же RGBA-строки сверху вниз).
+        using var img = Image.Load<Rgba32>(stream);
+        var hasher = new XxHash128();
+        img.ProcessPixelRows(acc =>
+        {
+            for (int y = 0; y < acc.Height; y++)
+            {
+                ct.ThrowIfCancellationRequested();
+                hasher.Append(System.Runtime.InteropServices.MemoryMarshal.AsBytes(acc.GetRowSpan(y)));
+            }
+        });
+        return hasher.GetCurrentHash();
     }
 
     public string? EnsureThumbnail(string fullPath, string cacheKey, int maxSize = 256)
@@ -193,6 +242,13 @@ public sealed class ImageMatchService : IImageMatchService
     private static FileStream OpenRead(string path) =>
         new(LongPath.Fix(path), FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);
+
+    /// <summary>MemoryStream поверх буфера БЕЗ копирования (если память обёрнута над массивом,
+    /// как в конвейере 2.4); иначе — единственная копия через ToArray.</summary>
+    private static MemoryStream AsStream(ReadOnlyMemory<byte> content) =>
+        System.Runtime.InteropServices.MemoryMarshal.TryGetArray(content, out var seg) && seg.Array is not null
+            ? new MemoryStream(seg.Array, seg.Offset, seg.Count, writable: false)
+            : new MemoryStream(content.ToArray(), writable: false);
 
     private static string MakeSafe(string key)
     {
