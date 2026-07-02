@@ -26,6 +26,12 @@ public partial class FileItemViewModel : ObservableObject
     /// <summary>Файл в папке-эталоне — защищён от удаления (FR-подобно dupeGuru).</summary>
     public bool IsProtected { get; }
 
+    /// <summary>
+    /// 2.10: причина «почему выбран эталоном» — тултип бейджа «Эталон». Заполняется только у
+    /// эталона; вычисляется при построении карточки (в БД не хранится). null — тултипа нет.
+    /// </summary>
+    public string? RepresentativeReason { get; }
+
     /// <summary>Разрешает ли ГРУППА удаление (точная сверенная — да; hash-only/похожие — по правилам).</summary>
     public bool GroupAllowsDeletion { get; }
 
@@ -42,7 +48,7 @@ public partial class FileItemViewModel : ObservableObject
 
     public FileItemViewModel(FileRecord model, double similarity, bool isRepresentative,
         string? fullPath, string? volumeLabel, IImageMatchService thumbs, bool isProtected = false,
-        bool groupAllowsDeletion = true, bool loadThumbnail = true)
+        bool groupAllowsDeletion = true, bool loadThumbnail = true, string? representativeReason = null)
     {
         Model = model;
         Similarity = similarity;
@@ -51,6 +57,7 @@ public partial class FileItemViewModel : ObservableObject
         VolumeLabel = volumeLabel;
         IsProtected = isProtected;
         GroupAllowsDeletion = groupAllowsDeletion;
+        RepresentativeReason = representativeReason;
         _thumbs = thumbs;
 
         // loadThumbnail=false — VM строится только ради галочек/экспорта («Выбрать все», CSV):

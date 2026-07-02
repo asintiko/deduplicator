@@ -17,17 +17,21 @@ public interface IDuplicateGrouper
     /// самый долгий этап). Раньше «Пауза» на этапе «Группировка» игнорировалась: UI показывал
     /// паузу, а диск продолжал молотить на полной скорости (аудит 2026-07-02).
     /// </param>
+    /// <param name="isPreferredKeep">
+    /// «Файл в папке-эталоне» для правила Smart (2.10): строится фасадом (ScanService) из настроек
+    /// и точек монтирования, Core настроек не знает. null — просто нет бонуса папки-эталона.
+    /// </param>
     int BuildExactGroups(IReadOnlyDictionary<long, VolumeRecord> volumes, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null);
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null);
 
     int BuildSimilarImageGroups(double threshold, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null);
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null);
 
     int BuildSimilarAudioGroups(double threshold, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null);
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null);
 
     /// <summary>Удалить группы прошлых сессий, оставив только текущую (P0.1 scope-aware результаты).</summary>
     void ClearGroupsNotInSession(long sessionId);
@@ -65,7 +69,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     public int BuildExactGroups(IReadOnlyDictionary<long, VolumeRecord> volumes, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null)
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null)
     {
         // Чистим ТОЛЬКО точные группы текущей сессии (а не глобально): иначе пересборка в идущем скане
         // стирала бы результаты прошлой ЗАВЕРШЁННОЙ сессии ещё до того, как текущий скан успешно завершится
@@ -106,7 +110,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
                 var (physical, linkCounts) = CollapseHardlinks(vc.Members, volumes);
                 if (physical.Count < 2) continue; // вся группа — hardlink-и на один файл: удалять нечего
 
-                var rep = RepresentativeSelector.Pick(physical, rule);
+                var rep = RepresentativeSelector.Pick(physical, rule, isPreferredKeep);
                 bool isVideo = physical[0].Category == FileCategory.Video;
 
                 // Освобождаемое место: размер не-эталонного файла считаем ТОЛЬКО если у его inode нет
@@ -385,7 +389,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     public int BuildSimilarImageGroups(double threshold, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null)
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null)
     {
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.SimilarImage);
         _lsh.ClearKind(MatchType.SimilarImage);
@@ -456,7 +460,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         }
 
         return PersistSimilarGroups(dsu, byId, MatchType.SimilarImage, rule, onGroups,
-            (rep, member) => SimilarityImage(hashOf, rep, member), ct, sessionId);
+            (rep, member) => SimilarityImage(hashOf, rep, member), ct, sessionId, isPreferredKeep);
     }
 
     private static double SimilarityImage(Dictionary<long, ulong> hashOf, FileRecord rep, FileRecord m)
@@ -470,7 +474,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     public int BuildSimilarAudioGroups(double threshold, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
-        Action? waitGate = null)
+        Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null)
     {
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.SimilarAudio);
         _lsh.ClearKind(MatchType.SimilarAudio);
@@ -539,7 +543,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         }
 
         return PersistSimilarGroups(dsu, byId, MatchType.SimilarAudio, rule, onGroups,
-            (rep, member) => EstimatedJaccard(sigOf[rep.Id], sigOf[member.Id]), ct, sessionId);
+            (rep, member) => EstimatedJaccard(sigOf[rep.Id], sigOf[member.Id]), ct, sessionId, isPreferredKeep);
     }
 
     private static double EstimatedJaccard(uint[] a, uint[] b)
@@ -553,7 +557,8 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     private int PersistSimilarGroups(Dsu dsu, Dictionary<long, FileRecord> byId,
         MatchType type, RepresentativeRule rule, Action<long>? onGroups,
-        Func<FileRecord, FileRecord, double> similarity, CancellationToken ct, long sessionId)
+        Func<FileRecord, FileRecord, double> similarity, CancellationToken ct, long sessionId,
+        Func<FileRecord, bool>? isPreferredKeep = null)
     {
         var pending = new List<DuplicateGroup>();
         int created = 0;
@@ -563,7 +568,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             ct.ThrowIfCancellationRequested();
             if (ids.Count < 2) continue;
             var members = ids.Select(id => byId[id]).ToList();
-            var rep = RepresentativeSelector.Pick(members, rule);
+            var rep = RepresentativeSelector.Pick(members, rule, isPreferredKeep);
 
             var group = new DuplicateGroup
             {

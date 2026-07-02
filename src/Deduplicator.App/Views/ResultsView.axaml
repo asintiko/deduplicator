@@ -16,8 +16,10 @@
                         <PathIcon Data="{Binding CategoryIcon}" Width="40" Height="40"
                                   Foreground="{DynamicResource TextTertiary}"
                                   IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNull}}"/>
+                        <!-- 2.10: тултип — причина «почему выбран эталоном» (вычисляется при построении карточки) -->
                         <Border IsVisible="{Binding IsRepresentative}" VerticalAlignment="Top" HorizontalAlignment="Left"
-                                Margin="8" CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}">
+                                Margin="8" CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}"
+                                ToolTip.Tip="{Binding RepresentativeReason}">
                             <StackPanel Orientation="Horizontal" Spacing="4">
                                 <PathIcon Data="{StaticResource IconStar}" Width="12" Height="12" Foreground="White"/>
                                 <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>

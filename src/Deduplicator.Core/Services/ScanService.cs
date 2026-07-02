@@ -230,6 +230,11 @@ public sealed class ScanService : IScanService, IDisposable
             Func<FileRecord, bool> inScope =
                 f => scanScope.Contains(f) && options.IncludedCategories.Contains(f.Category);
 
+            // 2.10: предикат «файл в папке-эталоне» для умного выбора эталона (KeepScorer).
+            // Core настроек и точек монтирования не знает — фасад строит готовый Func и прокидывает
+            // его в exact-движок и группировку похожих. null (нет папок-эталонов) — бонус не начисляется.
+            Func<FileRecord, bool>? isPreferredKeep = BuildPreferredKeepPredicate(mountById);
+
             var exactRequest = new ExactScanRequest
             {
                 MountById = mountById,
@@ -239,7 +244,8 @@ public sealed class ScanService : IScanService, IDisposable
                 MaxVolumeParallelism = _maxVolumeParallelism,
                 RequestedParallelism = effectiveParallelism,
                 Rule = _representativeRule,
-                SessionId = sessionId
+                SessionId = sessionId,
+                IsPreferredKeep = isPreferredKeep
             };
             var exactResult = _exactEngine.ScanExact(exactRequest, new ScanReporter(this, sessionId, ct), ct);
             // 2.8: точные группы сессии целиком в БД — «Результаты» могут показывать предпросмотр,
@@ -276,12 +282,12 @@ public sealed class ScanService : IScanService, IDisposable
                 SetStage(ScanStage.Grouping, sessionId);
                 _grouper.BuildSimilarImageGroups(imgThreshold, imgInScope, _representativeRule,
                     g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId,
-                    () => WaitGate(ct));
+                    () => WaitGate(ct), isPreferredKeep);
             }
             if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && wantAudio)
                 _grouper.BuildSimilarAudioGroups(audThreshold, audInScope, _representativeRule,
                     g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId,
-                    () => WaitGate(ct));
+                    () => WaitGate(ct), isPreferredKeep);
 
             // Отметить тома как просканированные.
             foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
@@ -356,6 +362,41 @@ public sealed class ScanService : IScanService, IDisposable
             IsPaused = false;
             _gate.Set();
         }
+    }
+
+    /// <summary>
+    /// Предикат «файл в папке-эталоне» для правила Smart (2.10). Строится один раз на скан из
+    /// AppSettings.ReferenceFolders и точек монтирования. null — папок-эталонов нет (частый случай,
+    /// нулевые накладные расходы). Нерезолвящийся путь даёт false (нет БОНУСА) — в отличие от
+    /// защиты от удаления в UI (там неразобранный путь консервативно считается защищённым):
+    /// здесь ошибка в мягкую сторону — файл просто не получает преимущества.
+    /// </summary>
+    private Func<FileRecord, bool>? BuildPreferredKeepPredicate(IReadOnlyDictionary<long, string> mountById)
+    {
+        var roots = _settings.Current.ReferenceFolders
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p =>
+            {
+                try { return Path.GetFullPath(p).TrimEnd('\\', '/'); }
+                catch { return p.TrimEnd('\\', '/'); }
+            })
+            .ToArray();
+        if (roots.Length == 0) return null;
+
+        return f =>
+        {
+            if (!mountById.TryGetValue(f.VolumeId, out var mount)) return false;
+            string full;
+            try { full = Path.GetFullPath(Path.Combine(mount, f.RelPath)); }
+            catch { return false; }
+            foreach (var r in roots)
+            {
+                if (full.Equals(r, StringComparison.OrdinalIgnoreCase) ||
+                    full.StartsWith(r + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        };
     }
 
     /// <summary>Подчистка групп. partialOnly=true — только текущая сессия; иначе — прошлые сессии.

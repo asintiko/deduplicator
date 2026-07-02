@@ -15,6 +15,7 @@ using Deduplicator.App.ViewModels.Items;
 using Deduplicator.Core.Data;
 using Deduplicator.Core.Hashing;
 using Deduplicator.Core.Imaging;
+using Deduplicator.Core.Matching;
 using Deduplicator.Core.Models;
 using Deduplicator.Core.Services;
 using Deduplicator.Core.Util;
@@ -307,7 +308,7 @@ public partial class ResultsViewModel : PageViewModel
             _ => false
         };
 
-        var files = g.Members.Select(m =>
+        var rows = g.Members.Select(m =>
         {
             var f = m.File!;
             string? mount = mountById.GetValueOrDefault(f.VolumeId);
@@ -315,12 +316,56 @@ public partial class ResultsViewModel : PageViewModel
             string? label = labelById.GetValueOrDefault(f.VolumeId);
             bool isRep = m.IsRepresentative || f.Id == g.RepresentativeId;
             bool prot = full is not null && IsUnderReference(full);
-            return new FileItemViewModel(f, m.Similarity, isRep, full, label, _thumbs, prot,
-                groupAllowsDeletion, loadThumbnail: withThumbnails);
-        });
+            return (Member: m, File: f, Full: full, Label: label, IsRep: isRep, Prot: prot);
+        }).ToList();
+
+        // 2.10: причина «почему эталон» — вычисляется заново при построении карточки
+        // (в БД не хранится, схему не трогаем) и показывается тултипом бейджа «Эталон».
+        string? repReason = ExplainRepresentative(rows);
+
+        var files = rows.Select(r => new FileItemViewModel(r.File, r.Member.Similarity, r.IsRep,
+            r.Full, r.Label, _thumbs, r.Prot, groupAllowsDeletion, loadThumbnail: withThumbnails,
+            representativeReason: r.IsRep ? repReason : null));
         var gvm = new GroupItemViewModel(g, files);
         gvm.PropertyChanged += OnGroupPropertyChanged; // отметки → пересчёт доступности «Удалить»
         return gvm;
+    }
+
+    /// <summary>
+    /// 2.10: короткая причина выбора эталона для тултипа бейджа. Для правила Smart — объяснение
+    /// KeepScorer по тем же кандидатам (включая признак «в папке-эталоне»); для простых правил —
+    /// текст самого правила. Причина честна относительно ТЕКУЩЕЙ настройки: если правило сменили
+    /// после скана, группы в БД могли строиться по-старому — но и тогда текст описывает логику,
+    /// по которой эталон будет выбран при следующем скане.
+    /// </summary>
+    private string? ExplainRepresentative(
+        List<(DuplicateMember Member, FileRecord File, string? Full, string? Label, bool IsRep, bool Prot)> rows)
+    {
+        int repIdx = rows.FindIndex(r => r.IsRep);
+        if (repIdx < 0) return null;
+
+        var rule = _settings.Current.DefaultRepresentativeRule;
+        string reason;
+        if (rule == RepresentativeRule.Smart)
+        {
+            var candidates = rows
+                .Select(r => new KeepCandidate(r.File.RelPath, r.File.Name, r.File.Created,
+                    r.File.Mtime, r.File.Size, r.Prot))
+                .ToList();
+            reason = KeepScorer.Explain(candidates, repIdx);
+        }
+        else
+        {
+            reason = rule switch
+            {
+                RepresentativeRule.Oldest => Strings.RuleOldest,
+                RepresentativeRule.Newest => Strings.RuleNewest,
+                RepresentativeRule.ShortestPath => Strings.RuleShortestPath,
+                RepresentativeRule.LongestName => Strings.RuleLongestName,
+                _ => Strings.RuleOldest
+            };
+        }
+        return string.Format(Strings.RepresentativeReasonFmt, reason);
     }
 
     private bool IsUnderReference(string fullPath)

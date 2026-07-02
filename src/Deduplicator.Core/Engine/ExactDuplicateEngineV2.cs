@@ -64,7 +64,7 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
         // и здесь, а не только в size-батчах и хэш-воронке (аудит 2026-07-02).
         rep.Stage(ScanStage.Grouping);
         result.GroupsCreated = _grouper.BuildExactGroups(req.VolumesById, req.InScope, req.Rule, rep.ExactGroups,
-            ct, req.SessionId, rep.WaitGate);
+            ct, req.SessionId, rep.WaitGate, req.IsPreferredKeep);
         return result;
     }
 

@@ -74,6 +74,9 @@ public partial class SettingsViewModel : PageViewModel
         _paths = paths;
         CurrentVersionText = $"{Strings.CurrentVersionLabel}: {update.CurrentVersion}";
 
+        // 2.10: «Умно» — первым в списке (рекомендация), но дефолт существующих пользователей
+        // не меняем: AppSettings.DefaultRepresentativeRule остаётся Oldest.
+        Rules.Add(new RuleOption(RepresentativeRule.Smart, Strings.RuleSmart));
         Rules.Add(new RuleOption(RepresentativeRule.Oldest, Strings.RuleOldest));
         Rules.Add(new RuleOption(RepresentativeRule.Newest, Strings.RuleNewest));
         Rules.Add(new RuleOption(RepresentativeRule.ShortestPath, Strings.RuleShortestPath));

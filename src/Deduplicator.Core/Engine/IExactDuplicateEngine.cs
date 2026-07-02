@@ -26,6 +26,13 @@ public sealed class ExactScanRequest
     /// <summary>Правило выбора эталона группы.</summary>
     public required RepresentativeRule Rule { get; init; }
 
+    /// <summary>
+    /// «Файл в папке-эталоне» для правила Smart (2.10). Строится фасадом (ScanService) из
+    /// AppSettings.ReferenceFolders + точек монтирования — Core настроек не знает.
+    /// null — бонус папки-эталона не начисляется, остальные эвристики Smart работают.
+    /// </summary>
+    public Func<FileRecord, bool>? IsPreferredKeep { get; init; }
+
     /// <summary>Id сессии скана — точные группы помечаются им (scope-aware результаты, P0.1).</summary>
     public long SessionId { get; init; }
 }

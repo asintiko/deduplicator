@@ -124,6 +124,8 @@ public static class Strings
     public const string GroupOf = "Файлов в группе";
     public const string Reclaimable = "Можно освободить";
     public const string Representative = "Эталон";
+    // 2.10: тултип бейджа «Эталон» — короткая причина, почему выбрана именно эта копия.
+    public const string RepresentativeReasonFmt = "Почему эталон: {0}";
     public const string KeepThis = "Оставить";
     public const string MarkForDeletion = "К удалению";
     public const string SelectAllButRepresentative = "Отметить лишние копии";
@@ -159,6 +161,7 @@ public static class Strings
     public const string ConsolidationSources = "Откуда брать файлы";
     public const string ConsolidationTarget = "Куда сложить архив";
     public const string ConsolidationRule = "Как выбрать лучшую копию";
+    public const string RuleSmart = "Умно (рекомендуется)";
     public const string RuleOldest = "Самый старый файл";
     public const string RuleNewest = "Самый новый файл";
     public const string RuleShortestPath = "Кратчайший путь";
