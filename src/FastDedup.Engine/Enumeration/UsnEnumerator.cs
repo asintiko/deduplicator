@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Text;
 
 namespace FastDedup.Engine;
 
@@ -196,35 +195,23 @@ public sealed class UsnEnumerator : IFileEnumerator
     }
 
     /// <summary>
-    /// Разбор последовательности USN-записей. Полноценно поддерживаем USN_RECORD_V2 (его и отдаёт
+    /// Разбор последовательности USN-записей общим парсером (<see cref="UsnRecordParser"/> — тот же
+    /// код разбирает и дельту журнала). Полноценно поддерживаем USN_RECORD_V2 (его и отдаёт
     /// FSCTL_ENUM_USN_DATA с входом V0 на NTFS). Любую другую версию НЕ теряем молча, а считаем —
     /// вызывающий решает, не пора ли откатиться на обычный обход.
     /// </summary>
     private static void ParseRecords(byte[] buf, int length, Dictionary<ulong, Rec> map,
         ref long v2, ref long unsupported)
     {
+        var span = buf.AsSpan(0, length);
         int offset = 8; // пропускаем «следующий FRN»
-        while (offset + 60 <= length)
+        while (UsnRecordParser.TryParse(span, offset, out var rec))
         {
-            var span = buf.AsSpan(offset);
-            uint recLen = BinaryPrimitives.ReadUInt32LittleEndian(span);
-            if (recLen == 0 || offset + (int)recLen > length) break;
-
-            ushort major = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(4));
-            if (major == 2)
+            if (rec.Major == 2)
             {
                 v2++;
-                ulong frn = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8));
-                ulong pfrn = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(16));
-                uint attrs = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(52));
-                ushort nameLen = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(56));
-                ushort nameOff = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(58));
-
-                if (nameOff + nameLen <= recLen && nameLen > 0)
-                {
-                    string name = Encoding.Unicode.GetString(span.Slice(nameOff, nameLen));
-                    map[frn] = new Rec(pfrn, attrs, name);
-                }
+                if (rec.Name.Length > 0)
+                    map[rec.Frn] = new Rec(rec.ParentFrn, rec.Attributes, rec.Name);
             }
             else
             {
@@ -233,7 +220,7 @@ public sealed class UsnEnumerator : IFileEnumerator
                 unsupported++;
             }
 
-            offset += (int)recLen;
+            offset += rec.Length;
         }
     }
 

@@ -29,6 +29,7 @@ internal static class Native
 
     // --- IOCTL / FSCTL коды ---
     public const uint FSCTL_ENUM_USN_DATA = 0x000900b3;
+    public const uint FSCTL_READ_USN_JOURNAL = 0x000900bb;
     public const uint FSCTL_QUERY_USN_JOURNAL = 0x000900f4;
     public const uint FSCTL_GET_RETRIEVAL_POINTERS = 0x00090073;
     public const uint FSCTL_GET_NTFS_VOLUME_DATA = 0x00090064;
@@ -37,6 +38,10 @@ internal static class Native
     // --- Win32 ошибки ---
     public const int ERROR_HANDLE_EOF = 38;
     public const int ERROR_MORE_DATA = 234;
+    // Ошибки чтения дельты USN-журнала: любая из них = «дельта недоступна» → полный пересбор.
+    public const int ERROR_JOURNAL_DELETE_IN_PROGRESS = 1178;
+    public const int ERROR_JOURNAL_NOT_ACTIVE = 1179;
+    public const int ERROR_JOURNAL_ENTRY_DELETED = 1181;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(
@@ -227,6 +232,68 @@ internal static class Native
         {
             if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
         }
+    }
+
+    // --- Открытие по FRN (восстановление путей дельты USN) ---
+
+    private const uint FILE_READ_ATTRIBUTES = 0x0080;          // только метаданные, содержимое не нужно
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000; // без него каталоги не открываются
+
+    /// <summary>FILE_ID_DESCRIPTOR: dwSize(4) + Type(4) + union по 8 (LARGE_INTEGER FileId / GUID / FILE_ID_128 → 16 байт).</summary>
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    private struct FILE_ID_DESCRIPTOR
+    {
+        [FieldOffset(0)] public uint dwSize;
+        [FieldOffset(4)] public int Type; // 0 = FileIdType (64-битный FRN)
+        [FieldOffset(8)] public long FileId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle OpenFileById(
+        SafeFileHandle hVolumeHint, ref FILE_ID_DESCRIPTOR lpFileId, uint dwDesiredAccess,
+        uint dwShareMode, IntPtr lpSecurityAttributes, uint dwFlagsAndAttributes);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        SafeFileHandle hFile, [Out] char[] lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    /// <summary>
+    /// Полный путь файла/каталога по его FRN (для восстановления путей записей дельты USN).
+    /// Открывается с доступом только к атрибутам (FILE_READ_ATTRIBUTES) + BACKUP_SEMANTICS
+    /// (иначе каталог не открыть); volumeHandle — уже открытый хэндл тома. null — при любой
+    /// ошибке (запись удалена, нет прав): вызывающий обязан деградировать в полный пересбор.
+    /// </summary>
+    public static string? TryGetPathByFrn(SafeFileHandle volumeHandle, ulong frn)
+    {
+        try
+        {
+            var desc = new FILE_ID_DESCRIPTOR { dwSize = 24, Type = 0, FileId = unchecked((long)frn) };
+            using var h = OpenFileById(volumeHandle, ref desc, FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, FILE_FLAG_BACKUP_SEMANTICS);
+            if (h.IsInvalid) return null;
+
+            var buf = new char[1024];
+            uint len = GetFinalPathNameByHandleW(h, buf, (uint)buf.Length, 0); // нормализованный DOS-путь
+            if (len > buf.Length) // путь длиннее буфера — len = требуемый размер, повторяем
+            {
+                buf = new char[len];
+                len = GetFinalPathNameByHandleW(h, buf, (uint)buf.Length, 0);
+            }
+            if (len == 0 || len > buf.Length) return null;
+            return StripLongPathPrefix(new string(buf, 0, (int)len));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Обратное к <see cref="LongPath"/>: \\?\C:\x → C:\x, \\?\UNC\srv\share → \\srv\share.</summary>
+    public static string StripLongPathPrefix(string path)
+    {
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + path.Substring(8);
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) return path.Substring(4);
+        return path;
     }
 
     /// <summary>Префикс \\?\ снимает лимит MAX_PATH (260) — иначе длинные пути молча теряются.</summary>

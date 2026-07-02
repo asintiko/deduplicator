@@ -213,12 +213,13 @@ public sealed class ScanService : IScanService, IDisposable
             var scanScope = BuildScanScope(targets, mountById);
 
             // Инкрементальность через USN-журнал: тома, не менявшиеся с прошлого скана, не перечисляем
-            // заново (на 1M файлов это экономит весь обход). Любая неоднозначность → полный пересбор.
+            // заново (на 1M файлов это экономит весь обход); тома с НЕБОЛЬШИМИ изменениями (3.1)
+            // обновляются точечно по дельте журнала. Любая неоднозначность → полный пересбор.
             string optionsHash = OptionsHash(options);
-            var (skipVolumes, journalSnaps) = PlanIncremental(targets, volumesById, options, optionsHash);
+            var (skipVolumes, journalSnaps, deltaPlans) = PlanIncremental(targets, volumesById, options, optionsHash);
 
             // === Этап 1: обход и метаданные (пропуская неизменившиеся тома) ===
-            Enumerate(targets, mountById, ct, sessionId, skipVolumes);
+            Enumerate(targets, mountById, ct, sessionId, skipVolumes, deltaPlans);
 
             // === Этапы 2–5: точные дубликаты через движок v2 ===
             // Потоковая воронка (size→partial→full→byte-verify→группы), без N+1 по размеру.
@@ -414,7 +415,8 @@ public sealed class ScanService : IScanService, IDisposable
     // ---------------- Этап 1: обход ----------------
 
     private void Enumerate(List<ScanTarget> targets, Dictionary<long, string> mountById,
-        CancellationToken ct, long sessionId, HashSet<long> skipVolumes)
+        CancellationToken ct, long sessionId, HashSet<long> skipVolumes,
+        Dictionary<long, UsnDeltaPlanRequest> deltaPlans)
     {
         SetStage(ScanStage.Enumerating, sessionId);
 
@@ -444,57 +446,24 @@ public sealed class ScanService : IScanService, IDisposable
                 continue;
             }
 
-            var seen = new HashSet<long>();
-            var batch = new List<FileRecord>(MetaBatch);
-            // 2.7: вместо загрузки ВСЕГО индекса тома в словарь (250–500 МБ на 1–2 млн файлов) —
-            // пакетный lookup: кандидаты копятся в буфер, и одним SELECT ... rel_path IN (...) на
-            // пачку подтягиваются существующие метаданные (FlushLookup ниже).
-            var lookupBuffer = new List<(FileRecord Record, string FullPath)>(LookupBatch);
+            // 3.1: том менялся МАЛО — точечный реконсайл по дельте USN-журнала вместо полного
+            // перечисления. Успех → том дальше ведёт себя как Unchanged: seen/prune НЕ выполняются
+            // (прунинг разрешён только при полном обходе), а в scan_scope_files том, как и
+            // Unchanged-том, ничего не добавляет — воронка идёт по сохранённым в БД данным плюс
+            // обновлённым дельтой строкам (предикат BuildScanScope целый том и так покрывает,
+            // а режим Folders-скана с целым томом в PlanIncremental — тот же редкий случай, что и
+            // у Unchanged; поведение области сознательно идентично skipVolumes). Неуспех дельты
+            // (недоступна/аномалия) — честный полный пересбор тома ниже, причина уже в логе.
+            if (deltaPlans.TryGetValue(volumeId, out var deltaPlan) &&
+                TryApplyUsnDelta(volumeId, mountRoot, deltaPlan, sessionId, ct))
+                continue;
+
+            // Пер-томовое состояние индексирования (meta-пачки, пакетный lookup 2.7, seen) —
+            // общий код обработки одного файла для перечисления и дельта-реконсайла.
+            var indexer = new VolumeIndexer(this, volumeId, mountRoot, sessionId);
             bool wholeVolume = false;
             int enumErrors = 0;   // ошибки перечисления этого тома (недоступные поддеревья, отказ корня)
             long cloudSkipped = 0; // пропущено облачных/reparse-элементов (OneDrive-плейсхолдеры, симлинки)
-
-            // Общий сброс meta-пачки (семантика прежняя: Upsert → seen → прогресс сессии).
-            void FlushMetaBatch()
-            {
-                _files.UpsertMetaBatch(batch);
-                foreach (var b in batch) seen.Add(b.Id);
-                batch.Clear();
-                var snap = Snapshot();
-                _sessions.UpdateProgress(sessionId, ScanStage.Enumerating, snap.FilesSeen, snap.FilesSkipped);
-            }
-
-            // 2.7: решает судьбу накопленных инкрементальных кандидатов ПАЧКОЙ. Логика та же, что
-            // была по-файлово: строгая тройная сверка size+mtime+created (точно, без допуска ±2с —
-            // файл могли переписать содержимым того же размера, а sync/backup-инструмент сохранить
-            // близкий timestamp, раздел P0) → строка переиспользуется БЕЗ перехэша (seen.Add, хэши
-            // и verified_full_hash сохранены). Любое расхождение или новая строка → UpsertMetaBatch,
-            // где хэши и verified_full_hash сбрасываются. existing.Created == default — строка из
-            // старой БД до миграции «created» (значение не сохранялось): тогда сверяем только
-            // size+mtime, чтобы не гнать ОДНОРАЗОВЫЙ полный перехэш всей базы после обновления.
-            void FlushLookup()
-            {
-                if (lookupBuffer.Count == 0) return;
-                var existingByPath = _files.GetExistingMetaByPaths(volumeId,
-                    lookupBuffer.Select(t => t.Record.RelPath).ToList());
-                foreach (var (record, fullPath) in lookupBuffer)
-                {
-                    if (existingByPath.TryGetValue(record.RelPath, out var existing) &&
-                        existing.Size == record.Size &&
-                        existing.Mtime == record.Mtime &&
-                        (existing.Created == default || existing.Created == record.Created))
-                    {
-                        seen.Add(existing.Id);
-                        Report(p => p.FilesSeen++);
-                        continue; // оставляем существующую запись с её хэшами
-                    }
-
-                    batch.Add(record);
-                    Report(p => { p.FilesSeen++; p.CurrentFile = fullPath; });
-                    if (batch.Count >= MetaBatch) FlushMetaBatch();
-                }
-                lookupBuffer.Clear();
-            }
 
             foreach (var target in volumeGroup)
             {
@@ -526,58 +495,7 @@ public sealed class ScanService : IScanService, IDisposable
                     WaitGate(ct);
                     try
                     {
-                        // Системные папки и skip-файлы раньше отсекал EnumerateFilesSafe/SkipDir/SkipFile.
-                        // В USN-режиме движок выдаёт плоский список всего тома — $Recycle.Bin и т.п. отсекаем тут.
-                        var relForSkip = Path.GetRelativePath(mountRoot, ef.FullPath);
-                        if (IsUnderSystemFolder(relForSkip)) continue;
-                        if (SkipFileByAttrs(ef.Attributes, ef.Size, ef.FullPath)) continue;
-
-                        var fi = new FileEntry(ef.FullPath, ef.Size,
-                            new DateTimeOffset(DateTime.FromFileTimeUtc(ef.LastWriteRaw), TimeSpan.Zero),
-                            new DateTimeOffset(DateTime.FromFileTimeUtc(ef.CreationRaw), TimeSpan.Zero));
-
-                        var cleanFull = fi.FullClean;
-                        var rel = Path.GetRelativePath(mountRoot, cleanFull);
-                        var ext = Path.GetExtension(cleanFull);
-                        var category = DetectCategory(cleanFull, ext);
-
-                        // P0-A «Что искать»: файлы невыбранных категорий не индексируем —
-                        // exact/похожие будут строиться только по выбранным типам.
-                        if (!_options.IncludedCategories.Contains(category))
-                        {
-                            Report(p => p.FilesSkipped++);
-                            continue;
-                        }
-
-                        var record = new FileRecord
-                        {
-                            VolumeId = volumeId,
-                            RelPath = rel,
-                            Name = Path.GetFileName(cleanFull),
-                            Ext = string.IsNullOrEmpty(ext) ? null : ext,
-                            Size = fi.Length,
-                            Mtime = fi.LastWrite,
-                            Created = fi.Created,
-                            Category = category,
-                            ScanState = ScanState.Meta,
-                            LastIndexed = DateTimeOffset.Now
-                        };
-
-                        // Инкрементальность: решение о переиспользовании строки принимается ПАЧКОЙ
-                        // (2.7, см. FlushLookup выше) — кандидат копится в буфер, существующие
-                        // метаданные подтягиваются одним SELECT на пачку, весь индекс тома в память
-                        // не грузится. Критерий строгого совпадения не менялся.
-                        if (_options.Incremental)
-                        {
-                            lookupBuffer.Add((record, cleanFull));
-                            if (lookupBuffer.Count >= LookupBatch) FlushLookup();
-                            continue;
-                        }
-
-                        batch.Add(record);
-                        Report(p => { p.FilesSeen++; p.CurrentFile = cleanFull; });
-
-                        if (batch.Count >= MetaBatch) FlushMetaBatch();
+                        indexer.Process(ef);
                     }
                     catch (OperationCanceledException) { throw; }
                     catch
@@ -587,13 +505,8 @@ public sealed class ScanService : IScanService, IDisposable
                 }
             }
 
-            FlushLookup(); // 2.7: хвост буфера инкрементальных кандидатов (< LookupBatch)
-            if (batch.Count > 0)
-            {
-                _files.UpsertMetaBatch(batch);
-                foreach (var b in batch) seen.Add(b.Id);
-                batch.Clear();
-            }
+            indexer.FlushAll(); // хвост meta-пачки и буфера инкрементальных кандидатов (2.7)
+            var seen = indexer.Seen;
 
             if (Interlocked.Read(ref cloudSkipped) > 0)
                 NoteEnumerationNotice(
@@ -638,6 +551,152 @@ public sealed class ScanService : IScanService, IDisposable
                 AppLog.Error("AddScope", ex);
                 try { _files.ClearScope(sessionId); } catch { /* fallback на глобальный запрос */ }
             }
+        }
+    }
+
+    /// <summary>
+    /// Пер-томовое состояние этапа индексирования: meta-пачки, пакетный lookup инкрементальных
+    /// кандидатов (2.7) и набор seen для прунинга/области. Вынесено из Enumerate, чтобы обработка
+    /// одного файла была ОБЩИМ кодом обычного перечисления и дельта-реконсайла USN (3.1): фильтры,
+    /// категории и строгое переиспользование метаданных не могут разойтись между путями.
+    /// </summary>
+    private sealed class VolumeIndexer
+    {
+        private readonly ScanService _s;
+        private readonly long _volumeId;
+        private readonly string _mountRoot;
+        private readonly long _sessionId;
+        private readonly List<FileRecord> _batch = new(MetaBatch);
+        // 2.7: вместо загрузки ВСЕГО индекса тома в словарь (250–500 МБ на 1–2 млн файлов) —
+        // пакетный lookup: кандидаты копятся в буфер, и одним SELECT ... rel_path IN (...) на
+        // пачку подтягиваются существующие метаданные (FlushLookup ниже).
+        private readonly List<(FileRecord Record, string FullPath)> _lookupBuffer = new(LookupBatch);
+
+        /// <summary>Id встреченных строк (заполняется на флашах) — для прунинга и области скана.</summary>
+        public HashSet<long> Seen { get; } = new();
+
+        public VolumeIndexer(ScanService s, long volumeId, string mountRoot, long sessionId)
+        {
+            _s = s;
+            _volumeId = volumeId;
+            _mountRoot = mountRoot;
+            _sessionId = sessionId;
+        }
+
+        /// <summary>
+        /// Обработка одного файла перечисления/дельты. true — файл прошёл фильтры и остаётся в
+        /// индексе (записан или строго переиспользован); false — отфильтрован (системная папка,
+        /// атрибуты/размер/расширение, невыбранная категория) и в индексе ему не место.
+        /// </summary>
+        public bool Process(Fde.EnumeratedFile ef)
+        {
+            // Системные папки и skip-файлы раньше отсекал EnumerateFilesSafe/SkipDir/SkipFile.
+            // В USN-режиме движок выдаёт плоский список всего тома — $Recycle.Bin и т.п. отсекаем тут.
+            var relForSkip = Path.GetRelativePath(_mountRoot, ef.FullPath);
+            if (IsUnderSystemFolder(relForSkip)) return false;
+            if (_s.SkipFileByAttrs(ef.Attributes, ef.Size, ef.FullPath)) return false;
+
+            var fi = new FileEntry(ef.FullPath, ef.Size,
+                new DateTimeOffset(DateTime.FromFileTimeUtc(ef.LastWriteRaw), TimeSpan.Zero),
+                new DateTimeOffset(DateTime.FromFileTimeUtc(ef.CreationRaw), TimeSpan.Zero));
+
+            var cleanFull = fi.FullClean;
+            var rel = Path.GetRelativePath(_mountRoot, cleanFull);
+            var ext = Path.GetExtension(cleanFull);
+            var category = _s.DetectCategory(cleanFull, ext);
+
+            // P0-A «Что искать»: файлы невыбранных категорий не индексируем —
+            // exact/похожие будут строиться только по выбранным типам.
+            if (!_s._options.IncludedCategories.Contains(category))
+            {
+                _s.Report(p => p.FilesSkipped++);
+                return false;
+            }
+
+            var record = new FileRecord
+            {
+                VolumeId = _volumeId,
+                RelPath = rel,
+                Name = Path.GetFileName(cleanFull),
+                Ext = string.IsNullOrEmpty(ext) ? null : ext,
+                Size = fi.Length,
+                Mtime = fi.LastWrite,
+                Created = fi.Created,
+                Category = category,
+                ScanState = ScanState.Meta,
+                LastIndexed = DateTimeOffset.Now
+            };
+
+            // Инкрементальность: решение о переиспользовании строки принимается ПАЧКОЙ
+            // (2.7, см. FlushLookup ниже) — кандидат копится в буфер, существующие
+            // метаданные подтягиваются одним SELECT на пачку, весь индекс тома в память
+            // не грузится. Критерий строгого совпадения не менялся.
+            if (_s._options.Incremental)
+            {
+                _lookupBuffer.Add((record, cleanFull));
+                if (_lookupBuffer.Count >= LookupBatch) FlushLookup();
+                return true;
+            }
+
+            _batch.Add(record);
+            _s.Report(p => { p.FilesSeen++; p.CurrentFile = cleanFull; });
+
+            if (_batch.Count >= MetaBatch) FlushMetaBatch();
+            return true;
+        }
+
+        /// <summary>Хвост буферов в конце тома (семантика прежнего кода Enumerate сохранена).</summary>
+        public void FlushAll()
+        {
+            FlushLookup(); // 2.7: хвост буфера инкрементальных кандидатов (< LookupBatch)
+            if (_batch.Count > 0)
+            {
+                _s._files.UpsertMetaBatch(_batch);
+                foreach (var b in _batch) Seen.Add(b.Id);
+                _batch.Clear();
+            }
+        }
+
+        // Общий сброс meta-пачки (семантика прежняя: Upsert → seen → прогресс сессии).
+        private void FlushMetaBatch()
+        {
+            _s._files.UpsertMetaBatch(_batch);
+            foreach (var b in _batch) Seen.Add(b.Id);
+            _batch.Clear();
+            var snap = _s.Snapshot();
+            _s._sessions.UpdateProgress(_sessionId, ScanStage.Enumerating, snap.FilesSeen, snap.FilesSkipped);
+        }
+
+        // 2.7: решает судьбу накопленных инкрементальных кандидатов ПАЧКОЙ. Логика та же, что
+        // была по-файлово: строгая тройная сверка size+mtime+created (точно, без допуска ±2с —
+        // файл могли переписать содержимым того же размера, а sync/backup-инструмент сохранить
+        // близкий timestamp, раздел P0) → строка переиспользуется БЕЗ перехэша (seen.Add, хэши
+        // и verified_full_hash сохранены). Любое расхождение или новая строка → UpsertMetaBatch,
+        // где хэши и verified_full_hash сбрасываются. existing.Created == default — строка из
+        // старой БД до миграции «created» (значение не сохранялось): тогда сверяем только
+        // size+mtime, чтобы не гнать ОДНОРАЗОВЫЙ полный перехэш всей базы после обновления.
+        private void FlushLookup()
+        {
+            if (_lookupBuffer.Count == 0) return;
+            var existingByPath = _s._files.GetExistingMetaByPaths(_volumeId,
+                _lookupBuffer.Select(t => t.Record.RelPath).ToList());
+            foreach (var (record, fullPath) in _lookupBuffer)
+            {
+                if (existingByPath.TryGetValue(record.RelPath, out var existing) &&
+                    existing.Size == record.Size &&
+                    existing.Mtime == record.Mtime &&
+                    (existing.Created == default || existing.Created == record.Created))
+                {
+                    Seen.Add(existing.Id);
+                    _s.Report(p => p.FilesSeen++);
+                    continue; // оставляем существующую запись с её хэшами
+                }
+
+                _batch.Add(record);
+                _s.Report(p => { p.FilesSeen++; p.CurrentFile = fullPath; });
+                if (_batch.Count >= MetaBatch) FlushMetaBatch();
+            }
+            _lookupBuffer.Clear();
         }
     }
 
@@ -691,17 +750,23 @@ public sealed class ScanService : IScanService, IDisposable
         return Convert.ToHexString(hash);
     }
 
+    /// <summary>Заявка на дельта-реконсайл тома: журнал и диапазон [StartUsn; StopUsn) для чтения.</summary>
+    private readonly record struct UsnDeltaPlanRequest(ulong JournalId, long StartUsn, long StopUsn);
+
     /// <summary>
-    /// Решает, какие тома можно НЕ перечислять (без изменений по USN-журналу), и возвращает снимки
-    /// журнала для последующего сохранения. Только целый том NTFS под админом попадает в план; иначе
-    /// журнал недоступен и том сканируется полностью. Любая неоднозначность → полный пересбор.
+    /// Решает, какие тома можно НЕ перечислять (без изменений по USN-журналу) или обновить ТОЧЕЧНО
+    /// по дельте журнала (3.1), и возвращает снимки журнала для последующего сохранения. Только
+    /// целый том NTFS под админом попадает в план; иначе журнал недоступен и том сканируется
+    /// полностью. Любая неоднозначность → полный пересбор.
     /// </summary>
-    private (HashSet<long> skip, Dictionary<long, Fde.UsnJournalSnapshot> snaps) PlanIncremental(
+    private (HashSet<long> skip, Dictionary<long, Fde.UsnJournalSnapshot> snaps,
+        Dictionary<long, UsnDeltaPlanRequest> deltas) PlanIncremental(
         List<ScanTarget> targets, Dictionary<long, VolumeRecord> volumesById, ScanOptions options, string optionsHash)
     {
         var skip = new HashSet<long>();
         var snaps = new Dictionary<long, Fde.UsnJournalSnapshot>();
-        if (!options.Incremental || !OperatingSystem.IsWindows()) return (skip, snaps);
+        var deltas = new Dictionary<long, UsnDeltaPlanRequest>();
+        if (!options.Incremental || !OperatingSystem.IsWindows()) return (skip, snaps, deltas);
 
         foreach (var grp in targets.GroupBy(t => t.VolumeId))
         {
@@ -718,10 +783,89 @@ public sealed class ScanService : IScanService, IDisposable
                 saved, journalAvailable: true, unchecked((long)snap.JournalId), snap.FirstUsn, snap.NextUsn,
                 IncrementalScanPlanner.EngineVersion, optionsHash);
             AppLog.Write($"Инкрементальность тома «{vol.DisplayName}»: {decision.Kind} — {decision.Reason}.");
-            if (decision.Kind == ScanPlanKind.Unchanged) skip.Add(vid);
-            // Incremental (точечный реконсайл по записям журнала) пока не реализован → полный пересбор (безопасно).
+            if (decision.Kind == ScanPlanKind.Unchanged)
+            {
+                skip.Add(vid);
+            }
+            else if (decision.Kind == ScanPlanKind.Incremental)
+            {
+                // 3.1: точечный реконсайл. Дельта читается с СОХРАНЁННОГО NextUsn (водяной знак
+                // прошлого скана, Decide гарантирует saved != null) до NextUsn текущего снимка;
+                // применение — в Enumerate/TryApplyUsnDelta, любая аномалия там → полный пересбор.
+                deltas[vid] = new UsnDeltaPlanRequest(snap.JournalId, saved!.NextUsn, snap.NextUsn);
+            }
         }
-        return (skip, snaps);
+        return (skip, snaps, deltas);
+    }
+
+    /// <summary>
+    /// 3.1: точечный реконсайл тома по дельте USN-журнала вместо полного перечисления (сотня
+    /// изменений на миллионе файлов: минуты обхода → секунды). true — дельта применена, том дальше
+    /// ведёт себя как Unchanged (prune/seen/область не трогаются); false — дельта недоступна или
+    /// аномалия (причина в логе) → вызывающий делает полный пересбор тома.
+    ///
+    /// Гарантия «дельта не теряет файлы»: любые сомнения (усечение журнала, записи не-V2, запись
+    /// без имени, каталожные rename/delete, невосстановимый путь, кап 100k записей, отключение
+    /// носителя, любой сбой применения) → false и полный пересбор. Уже применённые к БД изменения
+    /// при этом безопасны: удалялись только строки путей, изменение которых журнал зафиксировал
+    /// достоверно, а полный пересбор перестраивает строки заново (upsert).
+    /// </summary>
+    private bool TryApplyUsnDelta(long volumeId, string mountRoot, UsnDeltaPlanRequest req,
+        long sessionId, CancellationToken ct)
+    {
+        Fde.UsnDeltaResult delta;
+        try
+        {
+            delta = Fde.UsnDeltaReader.ReadResolved(mountRoot, req.JournalId, req.StartUsn, req.StopUsn);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("UsnDelta.Read", ex); // ридер guarded, но пояс и подтяжки
+            return false;
+        }
+        if (!delta.Available)
+        {
+            AppLog.Write($"Том {volumeId} ({mountRoot}): дельта USN недоступна — {delta.UnavailableReason}; полный пересбор.");
+            return false;
+        }
+
+        var plan = UsnDeltaPlanner.Build(delta.Changes);
+        if (plan.AnomalyReason is not null)
+        {
+            AppLog.Write($"Том {volumeId} ({mountRoot}): аномалия дельты USN — {plan.AnomalyReason}; полный пересбор.");
+            return false;
+        }
+
+        // Общий с обычным перечислением путь индексирования (фильтры/категории/строгое
+        // переиспользование 2.7 → UpsertMetaBatch, где хэши и verified_full_hash сбрасываются).
+        var indexer = new VolumeIndexer(this, volumeId, mountRoot, sessionId);
+        var hooks = new UsnDeltaApplyHooks
+        {
+            Stat = Fde.FileStatReader.TryGet,
+            TryIndexFile = ef =>
+            {
+                WaitGate(ct); // пауза/отмена действуют и на дельте
+                // Каталоги и reparse-точки обычное перечисление отфильтровывает ещё в движке
+                // (FastFileLister) — здесь та же граница, чтобы не индексировать их через дельту.
+                const uint DIRECTORY = 0x10, REPARSE_POINT = 0x400;
+                if ((ef.Attributes & (DIRECTORY | REPARSE_POINT)) != 0) return false;
+                return indexer.Process(ef);
+            },
+            DeleteByRelPath = rel => _files.DeleteByVolumeAndPath(volumeId, rel),
+            VolumeAlive = () => Directory.Exists(mountRoot)
+        };
+
+        var outcome = UsnDeltaExecutor.Apply(plan, mountRoot, hooks);
+        if (!outcome.Success)
+        {
+            AppLog.Write($"Том {volumeId} ({mountRoot}): применение дельты USN прервано — {outcome.AnomalyReason}; полный пересбор.");
+            return false;
+        }
+
+        indexer.FlushAll();
+        NoteEnumerationNotice(
+            $"Быстрое обновление по журналу USN ({mountRoot}): изменений {outcome.Reindexed}, удалений {outcome.Deleted}");
+        return true;
     }
 
     /// <summary>
@@ -731,6 +875,9 @@ public sealed class ScanService : IScanService, IDisposable
     /// значения, поэтому следующий скан увидит USN &gt; сохранённого и сделает пересбор (не пропустит
     /// изменение). Хранить NextUsn конца скана было бы ОПАСНО: изменения, случившиеся во время обхода
     /// и не попавшие в индекс, оказались бы «ниже водяного знака» и были бы пропущены как «без изменений».
+    /// Для дельта-реконсайла (3.1) этот же snap.NextUsn — корректный НОВЫЙ водяной знак: дельта
+    /// читалась и применялась ровно до него (StopUsn), а изменения во время скана лежат выше и
+    /// будут дочитаны следующей дельтой (повторное применение идемпотентно — restat смотрит на диск).
     /// </summary>
     private void StoreJournalState(Dictionary<long, Fde.UsnJournalSnapshot> snaps, string optionsHash)
     {

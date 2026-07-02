@@ -57,7 +57,8 @@ public static class UsnJournalReader
         }
     }
 
-    private static string VolumeOf(string path)
+    /// <summary>«C:» из любого пути тома. internal — переиспользуется дельта-чтением журнала.</summary>
+    internal static string VolumeOf(string path)
     {
         var root = Path.GetPathRoot(Path.GetFullPath(path));
         if (root is { Length: >= 2 } && root[1] == ':') return root.Substring(0, 2);

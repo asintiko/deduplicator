@@ -692,6 +692,23 @@ public sealed class FileRepository
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Удалить строку по (volume_id, rel_path) — дельта-реконсайл USN (3.1): файл удалён или уехал
+    /// (rename). Сравнение rel_path байтовое, как и UNIQUE-индекс files (см. GetExistingMetaByPaths):
+    /// несовпадение регистра оставит устаревшую строку, которую уберёт ближайший полный скан с
+    /// прунингом, а preflight удаления (P0.3) не даст по ней действовать. 0 удалённых строк — норма
+    /// (файл появился и исчез между сканами, в индексе его не было).
+    /// </summary>
+    public int DeleteByVolumeAndPath(long volumeId, string relPath)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM files WHERE volume_id=$v AND rel_path=$p";
+        cmd.Add("$v", volumeId);
+        cmd.Add("$p", relPath);
+        return cmd.ExecuteNonQuery();
+    }
+
     /// <summary>Удалить из БД записи тома, не встреченные при последнем сканировании.</summary>
     public int PruneVolume(long volumeId, IReadOnlyCollection<long> keptIds)
     {
