@@ -56,9 +56,10 @@ public class Sprint5PerceptualTests : IDisposable
         Assert.Equal(5, collected.Count);
         Assert.Equal(collected.OrderBy(x => x).ToList(), collected);
 
-        // После проставления phash файл выбывает из выборки.
+        // После проставления phash (текущей версии — этап 2.2) файл выбывает из выборки.
         var one = files.GetById(collected[0])!;
         one.PHash = new byte[] { 1, 2, 3 };
+        one.PHashVer = Deduplicator.Core.Imaging.ImageMatchService.CurrentPHashVersion;
         files.UpdateComputedBatch(new[] { one });
         Assert.Equal(4, files.CountNeedingPerceptual(FileCategory.Image));
     }

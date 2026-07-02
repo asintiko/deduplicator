@@ -32,7 +32,9 @@ public class Sprint11Projact7Tests : IDisposable
     {
         VolumeId = volId, RelPath = $"img{i}.jpg", Name = $"img{i}.jpg", Ext = ".jpg",
         Size = 1000 + i, Mtime = DateTimeOffset.Now, Category = FileCategory.Image,
-        PHash = phash, ScanState = phash is null ? ScanState.Meta : ScanState.Perceptual
+        PHash = phash, ScanState = phash is null ? ScanState.Meta : ScanState.Perceptual,
+        // Заполненный pHash — текущей версии алгоритма, иначе строка снова попадёт в пересчёт (этап 2.2).
+        PHashVer = phash is null ? 1 : Deduplicator.Core.Imaging.ImageMatchService.CurrentPHashVersion
     };
 
     // === P0: пересборка групп в идущем скане НЕ стирает результаты другой (завершённой) сессии ===
@@ -172,7 +174,12 @@ public class Sprint11Projact7Tests : IDisposable
         Assert.True(page.All(f => inScope.Any(x => x.Id == f.Id)));   // только файлы области
 
         // Теперь проставим pHash всем — проверим GetByCategoryWithPerceptual со scope.
-        foreach (var f in outside.Concat(inScope)) f.PHash = new byte[] { 9 };
+        // Версия — текущая: со старой (v1) строки остались бы в выборке needing-perceptual (этап 2.2).
+        foreach (var f in outside.Concat(inScope))
+        {
+            f.PHash = new byte[] { 9 };
+            f.PHashVer = Deduplicator.Core.Imaging.ImageMatchService.CurrentPHashVersion;
+        }
         files.UpdateComputedBatch(outside.Concat(inScope).ToList());
         Assert.Equal(12, files.GetByCategoryWithPerceptual(FileCategory.Image).Count);       // глобально
         Assert.Equal(2, files.GetByCategoryWithPerceptual(FileCategory.Image, s).Count);     // только область

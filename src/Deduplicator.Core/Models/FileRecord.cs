@@ -33,6 +33,9 @@ public sealed class FileRecord
     /// <summary>Перцептивный хэш изображения (64-битный dHash/pHash в little-endian).</summary>
     public byte[]? PHash { get; set; }
 
+    /// <summary>Версия алгоритма pHash (см. ImageMatchService.CurrentPHashVersion).</summary>
+    public int PHashVer { get; set; } = 1;
+
     /// <summary>Хэш декодированных пикселей (опц., для одинаковых картинок разного формата).</summary>
     public byte[]? PixelHash { get; set; }
 

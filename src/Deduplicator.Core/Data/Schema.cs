@@ -36,6 +36,7 @@ internal static class Schema
         scan_state   TEXT,
         last_indexed TEXT,
         partial_ver  INTEGER NOT NULL DEFAULT 1,
+        phash_ver    INTEGER NOT NULL DEFAULT 1,
         UNIQUE(volume_id, rel_path)
     );
     CREATE INDEX IF NOT EXISTS idx_files_size     ON files(size);
@@ -139,6 +140,9 @@ internal static class Schema
         ("duplicate_groups", "scan_session_id", "ALTER TABLE duplicate_groups ADD COLUMN scan_session_id INTEGER"),
         // Версия алгоритма частичного хэша (этап 1.6): v2 добавляет средний блок для файлов >128 МБ.
         // Старые строки остаются v1 и пересчитываются ТОЛЬКО для крупных (у мелких алгоритм не менялся).
-        ("files", "partial_ver", "ALTER TABLE files ADD COLUMN partial_ver INTEGER NOT NULL DEFAULT 1")
+        ("files", "partial_ver", "ALTER TABLE files ADD COLUMN partial_ver INTEGER NOT NULL DEFAULT 1"),
+        // Версия алгоритма pHash (этап 2.2): v2 декодирует в TargetSize 256×256 — значения сдвигаются
+        // на единицы бит, старые строки (v1) пересчитываются, чтобы не смешивать версии в группировке.
+        ("files", "phash_ver", "ALTER TABLE files ADD COLUMN phash_ver INTEGER NOT NULL DEFAULT 1")
     };
 }

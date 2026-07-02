@@ -13,7 +13,8 @@ public sealed class FileRepository
 
     private const string Cols =
         "f.id, f.volume_id, f.rel_path, f.name, f.ext, f.size, f.mtime, f.created, f.category, " +
-        "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed, f.partial_ver";
+        "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed, " +
+        "f.partial_ver, f.phash_ver";
 
     // ---- Чтение ----
 
@@ -359,13 +360,36 @@ public sealed class FileRepository
     /// </summary>
     public int PropagatePerceptualByFullHash(FileCategory category)
     {
-        // Имена колонок — из фиксированного списка (не пользовательский ввод).
-        string[] cols = category == FileCategory.Image
-            ? new[] { "phash", "pixel_hash" }
-            : new[] { "audio_fp" };
-
         using var conn = _db.Open();
         int filled = 0;
+
+        if (category == FileCategory.Image)
+        {
+            // pHash версионируется (этап 2.2): переносим ТОЛЬКО значения текущей версии и ставим
+            // получателю ту же версию — иначе старый (v1) pHash «заражал» бы новые строки и они
+            // выпадали бы из пересчёта, смешивая версии в одной группировке. Получатели — строки
+            // без pHash или со старой версией (им всё равно предстоял пересчёт, экономим декод).
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    UPDATE files SET phash = (
+                        SELECT f2.phash FROM files f2
+                        WHERE f2.full_hash = files.full_hash AND f2.phash IS NOT NULL
+                          AND f2.phash_ver = $ver AND f2.id <> files.id
+                        LIMIT 1), phash_ver = $ver
+                    WHERE (phash IS NULL OR phash_ver < $ver) AND full_hash IS NOT NULL AND category = $cat
+                      AND EXISTS (SELECT 1 FROM files f3
+                                  WHERE f3.full_hash = files.full_hash AND f3.phash IS NOT NULL
+                                    AND f3.phash_ver = $ver AND f3.id <> files.id)
+                    """;
+                cmd.Add("$ver", Imaging.ImageMatchService.CurrentPHashVersion);
+                cmd.Add("$cat", Mappers.CategoryToDb(category));
+                filled += cmd.ExecuteNonQuery();
+            }
+        }
+
+        // Имена колонок — из фиксированного списка (не пользовательский ввод).
+        string[] cols = category == FileCategory.Image ? new[] { "pixel_hash" } : new[] { "audio_fp" };
         foreach (var col in cols)
         {
             using var cmd = conn.CreateCommand();
@@ -384,14 +408,30 @@ public sealed class FileRepository
         return filled;
     }
 
+    /// <summary>
+    /// SQL-условие «перцептивный признак ещё нужен» для категории. Для изображений учитывает
+    /// версию алгоритма pHash: строки со старой версией пересчитываются (этап 2.2), см.
+    /// ImageMatchService.CurrentPHashVersion. Параметр $phv добавляет <see cref="AddPerceptualParams"/>.
+    /// </summary>
+    private static string NeedingPerceptualCond(FileCategory category) =>
+        category == FileCategory.Image
+            ? "(f.phash IS NULL OR f.phash_ver < $phv)"
+            : "f.audio_fp IS NULL";
+
+    private static void AddPerceptualParams(SqliteCommand cmd, FileCategory category)
+    {
+        cmd.Add("$c", Mappers.CategoryToDb(category));
+        if (category == FileCategory.Image)
+            cmd.Add("$phv", Imaging.ImageMatchService.CurrentPHashVersion);
+    }
+
     /// <summary>Файлы заданной категории, для которых ещё не посчитан перцептивный признак.</summary>
     public List<FileRecord> GetNeedingPerceptual(FileCategory category)
     {
         using var conn = _db.Open();
         using var cmd = conn.CreateCommand();
-        var col = category == FileCategory.Image ? "phash" : "audio_fp";
-        cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.category=$c AND f.{col} IS NULL";
-        cmd.Add("$c", Mappers.CategoryToDb(category));
+        cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.category=$c AND {NeedingPerceptualCond(category)}";
+        AddPerceptualParams(cmd, category);
         using var r = cmd.ExecuteReader();
         var list = new List<FileRecord>();
         while (r.Read()) list.Add(Map(r));
@@ -408,12 +448,12 @@ public sealed class FileRepository
         using var conn = _db.Open();
         bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
-        var col = category == FileCategory.Image ? "phash" : "audio_fp";
+        var cond = NeedingPerceptualCond(category);
         cmd.CommandText = scoped
             ? $"SELECT COUNT(*) FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
-              $"WHERE f.category=$c AND f.{col} IS NULL"
-            : $"SELECT COUNT(*) FROM files WHERE category=$c AND {col} IS NULL";
-        cmd.Add("$c", Mappers.CategoryToDb(category));
+              $"WHERE f.category=$c AND {cond}"
+            : $"SELECT COUNT(*) FROM files f WHERE f.category=$c AND {cond}";
+        AddPerceptualParams(cmd, category);
         if (scoped) cmd.Add("$sid", sessionId);
         return (long)cmd.ExecuteScalar()!;
     }
@@ -428,14 +468,14 @@ public sealed class FileRepository
         using var conn = _db.Open();
         bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
-        var col = category == FileCategory.Image ? "phash" : "audio_fp";
+        var cond = NeedingPerceptualCond(category);
         // При scope-скане джойним область сессии (file_id, session_id), иначе тянули бы всю библиотеку тома.
         cmd.CommandText = scoped
             ? $"SELECT {Cols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
-              $"WHERE f.category=$c AND f.{col} IS NULL AND f.id > $after ORDER BY f.id LIMIT $lim"
-            : $"SELECT {Cols} FROM files f WHERE f.category=$c AND f.{col} IS NULL AND f.id > $after " +
+              $"WHERE f.category=$c AND {cond} AND f.id > $after ORDER BY f.id LIMIT $lim"
+            : $"SELECT {Cols} FROM files f WHERE f.category=$c AND {cond} AND f.id > $after " +
               "ORDER BY f.id LIMIT $lim";
-        cmd.Add("$c", Mappers.CategoryToDb(category));
+        AddPerceptualParams(cmd, category);
         cmd.Add("$after", afterId);
         cmd.Add("$lim", limit);
         if (scoped) cmd.Add("$sid", sessionId);
@@ -492,16 +532,17 @@ public sealed class FileRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT INTO files (volume_id, rel_path, name, ext, size, mtime, created, category,
-                               partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed, partial_ver)
+                               partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed,
+                               partial_ver, phash_ver)
             VALUES ($vol, $rel, $name, $ext, $size, $mtime, $created, $cat,
-                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver)
+                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver, $phver)
             ON CONFLICT(volume_id, rel_path) DO UPDATE SET
                 name=excluded.name, ext=excluded.ext, size=excluded.size, mtime=excluded.mtime,
                 created=excluded.created, category=excluded.category,
                 partial_hash=excluded.partial_hash, full_hash=excluded.full_hash,
                 phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
                 scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
-                partial_ver=excluded.partial_ver
+                partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver
             RETURNING id;
             """;
         var pVol = cmd.CreateParameter(); pVol.ParameterName = "$vol"; cmd.Parameters.Add(pVol);
@@ -520,6 +561,7 @@ public sealed class FileRepository
         var pState = cmd.CreateParameter(); pState.ParameterName = "$state"; cmd.Parameters.Add(pState);
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
         var pVer = cmd.CreateParameter(); pVer.ParameterName = "$pver"; cmd.Parameters.Add(pVer);
+        var pPhVer = cmd.CreateParameter(); pPhVer.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer);
 
         foreach (var f in batch)
         {
@@ -539,6 +581,7 @@ public sealed class FileRepository
             pState.Value = Mappers.StateToDb(f.ScanState);
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
             pVer.Value = f.PartialVer;
+            pPhVer.Value = f.PHashVer;
             f.Id = (long)cmd.ExecuteScalar()!;
         }
         tx.Commit();
@@ -554,7 +597,8 @@ public sealed class FileRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             UPDATE files SET partial_hash=$ph, full_hash=$fh, phash=$phash, pixel_hash=$pix,
-                             audio_fp=$afp, scan_state=$state, last_indexed=$idx, partial_ver=$pver
+                             audio_fp=$afp, scan_state=$state, last_indexed=$idx, partial_ver=$pver,
+                             phash_ver=$phver
             WHERE id=$id;
             """;
         var pPh = cmd.CreateParameter(); pPh.ParameterName = "$ph"; cmd.Parameters.Add(pPh);
@@ -565,6 +609,7 @@ public sealed class FileRepository
         var pState = cmd.CreateParameter(); pState.ParameterName = "$state"; cmd.Parameters.Add(pState);
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
         var pVer2 = cmd.CreateParameter(); pVer2.ParameterName = "$pver"; cmd.Parameters.Add(pVer2);
+        var pPhVer2 = cmd.CreateParameter(); pPhVer2.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer2);
         var pId = cmd.CreateParameter(); pId.ParameterName = "$id"; cmd.Parameters.Add(pId);
 
         foreach (var f in batch)
@@ -577,6 +622,7 @@ public sealed class FileRepository
             pState.Value = Mappers.StateToDb(f.ScanState);
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
             pVer2.Value = f.PartialVer;
+            pPhVer2.Value = f.PHashVer;
             pId.Value = f.Id;
             cmd.ExecuteNonQuery();
         }
@@ -671,7 +717,8 @@ public sealed class FileRepository
         AudioFp = r.Blob(13),
         ScanState = Mappers.ParseState(r.Str(14)),
         LastIndexed = Db.ParseDateOrNull(r.Str(15)),
-        PartialVer = (int)r.Long(16)
+        PartialVer = (int)r.Long(16),
+        PHashVer = (int)r.Long(17)
     };
 }
 

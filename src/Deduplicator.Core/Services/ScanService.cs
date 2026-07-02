@@ -744,16 +744,27 @@ public sealed class ScanService : IScanService, IDisposable
                     f.Category, f.Size, f.Created, f.Mtime, f.RelPath, profile)).ToList();
                 skippedByProfile += before - chunk.Count;
             }
+            // Строки со СТАРЫМ (v1) pHash до пересчёта: если новый расчёт не удастся (иконка меньше
+            // 64×64 после префильтра, битый файл, cloud-заглушка), устаревшее значение надо СБРОСИТЬ —
+            // группировка версию не фильтрует, и v1 вечно мешался бы с v2 у порога Хэмминга.
+            var hadStalePHash = chunk
+                .Where(f => f.PHash is not null && f.PHashVer < ImageMatchService.CurrentPHashVersion)
+                .Select(f => f.Id).ToHashSet();
             ComputeParallel(chunk, mountById, (f, path) =>
             {
                 f.PHash = _images.ComputePHash(path, ct);
                 if (_computePixelHash) f.PixelHash = _images.ComputePixelHash(path, ct);
-                if (f.PHash is not null && f.ScanState < ScanState.Perceptual)
-                    f.ScanState = ScanState.Perceptual;
+                if (f.PHash is not null)
+                {
+                    // Пересчитанный pHash — всегда текущей версии алгоритма (этап 2.2).
+                    f.PHashVer = ImageMatchService.CurrentPHashVersion;
+                    if (f.ScanState < ScanState.Perceptual) f.ScanState = ScanState.Perceptual;
+                }
             }, ct);
-            var done = chunk.Where(f => f.PHash is not null).ToList();
+            // Пишем успешные расчёты и сбросы устаревших v1-хэшей (у них f.PHash обнулён расчётом).
+            var done = chunk.Where(f => f.PHash is not null || hadStalePHash.Contains(f.Id)).ToList();
             _files.UpdateComputedBatch(done);
-            computed += done.Count;
+            computed += done.Count(f => f.PHash is not null);
 
             processedImages += page.Count;
             Report(p => p.Fraction = Math.Min(1.0, processedImages / (double)total));
