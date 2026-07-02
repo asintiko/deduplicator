@@ -14,7 +14,7 @@ public sealed class FileRepository
     private const string Cols =
         "f.id, f.volume_id, f.rel_path, f.name, f.ext, f.size, f.mtime, f.created, f.category, " +
         "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed, " +
-        "f.partial_ver, f.phash_ver";
+        "f.partial_ver, f.phash_ver, f.verified_full_hash";
 
     // ---- Чтение ----
 
@@ -29,19 +29,34 @@ public sealed class FileRepository
         return r.Read() ? Map(r) : null;
     }
 
-    public Dictionary<string, ExistingFileMeta> GetExistingMetaByVolume(long volumeId)
+    /// <summary>
+    /// Существующие метаданные ПАЧКИ путей одним SELECT на чанк (2.7): инкрементальный скан больше
+    /// не грузит весь индекс тома в словарь (250–500 МБ на 1–2 млн файлов), а решает судьбу файлов
+    /// пакетами по нескольку сотен (паттерн AddScope). Сравнение rel_path в SQL — байтовое, как и
+    /// UNIQUE-индекс files: путь с изменённым регистром (после переименования) не совпадёт и будет
+    /// переиндексирован заново — это безопасно (лишний перехэш, а не пропуск изменения).
+    /// </summary>
+    public Dictionary<string, ExistingFileMeta> GetExistingMetaByPaths(long volumeId, IReadOnlyList<string> relPaths)
     {
-        using var conn = _db.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, rel_path, size, mtime, created FROM files WHERE volume_id=$v";
-        cmd.Add("$v", volumeId);
-        using var r = cmd.ExecuteReader();
         var map = new Dictionary<string, ExistingFileMeta>(StringComparer.OrdinalIgnoreCase);
-        while (r.Read())
+        if (relPaths.Count == 0) return map;
+
+        using var conn = _db.Open();
+        foreach (var chunk in relPaths.Chunk(400))
         {
-            var relPath = r.Str(1);
-            if (string.IsNullOrWhiteSpace(relPath)) continue;
-            map[relPath] = new ExistingFileMeta(r.Long(0), r.Long(2), Db.ParseDate(r.Str(3)), Db.ParseDate(r.Str(4)));
+            using var cmd = conn.CreateCommand();
+            var names = new List<string>(chunk.Length);
+            for (int i = 0; i < chunk.Length; i++) { var n = "$p" + i; names.Add(n); cmd.Add(n, chunk[i]); }
+            cmd.Add("$v", volumeId);
+            cmd.CommandText = "SELECT id, rel_path, size, mtime, created FROM files " +
+                              $"WHERE volume_id=$v AND rel_path IN ({string.Join(",", names)})";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var relPath = r.Str(1);
+                if (string.IsNullOrWhiteSpace(relPath)) continue;
+                map[relPath] = new ExistingFileMeta(r.Long(0), r.Long(2), Db.ParseDate(r.Str(3)), Db.ParseDate(r.Str(4)));
+            }
         }
         return map;
     }
@@ -522,6 +537,11 @@ public sealed class FileRepository
     /// <summary>
     /// Вставка/обновление метаданных пачкой в одной транзакции; проставляет Id в записи.
     /// Хэши берутся из записи (для новых/изменившихся — null).
+    /// 2.5: verified_full_hash при этом сбрасывается ВСЕГДА (INSERT даёт NULL по умолчанию,
+    /// DO UPDATE пишет NULL явно): в ScanService.Enumerate строка попадает в UpsertMetaBatch
+    /// ИМЕННО когда строгое реиспользование метаданных (size+mtime+created) не сработало —
+    /// файл новый, изменён или скан неинкрементальный, — и прежняя побайтовая сверка больше
+    /// ничего не доказывает. VerifiedFullHash из самой записи сознательно игнорируется.
     /// </summary>
     public void UpsertMetaBatch(IReadOnlyList<FileRecord> batch)
     {
@@ -542,7 +562,8 @@ public sealed class FileRepository
                 partial_hash=excluded.partial_hash, full_hash=excluded.full_hash,
                 phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
                 scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
-                partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver
+                partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver,
+                verified_full_hash=NULL
             RETURNING id;
             """;
         var pVol = cmd.CreateParameter(); pVol.ParameterName = "$vol"; cmd.Parameters.Add(pVol);
@@ -587,7 +608,10 @@ public sealed class FileRepository
         tx.Commit();
     }
 
-    /// <summary>Обновить вычисленные хэши/признаки пачкой.</summary>
+    /// <summary>Обновить вычисленные хэши/признаки пачкой.
+    /// 2.5: verified_full_hash сохраняется ТОЛЬКО пока байтово равен записываемому full_hash;
+    /// если движок пересчитал full_hash (или обнулил его), старая побайтовая сверка относится
+    /// к другому содержимому — кэш пишется как NULL.</summary>
     public void UpdateComputedBatch(IReadOnlyList<FileRecord> batch)
     {
         if (batch.Count == 0) return;
@@ -598,7 +622,7 @@ public sealed class FileRepository
         cmd.CommandText = """
             UPDATE files SET partial_hash=$ph, full_hash=$fh, phash=$phash, pixel_hash=$pix,
                              audio_fp=$afp, scan_state=$state, last_indexed=$idx, partial_ver=$pver,
-                             phash_ver=$phver
+                             phash_ver=$phver, verified_full_hash=$vfh
             WHERE id=$id;
             """;
         var pPh = cmd.CreateParameter(); pPh.ParameterName = "$ph"; cmd.Parameters.Add(pPh);
@@ -610,10 +634,14 @@ public sealed class FileRepository
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
         var pVer2 = cmd.CreateParameter(); pVer2.ParameterName = "$pver"; cmd.Parameters.Add(pVer2);
         var pPhVer2 = cmd.CreateParameter(); pPhVer2.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer2);
+        var pVfh = cmd.CreateParameter(); pVfh.ParameterName = "$vfh"; cmd.Parameters.Add(pVfh);
         var pId = cmd.CreateParameter(); pId.ParameterName = "$id"; cmd.Parameters.Add(pId);
 
         foreach (var f in batch)
         {
+            // Инвариант кэша сверки: в БД verified_full_hash либо NULL, либо байтово равен full_hash.
+            bool verifiedStillValid = f.FullHash is not null && f.VerifiedFullHash is not null &&
+                                      f.VerifiedFullHash.AsSpan().SequenceEqual(f.FullHash);
             pPh.Value = (object?)f.PartialHash ?? DBNull.Value;
             pFh.Value = (object?)f.FullHash ?? DBNull.Value;
             pPhash.Value = (object?)f.PHash ?? DBNull.Value;
@@ -623,7 +651,33 @@ public sealed class FileRepository
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
             pVer2.Value = f.PartialVer;
             pPhVer2.Value = f.PHashVer;
+            pVfh.Value = verifiedStillValid ? f.VerifiedFullHash! : (object)DBNull.Value;
             pId.Value = f.Id;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// 2.5: записать кэш побайтовой сверки пачкой (после успешной кластеризации в
+    /// DuplicateGrouper.ByteVerifyClusters). Страховка от гонки с перехэшированием: значение
+    /// проставляется ТОЛЬКО строкам, у которых full_hash в БД байтово равен записываемому —
+    /// инвариант «verified_full_hash равен full_hash или NULL» не нарушается никогда.
+    /// </summary>
+    public void UpdateVerifiedFullHashBatch(IReadOnlyList<(long FileId, byte[] Hash)> items)
+    {
+        if (items.Count == 0) return;
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "UPDATE files SET verified_full_hash=$h WHERE id=$id AND full_hash=$h";
+        var pH = cmd.CreateParameter(); pH.ParameterName = "$h"; cmd.Parameters.Add(pH);
+        var pId = cmd.CreateParameter(); pId.ParameterName = "$id"; cmd.Parameters.Add(pId);
+        foreach (var (fileId, hash) in items)
+        {
+            pH.Value = hash;
+            pId.Value = fileId;
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -718,7 +772,8 @@ public sealed class FileRepository
         ScanState = Mappers.ParseState(r.Str(14)),
         LastIndexed = Db.ParseDateOrNull(r.Str(15)),
         PartialVer = (int)r.Long(16),
-        PHashVer = (int)r.Long(17)
+        PHashVer = (int)r.Long(17),
+        VerifiedFullHash = r.Blob(18)
     };
 }
 

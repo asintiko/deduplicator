@@ -30,6 +30,15 @@ public sealed class FileRecord
     public int PartialVer { get; set; } = 1;
     public byte[]? FullHash { get; set; }
 
+    /// <summary>
+    /// Кэш побайтовой сверки (2.5): НЕ null и байтово равен <see cref="FullHash"/> — файл уже
+    /// проходил сверку чтением против содержимого с этим хэшем. Валиден только пока метаданные
+    /// строки строго переиспользуются: любой Upsert строки или пересчёт full_hash обнуляет кэш
+    /// (см. FileRepository.UpsertMetaBatch/UpdateComputedBatch). Значение, не равное FullHash,
+    /// при чтении игнорируется.
+    /// </summary>
+    public byte[]? VerifiedFullHash { get; set; }
+
     /// <summary>Перцептивный хэш изображения (64-битный dHash/pHash в little-endian).</summary>
     public byte[]? PHash { get; set; }
 

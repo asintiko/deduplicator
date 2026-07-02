@@ -37,6 +37,9 @@ public sealed class ScanService : IScanService, IDisposable
 {
     private const int MetaBatch = 2000;
     private const int HashBatch = 500;
+    // 2.7: размер пачки для lookup существующих метаданных при инкрементальном скане
+    // (паттерн AddScope: до 400 параметров в IN — ниже лимита SQLite на параметры).
+    private const int LookupBatch = 400;
 
     private readonly VolumeRepository _volumes;
     private readonly FileRepository _files;
@@ -361,12 +364,55 @@ public sealed class ScanService : IScanService, IDisposable
 
             var seen = new HashSet<long>();
             var batch = new List<FileRecord>(MetaBatch);
-            var existingByPath = _options.Incremental
-                ? _files.GetExistingMetaByVolume(volumeId)
-                : new Dictionary<string, ExistingFileMeta>(StringComparer.OrdinalIgnoreCase);
+            // 2.7: вместо загрузки ВСЕГО индекса тома в словарь (250–500 МБ на 1–2 млн файлов) —
+            // пакетный lookup: кандидаты копятся в буфер, и одним SELECT ... rel_path IN (...) на
+            // пачку подтягиваются существующие метаданные (FlushLookup ниже).
+            var lookupBuffer = new List<(FileRecord Record, string FullPath)>(LookupBatch);
             bool wholeVolume = false;
             int enumErrors = 0;   // ошибки перечисления этого тома (недоступные поддеревья, отказ корня)
             long cloudSkipped = 0; // пропущено облачных/reparse-элементов (OneDrive-плейсхолдеры, симлинки)
+
+            // Общий сброс meta-пачки (семантика прежняя: Upsert → seen → прогресс сессии).
+            void FlushMetaBatch()
+            {
+                _files.UpsertMetaBatch(batch);
+                foreach (var b in batch) seen.Add(b.Id);
+                batch.Clear();
+                var snap = Snapshot();
+                _sessions.UpdateProgress(sessionId, ScanStage.Enumerating, snap.FilesSeen, snap.FilesSkipped);
+            }
+
+            // 2.7: решает судьбу накопленных инкрементальных кандидатов ПАЧКОЙ. Логика та же, что
+            // была по-файлово: строгая тройная сверка size+mtime+created (точно, без допуска ±2с —
+            // файл могли переписать содержимым того же размера, а sync/backup-инструмент сохранить
+            // близкий timestamp, раздел P0) → строка переиспользуется БЕЗ перехэша (seen.Add, хэши
+            // и verified_full_hash сохранены). Любое расхождение или новая строка → UpsertMetaBatch,
+            // где хэши и verified_full_hash сбрасываются. existing.Created == default — строка из
+            // старой БД до миграции «created» (значение не сохранялось): тогда сверяем только
+            // size+mtime, чтобы не гнать ОДНОРАЗОВЫЙ полный перехэш всей базы после обновления.
+            void FlushLookup()
+            {
+                if (lookupBuffer.Count == 0) return;
+                var existingByPath = _files.GetExistingMetaByPaths(volumeId,
+                    lookupBuffer.Select(t => t.Record.RelPath).ToList());
+                foreach (var (record, fullPath) in lookupBuffer)
+                {
+                    if (existingByPath.TryGetValue(record.RelPath, out var existing) &&
+                        existing.Size == record.Size &&
+                        existing.Mtime == record.Mtime &&
+                        (existing.Created == default || existing.Created == record.Created))
+                    {
+                        seen.Add(existing.Id);
+                        Report(p => p.FilesSeen++);
+                        continue; // оставляем существующую запись с её хэшами
+                    }
+
+                    batch.Add(record);
+                    Report(p => { p.FilesSeen++; p.CurrentFile = fullPath; });
+                    if (batch.Count >= MetaBatch) FlushMetaBatch();
+                }
+                lookupBuffer.Clear();
+            }
 
             foreach (var target in volumeGroup)
             {
@@ -435,36 +481,21 @@ public sealed class ScanService : IScanService, IDisposable
                             LastIndexed = DateTimeOffset.Now
                         };
 
-                        // Инкрементальность: переиспользуем хэши только при СТРОГОМ совпадении отпечатка
-                        // (размер + mtime + дата создания — точно, без допуска ±2с). Любое расхождение →
-                        // перехэшируем. Допуск ±2с был небезопасен: файл могли переписать содержимым того
-                        // же размера, а sync/backup-инструмент — сохранить близкий timestamp (раздел P0).
-                        // existing.Created == default — строка из старой БД до миграции «created»
-                        // (значение не сохранялось): тогда сверяем только size+mtime, чтобы не гнать
-                        // ОДНОРАЗОВЫЙ полный перехэш всей базы после обновления. Для свежих строк —
-                        // строгая тройная сверка.
-                        if (_options.Incremental &&
-                            existingByPath.TryGetValue(rel, out var existing) &&
-                            existing.Size == record.Size &&
-                            existing.Mtime == record.Mtime &&
-                            (existing.Created == default || existing.Created == record.Created))
+                        // Инкрементальность: решение о переиспользовании строки принимается ПАЧКОЙ
+                        // (2.7, см. FlushLookup выше) — кандидат копится в буфер, существующие
+                        // метаданные подтягиваются одним SELECT на пачку, весь индекс тома в память
+                        // не грузится. Критерий строгого совпадения не менялся.
+                        if (_options.Incremental)
                         {
-                            seen.Add(existing.Id);
-                            Report(p => p.FilesSeen++);
-                            continue; // оставляем существующую запись с её хэшами
+                            lookupBuffer.Add((record, cleanFull));
+                            if (lookupBuffer.Count >= LookupBatch) FlushLookup();
+                            continue;
                         }
 
                         batch.Add(record);
                         Report(p => { p.FilesSeen++; p.CurrentFile = cleanFull; });
 
-                        if (batch.Count >= MetaBatch)
-                        {
-                            _files.UpsertMetaBatch(batch);
-                            foreach (var b in batch) seen.Add(b.Id);
-                            batch.Clear();
-                            var snap = Snapshot();
-                            _sessions.UpdateProgress(sessionId, ScanStage.Enumerating, snap.FilesSeen, snap.FilesSkipped);
-                        }
+                        if (batch.Count >= MetaBatch) FlushMetaBatch();
                     }
                     catch (OperationCanceledException) { throw; }
                     catch
@@ -474,6 +505,7 @@ public sealed class ScanService : IScanService, IDisposable
                 }
             }
 
+            FlushLookup(); // 2.7: хвост буфера инкрементальных кандидатов (< LookupBatch)
             if (batch.Count > 0)
             {
                 _files.UpsertMetaBatch(batch);

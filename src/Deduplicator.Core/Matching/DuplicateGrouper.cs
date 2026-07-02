@@ -74,6 +74,9 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.ExactVideo);
 
         var pending = new List<DuplicateGroup>();
+        // 2.5: накопитель кэша побайтовой сверки — пишется в БД пачками (той же каденцией FlushEvery),
+        // чтобы не открывать транзакцию на каждую группу.
+        var pendingVerified = new List<(long FileId, byte[] Hash)>();
         int created = 0;
 
         // 1.5: файлы выбираем ПАЧКАМИ хэшей (200 за запрос), а не по одному хэшу (N+1):
@@ -94,7 +97,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             var files = hashGroup.Where(inScope).ToList();
             if (files.Count < 2) continue;
 
-            foreach (var vc in ByteVerifyClusters(files, volumes, ct, waitGate))
+            foreach (var vc in ByteVerifyClusters(files, volumes, ct, waitGate, pendingVerified))
             {
                 if (vc.Members.Count < 2) continue;
 
@@ -142,13 +145,25 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             {
                 _groups.InsertGroups(pending, sessionId);
                 pending.Clear();
+                FlushVerified(pendingVerified);
                 onGroups?.Invoke(created);
             }
         }
         }
         if (pending.Count > 0) _groups.InsertGroups(pending, sessionId);
+        FlushVerified(pendingVerified);
         onGroups?.Invoke(created);
         return created;
+    }
+
+    /// <summary>Сброс накопленного кэша сверки в БД. Кэш — оптимизация: его сбой логируем,
+    /// но группировку не роняем (следующий скан просто сверит чтением заново).</summary>
+    private void FlushVerified(List<(long FileId, byte[] Hash)> pendingVerified)
+    {
+        if (pendingVerified.Count == 0) return;
+        try { _files.UpdateVerifiedFullHashBatch(pendingVerified); }
+        catch (Exception ex) { AppLog.Error("UpdateVerifiedFullHashBatch", ex); }
+        pendingVerified.Clear();
     }
 
     private const double HashOnlyExactConfidence = 0.99;
@@ -185,10 +200,18 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     /// Подключённые читаемые файлы кластеризуются строгой попарной сверкой друг с другом. Офлайн/
     /// нечитаемые файлы нельзя проверить — они подвешиваются как hash-only члены (группа получает
     /// confidence &lt; 1.0 и не подлежит автоудалению).
+    ///
+    /// 2.5: кэш сверки (verified_full_hash). Файл с валидным кэшем (значение байтово равно его
+    /// full_hash) уже проходил побайтовую сверку против содержимого с этим хэшем, а его метаданные
+    /// с тех пор строго переиспользованы (любой другой путь — UpsertMetaBatch или пересчёт full_hash —
+    /// обнуляет кэш). Такие файлы кластеризуются между собой БЕЗ чтения; новые/сброшенные сверяются,
+    /// как раньше, чтением против головы кластера. RevalidateBeforeDelete в UI это не отменяет —
+    /// перед удалением содержимое всегда пересчитывается заново (последний рубеж).
+    /// В <paramref name="verifiedOut"/> добавляются члены успешно сверенного кластера для записи кэша.
     /// </summary>
     private List<VerifiedCluster> ByteVerifyClusters(
         List<FileRecord> files, IReadOnlyDictionary<long, VolumeRecord> volumes, CancellationToken ct,
-        Action? waitGate = null)
+        Action? waitGate = null, List<(long FileId, byte[] Hash)>? verifiedOut = null)
     {
         var readable = new List<(FileRecord Rec, string Path)>();
         var unverifiable = new List<FileRecord>(); // отключён ИЛИ подключён, но не читается
@@ -214,7 +237,26 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         var clusters = new List<List<FileRecord>>();
         var headPaths = new List<string>();
         var headSeq = new List<bool>();
+
+        // 2.5: сначала — файлы с валидным кэшем: они сверялись против ОДИНАКОВОГО содержимого
+        // (одного full_hash) и объединяются без чтения. Группировка идёт по XxHash128-ключу от
+        // блоба full_hash, поэтому защитно сравниваем сами блобы: разные full_hash (теоретическая
+        // коллизия ключа) в один кластер не попадают.
+        var fresh = new List<(FileRecord Rec, string Path)>();
         foreach (var (rec, path) in readable)
+        {
+            if (!HasValidVerifiedCache(rec)) { fresh.Add((rec, path)); continue; }
+            int idx = clusters.FindIndex(c => c[0].FullHash!.AsSpan().SequenceEqual(rec.FullHash!));
+            if (idx >= 0) clusters[idx].Add(rec);
+            else
+            {
+                clusters.Add(new List<FileRecord> { rec });
+                headPaths.Add(path); // голова смешанного кластера: новые файлы сверяются с ней чтением
+                headSeq.Add(Seq(volumes, rec.VolumeId));
+            }
+        }
+
+        foreach (var (rec, path) in fresh)
         {
             ct.ThrowIfCancellationRequested();
             waitGate?.Invoke(); // сверка читает файлы целиком — пауза обязана работать именно здесь
@@ -235,7 +277,32 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
                 }
                 if (equal) { clusters[i].Add(rec); placed = true; break; }
             }
-            if (!placed) { clusters.Add(new List<FileRecord> { rec }); headPaths.Add(path); }
+            if (!placed)
+            {
+                clusters.Add(new List<FileRecord> { rec });
+                headPaths.Add(path);
+                headSeq.Add(recSeq); // без этого headSeq[i] падал на 2-м файле HDD-тома (латентный баг)
+            }
+        }
+
+        // 2.5: запись кэша — ТОЛЬКО когда все читаемые файлы сошлись в ОДИН байт-сверенный кластер.
+        // Два и более кластера означают разные содержимые с одним full_hash (коллизия хэша или сбой
+        // чтения): кэшировать нельзя, иначе повторный скан склеил бы разные байты без чтения.
+        // Кластер-одиночка тоже не кэшируется: его файл ни с чем не сверялся (вакуумная «сверка»),
+        // а кэш обязан означать реально выполненную побайтовую сверку хотя бы с одной копией — иначе
+        // два никогда не сравнивавшихся одиночки позже склеились бы в группу 1.0 без единого чтения.
+        if (clusters.Count == 1 && clusters[0].Count >= 2 && verifiedOut is not null)
+        {
+            foreach (var rec in clusters[0])
+            {
+                if (rec.FullHash is null || HasValidVerifiedCache(rec)) continue;
+                rec.VerifiedFullHash = rec.FullHash; // и в памяти — инвариант тот же, что в БД
+                verifiedOut.Add((rec.Id, rec.FullHash));
+            }
+        }
+        else if (clusters.Count > 1)
+        {
+            AppLog.Write($"Побайтовая сверка: {clusters.Count} разных содержимых при одном full_hash — кэш сверки не записывается.");
         }
 
         var result = clusters.Select(c => new VerifiedCluster(c, ByteVerified: true)).ToList();
@@ -258,6 +325,14 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         }
         return result;
     }
+
+    /// <summary>
+    /// Кэш сверки валиден: verified_full_hash присутствует и БАЙТОВО равен текущему full_hash (2.5).
+    /// Любое другое значение (в т.ч. от прежнего full_hash) игнорируется — файл сверяется чтением.
+    /// </summary>
+    private static bool HasValidVerifiedCache(FileRecord f) =>
+        f.VerifiedFullHash is not null && f.FullHash is not null &&
+        f.VerifiedFullHash.AsSpan().SequenceEqual(f.FullHash);
 
     /// <summary>Можно ли реально прочитать файл (а не только что он «существует»). Дешёвая проба 1 байта.</summary>
     private static bool IsReadable(string path)

@@ -37,6 +37,10 @@ internal static class Schema
         last_indexed TEXT,
         partial_ver  INTEGER NOT NULL DEFAULT 1,
         phash_ver    INTEGER NOT NULL DEFAULT 1,
+        -- 2.5: кэш побайтовой сверки. НЕ NULL и байтово равен full_hash — файл уже проходил
+        -- сверку чтением против содержимого с этим хэшем; валиден только пока метаданные строки
+        -- строго переиспользуются (любой Upsert/пересчёт full_hash обнуляет, см. FileRepository).
+        verified_full_hash BLOB,
         UNIQUE(volume_id, rel_path)
     );
     CREATE INDEX IF NOT EXISTS idx_files_size     ON files(size);
@@ -143,6 +147,9 @@ internal static class Schema
         ("files", "partial_ver", "ALTER TABLE files ADD COLUMN partial_ver INTEGER NOT NULL DEFAULT 1"),
         // Версия алгоритма pHash (этап 2.2): v2 декодирует в TargetSize 256×256 — значения сдвигаются
         // на единицы бит, старые строки (v1) пересчитываются, чтобы не смешивать версии в группировке.
-        ("files", "phash_ver", "ALTER TABLE files ADD COLUMN phash_ver INTEGER NOT NULL DEFAULT 1")
+        ("files", "phash_ver", "ALTER TABLE files ADD COLUMN phash_ver INTEGER NOT NULL DEFAULT 1"),
+        // Кэш побайтовой сверки (этап 2.5): старые строки получают NULL — «не сверялся», первый скан
+        // сверит чтением и заполнит; повторные сканы неизменённых файлов пойдут без чтения содержимого.
+        ("files", "verified_full_hash", "ALTER TABLE files ADD COLUMN verified_full_hash BLOB")
     };
 }
