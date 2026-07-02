@@ -387,6 +387,12 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     // ---------------- Похожие изображения ----------------
 
+    // 3.6: параметры потоковой группировки похожих фото — размер страницы лёгкой выборки
+    // прохода 1 и чанк вставки LSH-строк (строки не копятся все разом: 8 строк на файл —
+    // на 1М фото это был бы список на сотни МБ).
+    private const int SlimPageSize = 5000;
+    private const int LshInsertChunk = 100_000;
+
     public int BuildSimilarImageGroups(double threshold, Func<FileRecord, bool> inScope,
         RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
         Action? waitGate = null, Func<FileRecord, bool>? isPreferredKeep = null)
@@ -394,40 +400,76 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.SimilarImage);
         _lsh.ClearKind(MatchType.SimilarImage);
 
-        // Scope-aware: похожие ищем только среди файлов текущей области (не по всей базе) — фильтр scope-aware
-        // SQL по сессии + предикат inScope как страховка.
-        var imgs = _files.GetByCategoryWithPerceptual(FileCategory.Image, sessionId).Where(inScope).ToList();
-        if (imgs.Count < 2) return 0;
-
-        var byId = imgs.ToDictionary(f => f.Id);
-        var hashOf = new Dictionary<long, ulong>(imgs.Count);
-        foreach (var f in imgs) hashOf[f.Id] = PerceptualLsh.ToHash(f.PHash);
-
+        // 3.6: двухпроходная потоковая группировка. Раньше вся фототека материализовалась разом
+        // (тяжёлые FileRecord с блобами хэшей — пик ~1 ГБ на 1М фото); теперь ПРОХОД 1 идёт по
+        // лёгкой выборке (перцептивные признаки + поля предикатов, постранично keyset по id), а
+        // полные записи дотягиваются ПРОХОДОМ 2 только для файлов, попавших в группы (обычно малая
+        // доля фототеки). Семантика групп не меняется: тот же DSU, те же пороги, тот же выбор
+        // эталона (включая Sharpness-ветку 3.7), inScope применяется, как раньше, к каждой записи
+        // (слим-выборка содержит все поля, которые читают предикаты: том/путь/категорию/размер/даты).
+        var hashOf = new Dictionary<long, ulong>();
+        var orderedIds = new List<long>();
         var dsu = new Dsu();
-        foreach (var f in imgs) dsu.MakeSet(f.Id);
-
-        // 1) Точное совпадение pixel-hash → одинаковое изображение, иные метаданные (FR-14).
-        UnionByExactBlob(imgs, f => f.PixelHash, dsu);
-        // 2) Точное совпадение pHash — дёшево объединяем.
-        UnionByExactHash(imgs, hashOf, dsu);
-
-        // 3) Корзины LSH.
+        // Блобы pixel_hash живут только в этом словаре и освобождаются с концом прохода 1.
+        var pixelSeen = new Dictionary<UInt128, List<(byte[] Blob, long FirstId)>>();
+        var phashSeen = new Dictionary<ulong, long>();
         var buckets = new Dictionary<(int, long), List<long>>();
         var lshRows = new List<(int, long, long)>();
-        foreach (var f in imgs)
+
+        long afterId = 0;
+        while (true)
         {
-            var h = hashOf[f.Id];
-            foreach (var (band, key) in PerceptualLsh.BandKeys(h))
+            ct.ThrowIfCancellationRequested();
+            waitGate?.Invoke();
+            // Scope-aware: SQL-фильтр по области сессии + предикат inScope как страховка (как раньше).
+            var page = _files.GetPerceptualSlimPage(FileCategory.Image, afterId, SlimPageSize, sessionId);
+            if (page.Count == 0) break;
+            afterId = page[^1].Id;
+
+            foreach (var f in page)
             {
-                var bk = (band, key);
-                if (!buckets.TryGetValue(bk, out var list)) buckets[bk] = list = new List<long>();
-                list.Add(f.Id);
-                lshRows.Add((band, key, f.Id));
+                if (!inScope(f)) continue;
+                var h = PerceptualLsh.ToHash(f.PHash);
+                hashOf[f.Id] = h;
+                orderedIds.Add(f.Id);
+                dsu.MakeSet(f.Id);
+
+                // 1) Точное совпадение pixel-hash → одинаковое изображение, иные метаданные (FR-14).
+                UnionByExactBlobIncremental(pixelSeen, f.PixelHash, f.Id, dsu);
+                // 2) Точное совпадение pHash — дёшево объединяем.
+                if (h != 0)
+                {
+                    if (phashSeen.TryGetValue(h, out var first)) dsu.Union(first, f.Id);
+                    else phashSeen[h] = f.Id;
+                }
+                // 3) Корзины LSH; строки в БД пишем чанками, не копя весь список.
+                foreach (var (band, key) in PerceptualLsh.BandKeys(h))
+                {
+                    var bk = (band, key);
+                    if (!buckets.TryGetValue(bk, out var list)) buckets[bk] = list = new List<long>();
+                    list.Add(f.Id);
+                    lshRows.Add((band, key, f.Id));
+                }
+                if (lshRows.Count >= LshInsertChunk)
+                {
+                    _lsh.InsertBuckets(MatchType.SimilarImage, lshRows);
+                    lshRows.Clear();
+                }
             }
         }
-        _lsh.InsertBuckets(MatchType.SimilarImage, lshRows);
 
-        var allDistinct = DistinctByHash(imgs.Select(f => f.Id).ToList(), hashOf);
+        // Как раньше: меньше двух картинок в области — ни групп, ни LSH-строк (первый сброс чанка
+        // требует десятков тысяч in-scope файлов, поэтому здесь заведомо ничего не записано).
+        if (orderedIds.Count < 2) return 0;
+        if (lshRows.Count > 0)
+        {
+            _lsh.InsertBuckets(MatchType.SimilarImage, lshRows);
+            lshRows.Clear();
+        }
+        pixelSeen.Clear(); // блобы pixel_hash дальше не нужны — освобождаем до попарных сравнений
+        phashSeen.Clear();
+
+        var allDistinct = DistinctByHash(orderedIds, hashOf);
         if (allDistinct.Count <= FullPairwiseCap)
         {
             // Полный перебор — гарантированная полнота для типовых библиотек.
@@ -458,6 +500,14 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
                     dsu, ct, "image");
             }
         }
+
+        // ПРОХОД 2: полные записи (Sharpness для эталона 3.7, PixelHash для похожести 1.0, пути
+        // и метаданные для UI) дотягиваются батчами ТОЛЬКО для членов будущих групп.
+        var groupedIds = new List<long>();
+        foreach (var (_, ids) in dsu.Groups())
+            if (ids.Count >= 2) groupedIds.AddRange(ids);
+        var byId = new Dictionary<long, FileRecord>(groupedIds.Count);
+        foreach (var rec in _files.GetByIds(groupedIds)) byId[rec.Id] = rec;
 
         return PersistSimilarGroups(dsu, byId, MatchType.SimilarImage, rule, onGroups,
             (rep, member) => SimilarityImage(hashOf, rep, member), ct, sessionId, isPreferredKeep);
@@ -567,7 +617,12 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         {
             ct.ThrowIfCancellationRequested();
             if (ids.Count < 2) continue;
-            var members = ids.Select(id => byId[id]).ToList();
+            // 3.6: для изображений byId — дотянутые ПОЛНЫЕ записи (проход 2); строка могла исчезнуть
+            // из БД между проходами (внешнее изменение) — такую пропускаем, а не падаем на byId[id].
+            var members = new List<FileRecord>(ids.Count);
+            foreach (var id in ids)
+                if (byId.TryGetValue(id, out var rec)) members.Add(rec);
+            if (members.Count < 2) continue;
             var rep = PickSimilarRepresentative(members, type, rule, isPreferredKeep);
 
             var group = new DuplicateGroup
@@ -627,18 +682,6 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         return RepresentativeSelector.Pick(members, rule, isPreferredKeep);
     }
 
-    private static void UnionByExactHash(List<FileRecord> files, Dictionary<long, ulong> hashOf, Dsu dsu)
-    {
-        var seen = new Dictionary<ulong, long>();
-        foreach (var f in files)
-        {
-            var h = hashOf[f.Id];
-            if (h == 0) continue;
-            if (seen.TryGetValue(h, out var first)) dsu.Union(first, f.Id);
-            else seen[h] = f.Id;
-        }
-    }
-
     private static void UnionByExactBlob(List<FileRecord> files, Func<FileRecord, byte[]?> selector, Dsu dsu)
     {
         // Ключ — XxHash128 от блоба (16 байт), а не hex-строка всего блоба: аудио-отпечатки
@@ -647,19 +690,25 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         // Коллизия XxHash128 отсекается прямой сверкой блобов внутри корзины.
         var seen = new Dictionary<UInt128, List<(byte[] Blob, long FirstId)>>();
         foreach (var f in files)
+            UnionByExactBlobIncremental(seen, selector(f), f.Id, dsu);
+    }
+
+    /// <summary>Инкрементальный шаг <see cref="UnionByExactBlob"/> — для потокового прохода 1 (3.6),
+    /// где файлы приходят страницами и весь список сразу недоступен. Семантика идентична пакетной
+    /// версии: тот же ключ XxHash128, та же сверка блобов против коллизий.</summary>
+    private static void UnionByExactBlobIncremental(
+        Dictionary<UInt128, List<(byte[] Blob, long FirstId)>> seen, byte[]? blob, long id, Dsu dsu)
+    {
+        if (blob is null) return;
+        var h = System.IO.Hashing.XxHash128.HashToUInt128(blob);
+        if (!seen.TryGetValue(h, out var bucket))
         {
-            var blob = selector(f);
-            if (blob is null) continue;
-            var h = System.IO.Hashing.XxHash128.HashToUInt128(blob);
-            if (!seen.TryGetValue(h, out var bucket))
-            {
-                seen[h] = new List<(byte[], long)>(1) { (blob, f.Id) };
-                continue;
-            }
-            var hit = bucket.FirstOrDefault(b => b.Blob.AsSpan().SequenceEqual(blob));
-            if (hit.Blob is not null) dsu.Union(hit.FirstId, f.Id);
-            else bucket.Add((blob, f.Id));
+            seen[h] = new List<(byte[], long)>(1) { (blob, id) };
+            return;
         }
+        var hit = bucket.FirstOrDefault(b => b.Blob.AsSpan().SequenceEqual(blob));
+        if (hit.Blob is not null) dsu.Union(hit.FirstId, id);
+        else bucket.Add((blob, id));
     }
 
     private static List<long> DistinctByHash(List<long> ids, Dictionary<long, ulong> hashOf)

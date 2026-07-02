@@ -36,10 +36,13 @@ public partial class ConsolidationViewModel : PageViewModel
     [ObservableProperty] private RuleOption? _selectedRule;
     [ObservableProperty] private string? _targetPath;
     [ObservableProperty] private bool _preserveStructure = true;
+    // 3.5: объединять почти одинаковые фото (оставлять самый чёткий кадр). По умолчанию выключено.
+    [ObservableProperty] private bool _collapseSimilarPhotos;
     [ObservableProperty] private bool _hasPlan;
     [ObservableProperty] private bool _isExecuting;
     [ObservableProperty] private string _uniqueText = "0";
     [ObservableProperty] private string _skippedText = "0";
+    [ObservableProperty] private string _collapsedText = "0";
     [ObservableProperty] private string _bytesCopyText = "—";
     [ObservableProperty] private string _bytesSavedText = "—";
     [ObservableProperty] private double _execProgress;
@@ -92,7 +95,8 @@ public partial class ConsolidationViewModel : PageViewModel
             SourceVolumeIds = ids,
             TargetPath = TargetPath!,
             Rule = SelectedRule?.Value ?? RepresentativeRule.Oldest,
-            PreserveFolderStructure = PreserveStructure
+            PreserveFolderStructure = PreserveStructure,
+            CollapseSimilarPhotos = CollapseSimilarPhotos
         };
 
         ReportText = null;
@@ -101,12 +105,16 @@ public partial class ConsolidationViewModel : PageViewModel
 
         UniqueText = $"{plan.UniqueCount:N0}";
         SkippedText = $"{plan.SkippedCount:N0}";
+        CollapsedText = $"{plan.CollapsedCount:N0}";
         BytesCopyText = Format.Bytes(plan.BytesToCopy);
         BytesSavedText = Format.Bytes(plan.BytesSaved);
 
         Preview.Clear();
         foreach (var item in plan.ToCopy.Take(200))
             Preview.Add(new ConsolidationPreviewItem(item, true));
+        // 3.5: схлопнутые похожие показываем явно — что не поедет и какой кадр оставлен.
+        foreach (var item in plan.CollapsedSimilar.Take(100))
+            Preview.Add(new ConsolidationPreviewItem(item, false));
         foreach (var item in plan.ToSkip.Take(100))
             Preview.Add(new ConsolidationPreviewItem(item, false));
 
@@ -123,7 +131,8 @@ public partial class ConsolidationViewModel : PageViewModel
             SourceVolumeIds = Sources.Where(s => s.IsChecked).Select(s => s.Id).ToList(),
             TargetPath = TargetPath!,
             Rule = SelectedRule?.Value ?? RepresentativeRule.Oldest,
-            PreserveFolderStructure = PreserveStructure
+            PreserveFolderStructure = PreserveStructure,
+            CollapseSimilarPhotos = CollapseSimilarPhotos
         };
 
         _cts = new CancellationTokenSource();
@@ -141,8 +150,13 @@ public partial class ConsolidationViewModel : PageViewModel
                 });
             }, _cts.Token));
 
+            // 3.5: счётчик схлопнутых похожих — в итоге, как и в плане.
+            var collapsedPart = report.CollapsedSimilar > 0
+                ? $"{Strings.PlanCollapsed}: {report.CollapsedSimilar:N0}, "
+                : string.Empty;
             ReportText = $"{Strings.ConsolidationDone}. {Strings.Copied}: {report.Copied:N0}, " +
-                         $"{Strings.PlanSkipped}: {report.Skipped:N0}, {Strings.FailedItems}: {report.Failed:N0}. " +
+                         $"{Strings.PlanSkipped}: {report.Skipped:N0}, {collapsedPart}" +
+                         $"{Strings.FailedItems}: {report.Failed:N0}. " +
                          $"{Strings.PlanBytesCopy}: {Format.Bytes(report.BytesCopied)}";
         }
         catch (OperationCanceledException)
@@ -172,9 +186,18 @@ public sealed class ConsolidationPreviewItem
     {
         Name = item.File.Name;
         Source = item.File.VolumeLabel ?? $"Том #{item.File.VolumeId}";
-        Target = willCopy ? item.TargetRelPath : "—";
+        // 3.5: у схлопнутого похожего кадра показываем, какой файл поехал вместо него.
+        if (item.CollapsedInto is not null)
+        {
+            Target = $"{Strings.CollapsedKeptPrefix}: {item.CollapsedInto.Name}";
+            ActionText = Strings.CollapsedBadge;
+        }
+        else
+        {
+            Target = willCopy ? item.TargetRelPath : "—";
+            ActionText = willCopy ? Strings.PlanUnique : Strings.PlanSkipped;
+        }
         SizeText = Format.Bytes(item.File.Size);
-        ActionText = willCopy ? Strings.PlanUnique : Strings.PlanSkipped;
         WillCopy = willCopy;
     }
 

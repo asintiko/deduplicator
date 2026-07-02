@@ -179,6 +179,11 @@ public static class Strings
     public const string PlanBytesCopy = "Нужно места";
     public const string PlanBytesSaved = "Сэкономится";
     public const string PreserveStructure = "Сохранить папки как были";
+    // 3.5: схлопывание почти одинаковых фото при консолидации.
+    public const string CollapseSimilarPhotos = "Объединять почти одинаковые фото (оставлять самый чёткий кадр)";
+    public const string PlanCollapsed = "Похожих объединено";
+    public const string CollapsedBadge = "Похожее";
+    public const string CollapsedKeptPrefix = "оставлен";
     public const string ConsolidationDone = "Чистый архив готов";
     public const string ConsolidationCancelled = "Копирование остановлено";
     public const string ConsolidationNeedInput = "Выберите хотя бы один диск и папку, куда сложить архив.";

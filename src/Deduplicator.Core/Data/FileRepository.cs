@@ -575,6 +575,63 @@ public sealed class FileRepository
         return list;
     }
 
+    /// <summary>
+    /// 3.6 (проход 1): лёгкая страница перцептивных данных изображений (keyset по id, паттерн
+    /// GetNeedingPerceptualPage — короткоживущее соединение вместо yield-итератора на общем)
+    /// для потоковой LSH-группировки. В выборке ровно то, что нужно проходу 1: сами признаки
+    /// (phash, pixel_hash) и поля предикатов области/профиля — ScanScope.Contains читает
+    /// volume_id/rel_path, фильтр категорий — category, SimilarityProfileService.Matches —
+    /// size/created/mtime/rel_path. БЕЗ имени и блобов хэшей содержимого (partial/full/verified/
+    /// audio_fp) — именно они раздували пик памяти при материализации всей фототеки.
+    /// Только для Image: аудио-ветка группировки не стримится (фонотеки на порядки меньше).
+    /// </summary>
+    public List<FileRecord> GetPerceptualSlimPage(FileCategory category, long afterId, int limit, long sessionId = 0)
+    {
+        if (category != FileCategory.Image)
+            throw new ArgumentException("Слим-выборка перцептива предусмотрена только для изображений", nameof(category));
+
+        const string slimCols = "f.id, f.volume_id, f.rel_path, f.size, f.mtime, f.created, f.category, f.phash, f.pixel_hash";
+        using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
+        using var cmd = conn.CreateCommand();
+        // Scope-aware, как GetByCategoryWithPerceptual: группируем похожие только среди файлов области сессии.
+        cmd.CommandText = scoped
+            ? $"SELECT {slimCols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+              "WHERE f.category=$c AND f.phash IS NOT NULL AND f.id > $after ORDER BY f.id LIMIT $lim"
+            : $"SELECT {slimCols} FROM files f WHERE f.category=$c AND f.phash IS NOT NULL AND f.id > $after " +
+              "ORDER BY f.id LIMIT $lim";
+        cmd.Add("$c", Mappers.CategoryToDb(category));
+        cmd.Add("$after", afterId);
+        cmd.Add("$lim", limit);
+        if (scoped) cmd.Add("$sid", sessionId);
+        using var r = cmd.ExecuteReader();
+        var list = new List<FileRecord>();
+        while (r.Read()) list.Add(MapSlim(r));
+        return list;
+    }
+
+    /// <summary>
+    /// 3.6 (проход 2): полные записи по списку id — дотяжка членов DSU-групп после лёгкого прохода
+    /// (обычно малая доля фототеки). IN-чанки по 400, паттерн GetByFullHashes/GetExistingMetaByPaths;
+    /// внутри чанка порядок по id, отсутствующие в БД id молча пропускаются.
+    /// </summary>
+    public List<FileRecord> GetByIds(IReadOnlyList<long> ids)
+    {
+        var list = new List<FileRecord>();
+        if (ids.Count == 0) return list;
+        using var conn = _db.Open();
+        foreach (var chunk in ids.Chunk(400))
+        {
+            using var cmd = conn.CreateCommand();
+            var names = new List<string>(chunk.Length);
+            for (int i = 0; i < chunk.Length; i++) { var n = "$i" + i; names.Add(n); cmd.Add(n, chunk[i]); }
+            cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.id IN ({string.Join(",", names)}) ORDER BY f.id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) list.Add(Map(r));
+        }
+        return list;
+    }
+
     /// <summary>Привязать к файлам метку/точку монтирования их томов (для отображения).</summary>
     public void AttachVolumeInfo(IEnumerable<FileRecord> files, IReadOnlyDictionary<long, VolumeRecord> volumes)
     {
@@ -832,6 +889,21 @@ public sealed class FileRepository
         }
         return (counts, bytes);
     }
+
+    /// <summary>3.6: слим-запись прохода 1 — только перцептивные признаки и поля предикатов
+    /// (см. GetPerceptualSlimPage); Name/Ext и блобы хэшей содержимого сознательно пусты.</summary>
+    private static FileRecord MapSlim(SqliteDataReader r) => new()
+    {
+        Id = r.Long(0),
+        VolumeId = r.Long(1),
+        RelPath = r.Str(2) ?? string.Empty,
+        Size = r.Long(3),
+        Mtime = Db.ParseDate(r.Str(4)),
+        Created = Db.ParseDate(r.Str(5)),
+        Category = Mappers.ParseCategory(r.Str(6)),
+        PHash = r.Blob(7),
+        PixelHash = r.Blob(8)
+    };
 
     internal static FileRecord Map(SqliteDataReader r) => new()
     {

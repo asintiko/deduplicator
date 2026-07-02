@@ -18,6 +18,17 @@ public interface IConsolidationService
 /// <summary>Консолидация разрозненных носителей в один дедуплицированный архив.</summary>
 public sealed class ConsolidationService : IConsolidationService
 {
+    // 3.5: порог схлопывания ПОХОЖИХ фото. СОЗНАТЕЛЬНО жёстче пользовательского порога поиска
+    // похожих (0.80–0.97): консолидация решает, что НЕ копировать в архив, поэтому схлопываются
+    // только почти неразличимые кадры — схожесть ≥ 0.97 означает не более 1 бита различия pHash из 64.
+    private const double SimilarCollapseThreshold = 0.97;
+
+    // 3.5: кап числа кандидатов на полный попарный перебор похожести. Консолидация оперирует
+    // тысячами файлов (не миллионами); при аномально большом наборе фото с pHash O(N²) стал бы
+    // неподъёмным — тогда похожие НЕ схлопываем вовсе (консервативно: лишняя копия в архиве
+    // лучше тихо пропавшего кадра).
+    private const int SimilarCollapseCandidatesCap = 20_000;
+
     private readonly FileRepository _files;
     private readonly IVolumeService _volumeService;
 
@@ -45,12 +56,16 @@ public sealed class ConsolidationService : IConsolidationService
         }
 
         var plan = new ConsolidationPlan();
-        var usedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Файлы с полным хэшем группируем по содержимому; уникальные (без хэша) — каждый сам по себе.
         var withHash = all.Where(f => f.FullHash is not null)
                           .GroupBy(f => Convert.ToHexString(f.FullHash!));
         var withoutHash = all.Where(f => f.FullHash is null);
+
+        // Сначала решаем, ЧТО копировать (эталоны точных групп + бесхэшевые), и только потом
+        // назначаем целевые пути: схлопывание похожих (3.5) идёт между этими шагами, чтобы имена
+        // схлопнутых не резервировались впустую и не плодили суффиксы __N у оставшихся файлов.
+        var chosenToCopy = new List<(FileRecord File, int Siblings)>();
 
         foreach (var grp in withHash)
         {
@@ -64,29 +79,111 @@ public sealed class ConsolidationService : IConsolidationService
             var chosen = RepresentativeSelector.Pick(pickFrom, options.Rule);
             int siblings = members.Count - 1;
 
-            plan.ToCopy.Add(new ConsolidationItem
-            {
-                File = chosen,
-                WillCopy = true,
-                TargetRelPath = UniqueTarget(chosen, options, usedTargets),
-                DuplicateSiblings = siblings
-            });
+            chosenToCopy.Add((chosen, siblings));
             foreach (var skip in members.Where(m => m.Id != chosen.Id))
                 plan.ToSkip.Add(new ConsolidationItem { File = skip, WillCopy = false, DuplicateSiblings = siblings });
         }
 
         foreach (var f in withoutHash)
+            chosenToCopy.Add((f, 0));
+
+        // 3.5: из группы почти одинаковых фото в архив едет один кадр; схлопнутые уходят
+        // в plan.CollapsedSimilar (копироваться не будут, источники не трогаются).
+        if (options.CollapseSimilarPhotos)
+            chosenToCopy = CollapseSimilarPhotos(chosenToCopy, plan);
+
+        var usedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (file, siblings) in chosenToCopy)
         {
             plan.ToCopy.Add(new ConsolidationItem
             {
-                File = f,
+                File = file,
                 WillCopy = true,
-                TargetRelPath = UniqueTarget(f, options, usedTargets),
-                DuplicateSiblings = 0
+                TargetRelPath = UniqueTarget(file, options, usedTargets),
+                DuplicateSiblings = siblings
             });
         }
 
         return plan;
+    }
+
+    /// <summary>
+    /// 3.5: схлопывание ПОХОЖИХ фото среди файлов К КОПИРОВАНИЮ. Кандидаты — изображения с pHash;
+    /// группируются полным попарным сравнением (PerceptualLsh.Similarity) с консервативным порогом
+    /// <see cref="SimilarCollapseThreshold"/> через DSU (те же механизмы, что в группировке похожих).
+    /// Из каждой группы остаётся самый резкий кадр (Sharpness из 3.7; fallback — больший размер
+    /// файла), остальные помечаются схлопнутыми и НЕ копируются. Возвращает прореженный список.
+    /// </summary>
+    private static List<(FileRecord File, int Siblings)> CollapseSimilarPhotos(
+        List<(FileRecord File, int Siblings)> chosen, ConsolidationPlan plan)
+    {
+        var candidates = chosen
+            .Where(c => c.File.Category == FileCategory.Image && c.File.PHash is { Length: >= 8 })
+            .ToList();
+        if (candidates.Count < 2) return chosen;
+        if (candidates.Count > SimilarCollapseCandidatesCap)
+        {
+            AppLog.Write($"Консолидация: кандидатов на схлопывание похожих {candidates.Count} > капа " +
+                         $"{SimilarCollapseCandidatesCap} — похожие фото не схлопываются (все едут в архив).");
+            return chosen;
+        }
+
+        var hashOf = candidates.ToDictionary(c => c.File.Id, c => PerceptualLsh.ToHash(c.File.PHash));
+        var dsu = new Dsu();
+        foreach (var c in candidates) dsu.MakeSet(c.File.Id);
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            for (int j = i + 1; j < candidates.Count; j++)
+            {
+                if (PerceptualLsh.Similarity(hashOf[candidates[i].File.Id], hashOf[candidates[j].File.Id])
+                        >= SimilarCollapseThreshold)
+                    dsu.Union(candidates[i].File.Id, candidates[j].File.Id);
+            }
+        }
+
+        var fileById = candidates.ToDictionary(c => c.File.Id, c => c.File);
+        var siblingsById = candidates.ToDictionary(c => c.File.Id, c => c.Siblings);
+        var collapsedIds = new HashSet<long>();
+        foreach (var (_, ids) in dsu.Groups())
+        {
+            if (ids.Count < 2) continue;
+            var members = ids.Select(id => fileById[id]).ToList();
+            var keep = PickSharpest(members);
+            foreach (var m in members)
+            {
+                if (m.Id == keep.Id) continue;
+                collapsedIds.Add(m.Id);
+                plan.CollapsedSimilar.Add(new ConsolidationItem
+                {
+                    File = m,
+                    WillCopy = false,
+                    CollapsedInto = keep,
+                    SimilarityToKept = PerceptualLsh.Similarity(hashOf[keep.Id], hashOf[m.Id]),
+                    DuplicateSiblings = siblingsById[m.Id]
+                });
+            }
+        }
+
+        return collapsedIds.Count == 0 ? chosen : chosen.Where(c => !collapsedIds.Contains(c.File.Id)).ToList();
+    }
+
+    /// <summary>
+    /// 3.5: какой кадр похожей группы оставить в архиве — с максимальной резкостью (3.7); резкость
+    /// не посчитана ни у кого — больший размер файла; тай-брейки (размер, затем меньший id) делают
+    /// план детерминированным.
+    /// </summary>
+    private static FileRecord PickSharpest(List<FileRecord> members)
+    {
+        var withSharpness = members.Where(f => f.Sharpness is not null).ToList();
+        if (withSharpness.Count > 0)
+        {
+            return withSharpness
+                .OrderByDescending(f => f.Sharpness!.Value)
+                .ThenByDescending(f => f.Size)
+                .ThenBy(f => f.Id)
+                .First();
+        }
+        return members.OrderByDescending(f => f.Size).ThenBy(f => f.Id).First();
     }
 
     public ConsolidationReport Execute(ConsolidationPlan plan, ConsolidationOptions options,
@@ -158,6 +255,17 @@ public sealed class ConsolidationService : IConsolidationService
         }
 
         report.Skipped = plan.ToSkip.Count;
+
+        // 3.5: схлопнутые похожие явно перечисляются в итоге — что не поехало и какой кадр оставлен.
+        // Сами файлы-источники не тронуты: консолидация не удаляет ничего с исходных носителей.
+        report.CollapsedSimilar = plan.CollapsedSimilar.Count;
+        foreach (var c in plan.CollapsedSimilar)
+        {
+            var vol = c.File.VolumeLabel ?? $"том #{c.File.VolumeId}";
+            report.CollapsedDetails.Add(
+                $"«{c.File.RelPath}» ({vol}) схлопнут как похожее фото (сходство {c.SimilarityToKept:P1}) — " +
+                $"в архив поехал «{c.CollapsedInto?.RelPath}»");
+        }
         return report;
     }
 

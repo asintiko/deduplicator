@@ -60,6 +60,11 @@
                                       Content="{x:Static loc:Strings.PreserveStructure}"/>
                         </Grid>
 
+                        <!-- 3.5: схлопывание почти одинаковых фото (по умолчанию выключено). -->
+                        <CheckBox IsChecked="{Binding CollapseSimilarPhotos, Mode=TwoWay}"
+                                  ToolTip.Tip="Из нескольких почти неразличимых кадров в архив поедет один — самый чёткий. Исходные файлы на дисках не удаляются."
+                                  Content="{x:Static loc:Strings.CollapseSimilarPhotos}"/>
+
                         <Button Classes="primary" HorizontalAlignment="Left" Command="{Binding BuildPlanCommand}"
                                 ToolTip.Tip="Сначала посчитать, что будет скопировано. Файлы пока не меняются.">
                             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -73,7 +78,7 @@
                 <!-- План -->
                 <Border Classes="card" IsVisible="{Binding HasPlan}">
                     <StackPanel Spacing="14">
-                        <Grid ColumnDefinitions="*,*,*,*">
+                        <Grid ColumnDefinitions="*,*,*,*,*">
                             <StackPanel Grid.Column="0">
                                 <TextBlock Classes="caption" Text="{x:Static loc:Strings.PlanUnique}"/>
                                 <TextBlock FontSize="22" FontWeight="SemiBold" Text="{Binding UniqueText}"/>
@@ -82,11 +87,16 @@
                                 <TextBlock Classes="caption" Text="{x:Static loc:Strings.PlanSkipped}"/>
                                 <TextBlock FontSize="22" FontWeight="SemiBold" Text="{Binding SkippedText}"/>
                             </StackPanel>
+                            <!-- 3.5: сколько похожих фото схлопнуто (не поедут, останутся на источниках). -->
                             <StackPanel Grid.Column="2">
+                                <TextBlock Classes="caption" Text="{x:Static loc:Strings.PlanCollapsed}"/>
+                                <TextBlock FontSize="22" FontWeight="SemiBold" Text="{Binding CollapsedText}"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="3">
                                 <TextBlock Classes="caption" Text="{x:Static loc:Strings.PlanBytesCopy}"/>
                                 <TextBlock FontSize="22" FontWeight="SemiBold" Text="{Binding BytesCopyText}"/>
                             </StackPanel>
-                            <StackPanel Grid.Column="3">
+                            <StackPanel Grid.Column="4">
                                 <TextBlock Classes="caption" Text="{x:Static loc:Strings.PlanBytesSaved}"/>
                                 <TextBlock FontSize="22" FontWeight="SemiBold"
                                            Foreground="{DynamicResource SuccessBrush}" Text="{Binding BytesSavedText}"/>
