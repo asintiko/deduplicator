@@ -1,6 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Deduplicator.App.Infrastructure;
@@ -25,9 +29,24 @@ public partial class HomeViewModel : PageViewModel
     private readonly IStatisticsService _statistics;
     private readonly Deduplicator.Core.Data.OperationLogRepository _opLog;
 
+    // Подсказка «носитель с фотографиями»: снапшот подключённых корней (чтобы отличать НОВЫЙ том),
+    // серийники, о которых уже предлагали (не дребезжим в течение сессии), и том для предвыбора.
+    // _photoHintGate: DrivesChanged приходит с таймера вотчера — медленный SyncAndGetCatalog может
+    // пережить следующий тик, не даём обработчикам гоняться за общими множествами.
+    private readonly object _photoHintGate = new();
+    private HashSet<string> _driveRootsSnapshot;
+    private readonly HashSet<string> _offeredPhotoSerials = new(System.StringComparer.OrdinalIgnoreCase);
+    private long? _photoHintVolumeId;
+
     public override string Title => "Главная";
 
     public ObservableCollection<HomeDiskItem> RecentDisks { get; } = new();
+
+    /// <summary>Подключён носитель с папкой DCIM (метка) — App показывает тост. UI-поток.</summary>
+    public event Action<string>? PhotoDeviceDetected;
+
+    /// <summary>Текст баннера «носитель с фотографиями»; пустая строка — баннер скрыт.</summary>
+    [ObservableProperty] private string _photoDeviceHintText = "";
 
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string _statusTitle = "Готово к проверке";
@@ -43,15 +62,104 @@ public partial class HomeViewModel : PageViewModel
     [ObservableProperty] private string _noDisksText = "";
 
     public HomeViewModel(NavigationService nav, IVolumeService volumes, IStatisticsService statistics,
-        Deduplicator.Core.Data.OperationLogRepository opLog)
+        Deduplicator.Core.Data.OperationLogRepository opLog, IDriveWatcher driveWatcher)
     {
         _nav = nav;
         _volumes = volumes;
         _statistics = statistics;
         _opLog = opLog;
+        // Подсказка «флешка с фотографиями»: ловим ПОЯВЛЕНИЕ нового тома с папкой DCIM.
+        _driveRootsSnapshot = GetReadyRoots();
+        driveWatcher.DrivesChanged += OnDrivesChangedForPhotoHint;
     }
 
     public override void OnNavigatedTo() => _ = RefreshAsync();
+
+    // ---- Подсказка «носитель с фотографиями» (сторожевые функции, задача B) ----
+
+    /// <summary>Корни готовых локальных/съёмных дисков. Сетевые не проверяем: Directory.Exists
+    /// по полумёртвой шаре виснет, а «флешка с фото» сетевой не бывает.</summary>
+    private static HashSet<string> GetReadyRoots()
+    {
+        var set = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var d in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (d.DriveType is DriveType.Fixed or DriveType.Removable && d.IsReady)
+                        set.Add(d.RootDirectory.FullName);
+                }
+                catch { /* носитель извлекли между перечислением и опросом */ }
+            }
+        }
+        catch { /* перечисление недоступно — подсказка просто промолчит */ }
+        return set;
+    }
+
+    /// <summary>Вызывается вотчером в фоновом потоке: дёшево ищем НОВЫЙ том с папкой \DCIM.</summary>
+    private void OnDrivesChangedForPhotoHint()
+    {
+        try
+        {
+            lock (_photoHintGate)
+            {
+                var current = GetReadyRoots();
+                var added = current.Where(r => !_driveRootsSnapshot.Contains(r)).ToList();
+                _driveRootsSnapshot = current;
+
+                foreach (var root in added)
+                {
+                    if (!Directory.Exists(Path.Combine(root, "DCIM"))) continue;
+
+                    // Том нужен из каталога — его Id идёт в предвыбор на экране сверки.
+                    var vol = _volumes.SyncAndGetCatalog().FirstOrDefault(v =>
+                        v.IsConnected && string.Equals(v.MountPath, root, System.StringComparison.OrdinalIgnoreCase));
+                    if (vol is null) continue;
+
+                    // Дребезг: тот же носитель (серийник) в течение сессии повторно не предлагаем.
+                    if (!_offeredPhotoSerials.Add(vol.Serial ?? root)) continue;
+
+                    var label = vol.DisplayName;
+                    var volumeId = vol.Id;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _photoHintVolumeId = volumeId;
+                        PhotoDeviceHintText = $"Подключён носитель с фотографиями ({label}). Проверить на дубликаты?";
+                        try { PhotoDeviceDetected?.Invoke(label); } catch { }
+                    });
+                    break; // одной подсказки за раз достаточно
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Подсказка — вспомогательная: любой сбой глотаем, приложение не трогаем.
+            Core.Util.AppLog.Error("PhotoDeviceHint", ex);
+        }
+    }
+
+    /// <summary>Кнопка «Проверить» баннера/клик по тосту: экран «Найти дубликаты» с предвыбранным
+    /// томом и глубиной «похожие фото».</summary>
+    [RelayCommand]
+    private void CheckPhotoDevice()
+    {
+        if (_photoHintVolumeId is not long id) return;
+        var scan = _nav.Get<ScanViewModel>();
+        scan.Preselect(id);
+        scan.PreselectDepth(ScanDepth.WithSimilarImages);
+        PhotoDeviceHintText = "";
+        _photoHintVolumeId = null;
+        _nav.To<ScanViewModel>();
+    }
+
+    [RelayCommand]
+    private void DismissPhotoHint()
+    {
+        PhotoDeviceHintText = "";
+        _photoHintVolumeId = null;
+    }
 
     [RelayCommand]
     private async Task RefreshAsync()

@@ -92,6 +92,8 @@ public static class Composition
         services.AddSingleton<IDiskHealthService, DiskHealthService>();
         services.AddSingleton<IJunkScanService, JunkScanService>();
         services.AddSingleton<IDriveWatcher, DriveWatcher>();
+        // Сторожевой режим (Sentinel-lite): следит за новыми дубликатами, пока приложение открыто.
+        services.AddSingleton<ISentinelService, SentinelService>();
         services.AddSingleton<IUpdateService, UpdateService>();
         services.AddSingleton<IFileOpsService>(sp =>
         {

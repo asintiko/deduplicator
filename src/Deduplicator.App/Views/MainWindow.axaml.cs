@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Notifications;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -22,16 +23,37 @@ public partial class MainWindow : Window
     private MainWindowViewModel? _vm;
     private bool _queued;
     private Rect _lastRect = new(-1, -1, 0, 0);
+    private readonly WindowNotificationManager _notifications;
 
     public MainWindow()
     {
         InitializeComponent();
+        // Ненавязчивые тосты поверх окна (сторож дубликатов, подсказка «носитель с фотографиями»).
+        _notifications = new WindowNotificationManager(this)
+        {
+            Position = NotificationPosition.TopRight,
+            MaxItems = 3
+        };
         DataContextChanged += (_, _) => Attach();
         SizeChanged += (_, _) => { _lastRect = new(-1, -1, 0, 0); Schedule(); };
         LayoutUpdated += (_, _) => Schedule();
 #if DEBUG
         this.AttachDevTools();
 #endif
+    }
+
+    /// <summary>
+    /// Информационный тост в правом верхнем углу окна. <paramref name="onClick"/> — необязательное
+    /// действие по клику (например, перейти на экран сверки). Вызывать на UI-потоке.
+    /// </summary>
+    public void ShowToast(string title, string message, Action? onClick = null)
+    {
+        try
+        {
+            _notifications.Show(new Notification(title, message, NotificationType.Information,
+                TimeSpan.FromSeconds(8), onClick));
+        }
+        catch (Exception ex) { Core.Util.AppLog.Error("ShowToast", ex); }
     }
 
     protected override void OnOpened(EventArgs e)

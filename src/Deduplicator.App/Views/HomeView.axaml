@@ -51,6 +51,31 @@
 
         <ScrollViewer Grid.Row="1">
             <StackPanel Spacing="18">
+                <!-- Подсказка «носитель с фотографиями»: появляется при подключении носителя
+                     с папкой DCIM; кнопка ведёт на «Найти дубликаты» с предвыбранным томом. -->
+                <Border Classes="card" Padding="16"
+                        IsVisible="{Binding PhotoDeviceHintText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+                        <Border Grid.Column="0" Width="40" Height="40" CornerRadius="10"
+                                Background="{DynamicResource AccentSoft}" VerticalAlignment="Center">
+                            <PathIcon Data="{StaticResource IconImage}" Width="22" Height="22"
+                                      Foreground="{DynamicResource AccentBrush}"/>
+                        </Border>
+                        <TextBlock Grid.Column="1" Margin="12,0" VerticalAlignment="Center" TextWrapping="Wrap"
+                                   Text="{Binding PhotoDeviceHintText}"/>
+                        <Button Grid.Column="2" Classes="primary homeSmall" VerticalAlignment="Center"
+                                Command="{Binding CheckPhotoDeviceCommand}"
+                                ToolTip.Tip="Найти дубликаты и похожие фото на подключённом носителе">
+                            <TextBlock Text="Проверить" Foreground="White"/>
+                        </Button>
+                        <Button Grid.Column="3" Classes="ghost homeSmall" Margin="8,0,0,0" VerticalAlignment="Center"
+                                Command="{Binding DismissPhotoHintCommand}"
+                                ToolTip.Tip="Скрыть подсказку">
+                            <TextBlock Text="Скрыть"/>
+                        </Button>
+                    </Grid>
+                </Border>
+
                 <Border Classes="card" Padding="20">
                     <Grid ColumnDefinitions="Auto,*,Auto">
                         <Border Grid.Column="0" Width="56" Height="56" CornerRadius="14"

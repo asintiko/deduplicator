@@ -105,6 +105,14 @@ public partial class ScanViewModel : PageViewModel
 
     public void Preselect(long volumeId) => _pendingPreselect = volumeId;
 
+    /// <summary>Предвыбор глубины (подсказка «носитель с фотографиями»): применяется, только если
+    /// режим доступен, и не сбрасывается при навигации — пользователь видит его сразу.</summary>
+    public void PreselectDepth(ScanDepth depth)
+    {
+        var opt = DepthOptions.FirstOrDefault(o => o.Value == depth && o.Enabled);
+        if (opt is not null) SelectedDepth = opt;
+    }
+
     public override void OnNavigatedTo()
     {
         if (!IsRunning) { LoadCategoriesFromSettings(); _ = LoadVolumesAsync(); }

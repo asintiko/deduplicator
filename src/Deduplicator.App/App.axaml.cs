@@ -58,6 +58,12 @@ public partial class App : Application
                 desktop.MainWindow = main;
                 main.Show();
                 splash.Close();
+
+                // «Программа сама замечает»: сторож новых дубликатов и подсказка о носителе
+                // с фотографиями показывают тосты поверх главного окна. Сбой этой обвязки
+                // не должен мешать запуску — приложение полноценно работает и без неё.
+                try { WireBackgroundHints(main); }
+                catch (Exception ex) { AppLog.Error("WireBackgroundHints", ex); }
             }
             catch (Exception ex)
             {
@@ -70,6 +76,33 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// Подписка тостов на события сторожа (Sentinel-lite) и подсказки «носитель с фотографиями»,
+    /// плюс автозапуск сторожа, если он включён в настройках. Вкл/выкл на лету делает
+    /// SettingsViewModel.Save (как fpcalc/тема).
+    /// </summary>
+    private void WireBackgroundHints(MainWindow main)
+    {
+        // А. Сторож: новый файл в наблюдаемой папке оказался копией уже известного.
+        var sentinel = Services.GetRequiredService<ISentinelService>();
+        sentinel.DuplicateFound += e => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            main.ShowToast(
+                "Новый дубликат: " + System.IO.Path.GetFileName(e.FilePath),
+                $"Такой файл уже есть ({e.ExistingCount} шт., {Infrastructure.Format.Bytes(e.Size)})."));
+        var s = Services.GetRequiredService<ISettingsService>().Current;
+        if (s.SentinelEnabled && s.SentinelFolders.Count > 0)
+            sentinel.Start(s.SentinelFolders);
+
+        // Б. Подключён носитель с папкой DCIM: тост-приглашение (клик — сразу к проверке);
+        // надёжный основной путь — баннер с кнопкой на Главной (HomeViewModel).
+        var home = Services.GetRequiredService<HomeViewModel>();
+        home.PhotoDeviceDetected += label => // событие приходит уже на UI-потоке
+            main.ShowToast(
+                "Носитель с фотографиями",
+                $"Подключён носитель с фотографиями ({label}). Нажмите, чтобы проверить на дубликаты.",
+                onClick: () => home.CheckPhotoDeviceCommand.Execute(null));
     }
 
     /// <summary>Окно с понятной ошибкой запуска вместо краха процесса.</summary>

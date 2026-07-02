@@ -67,4 +67,14 @@ public sealed class AppSettings
     /// <summary>Режим «Эко» (этап 2.9): скан идёт с пониженным приоритетом процесса и чтением
     /// содержимого в один поток — слабый ноутбук остаётся отзывчивым. Стабильность важнее скорости.</summary>
     public bool EcoMode { get; set; } = false;
+
+    /// <summary>
+    /// Сторожевой режим (Sentinel-lite, 3.3 облегчённо): пока приложение ОТКРЫТО, следить за
+    /// появлением новых файлов-дубликатов в папках <see cref="SentinelFolders"/> и показывать
+    /// уведомление. Строго opt-in, фоновой службы нет — при закрытии приложения слежение исчезает.
+    /// </summary>
+    public bool SentinelEnabled { get; set; } = false;
+
+    /// <summary>Папки, за которыми следит сторожевой режим (с подпапками).</summary>
+    public List<string> SentinelFolders { get; set; } = new();
 }

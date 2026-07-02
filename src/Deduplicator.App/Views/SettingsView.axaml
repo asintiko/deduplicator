@@ -129,6 +129,40 @@
                 </StackPanel>
             </Border>
 
+            <!-- Сторожевой режим (Sentinel-lite): следит за новыми дубликатами, пока программа открыта -->
+            <Border Classes="card">
+                <StackPanel Spacing="12">
+                    <TextBlock Classes="h2" Text="Слежение за новыми дубликатами"/>
+                    <CheckBox IsChecked="{Binding SentinelEnabled, Mode=TwoWay}"
+                              Content="Следить за новыми дубликатами (пока программа открыта)"
+                              ToolTip.Tip="Если в выбранные папки попадёт копия уже известного файла, появится уведомление"/>
+                    <TextBlock Classes="caption" TextWrapping="Wrap"
+                               Text="Работает только пока приложение запущено; фоновой службы нет. Программа лишь сообщает о находке — ничего не удаляет и не меняет."/>
+                    <ItemsControl ItemsSource="{Binding SentinelFolders}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+                                    <TextBlock Text="{Binding}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                    <Button Grid.Column="1" Classes="ghost"
+                                            Command="{Binding $parent[ItemsControl].DataContext.RemoveSentinelFolderCommand}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip.Tip="Перестать следить за этой папкой">
+                                        <TextBlock Text="{x:Static loc:Strings.Remove}" FontSize="12"/>
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Classes="ghost" HorizontalAlignment="Left" Command="{Binding AddSentinelFolderCommand}"
+                            ToolTip.Tip="Добавить папку, за которой нужно следить (вместе с подпапками)">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <PathIcon Data="{StaticResource IconFolderPlus}"/>
+                            <TextBlock Text="{x:Static loc:Strings.AddFolder}"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Border>
+
             <!-- Пути -->
             <Border Classes="card">
                 <StackPanel Spacing="14">

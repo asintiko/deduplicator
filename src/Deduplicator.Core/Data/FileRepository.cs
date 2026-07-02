@@ -248,6 +248,19 @@ public sealed class FileRepository
         return (long)cmd.ExecuteScalar()!;
     }
 
+    /// <summary>
+    /// Сколько строк индекса имеют ровно такой размер (сторожевой режим, Sentinel-lite):
+    /// дешёвый первичный отсев — если 0, новый файл заведомо уникален и хэшировать его не нужно.
+    /// </summary>
+    public long CountBySize(long size)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM files WHERE size=$s";
+        cmd.Add("$s", size);
+        return (long)cmd.ExecuteScalar()!;
+    }
+
     public List<FileRecord> GetBySize(long size)
     {
         using var conn = _db.Open();

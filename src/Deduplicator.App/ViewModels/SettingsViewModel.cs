@@ -22,6 +22,7 @@ public partial class SettingsViewModel : PageViewModel
     private readonly ISettingsService _settings;
     private readonly IAudioMatchService _audio;
     private readonly IUpdateService _update;
+    private readonly ISentinelService _sentinel;
     private readonly AppPaths _paths;
     private string? _releaseUrl;
 
@@ -63,14 +64,20 @@ public partial class SettingsViewModel : PageViewModel
 
     public ObservableCollection<string> ReferenceFolders { get; } = new();
 
+    // Сторожевой режим (Sentinel-lite): следить за новыми дубликатами, пока программа открыта.
+    [ObservableProperty] private bool _sentinelEnabled;
+    public ObservableCollection<string> SentinelFolders { get; } = new();
+
     public string ImagePercentText => Format.Percent(ImageThreshold);
     public string AudioPercentText => Format.Percent(AudioThreshold);
 
-    public SettingsViewModel(ISettingsService settings, IAudioMatchService audio, IUpdateService update, AppPaths paths)
+    public SettingsViewModel(ISettingsService settings, IAudioMatchService audio, IUpdateService update,
+        ISentinelService sentinel, AppPaths paths)
     {
         _settings = settings;
         _audio = audio;
         _update = update;
+        _sentinel = sentinel;
         _paths = paths;
         CurrentVersionText = $"{Strings.CurrentVersionLabel}: {update.CurrentVersion}";
 
@@ -117,6 +124,9 @@ public partial class SettingsViewModel : PageViewModel
         ExcludedExtensions = s.ExcludedExtensions;
         ReferenceFolders.Clear();
         foreach (var f in s.ReferenceFolders) ReferenceFolders.Add(f);
+        SentinelEnabled = s.SentinelEnabled;
+        SentinelFolders.Clear();
+        foreach (var f in s.SentinelFolders) SentinelFolders.Add(f);
         CheckUpdatesEnabled = s.CheckUpdatesEnabled;
         UpdateRepository = s.UpdateRepository;
     }
@@ -218,6 +228,27 @@ public partial class SettingsViewModel : PageViewModel
         if (folder is not null && ReferenceFolders.Remove(folder)) Saved = false;
     }
 
+    [RelayCommand]
+    private async Task AddSentinelFolderAsync()
+    {
+        if (PickFolder is null) return;
+        var folder = await PickFolder();
+        if (string.IsNullOrEmpty(folder)) return;
+        // Нормализация и сравнение — как у папок-эталонов (без учёта регистра).
+        try { folder = System.IO.Path.GetFullPath(folder).TrimEnd('\\', '/'); } catch { }
+        if (!SentinelFolders.Contains(folder, System.StringComparer.OrdinalIgnoreCase))
+        {
+            SentinelFolders.Add(folder);
+            Saved = false;
+        }
+    }
+
+    [RelayCommand]
+    private void RemoveSentinelFolder(string? folder)
+    {
+        if (folder is not null && SentinelFolders.Remove(folder)) Saved = false;
+    }
+
     partial void OnImageThresholdChanged(double value) => OnPropertyChanged(nameof(ImagePercentText));
     partial void OnAudioThresholdChanged(double value) => OnPropertyChanged(nameof(AudioPercentText));
 
@@ -248,6 +279,8 @@ public partial class SettingsViewModel : PageViewModel
             SkipHiddenSystem = SkipHiddenSystem,
             ExcludedExtensions = ExcludedExtensions ?? "",
             ReferenceFolders = ReferenceFolders.ToList(),
+            SentinelEnabled = SentinelEnabled,
+            SentinelFolders = SentinelFolders.ToList(),
             CheckUpdatesEnabled = CheckUpdatesEnabled,
             UpdateRepository = UpdateRepository ?? "",
             // Поля, которых НЕТ на этом экране, обязаны переноситься из текущих настроек —
@@ -266,6 +299,15 @@ public partial class SettingsViewModel : PageViewModel
         _audio.Reconfigure(s.FpcalcPath);
         FpcalcAvailable = _audio.IsAvailable;
         FpcalcStatus = _audio.IsAvailable ? Strings.FpcalcAvailable : Strings.FpcalcMissing;
+
+        // Сторож применяется тоже сразу (тот же паттерн, что fpcalc/тема): включили — следим,
+        // выключили или убрали все папки — останавливаемся. Ошибки не мешают сохранению настроек.
+        try
+        {
+            if (s.SentinelEnabled && s.SentinelFolders.Count > 0) _sentinel.Start(s.SentinelFolders);
+            else _sentinel.Stop();
+        }
+        catch (System.Exception ex) { Core.Util.AppLog.Error("ApplySentinel", ex); }
 
         Saved = true; // ставим последним, чтобы обновления статусов выше не сбросили бейдж
     }
