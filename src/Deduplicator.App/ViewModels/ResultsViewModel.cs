@@ -120,6 +120,21 @@ public partial class ResultsViewModel : PageViewModel
 
     public override void OnNavigatedTo() => _ = LoadAsync();
 
+    /// <summary>
+    /// Уход со страницы: сбрасываем «вооружённые» диалоги. Иначе при возврате поверх свежих
+    /// (перезагруженных, без отметок) данных всплывал устаревший диалог, а сохранённый план
+    /// переименования выполнялся по уже невидимой пользователю выборке (аудит 2026-07-02).
+    /// </summary>
+    public override void OnNavigatedFrom()
+    {
+        ShowDeleteConfirm = false;
+        ShowRenameDialog = false;
+        ShowDistributeDialog = false;
+        ShowHardlinkConfirm = false;
+        _renamePlanField = null;
+        _hardlinkGroup = null;
+    }
+
     [RelayCommand]
     private async Task LoadAsync()
     {
@@ -159,6 +174,11 @@ public partial class ResultsViewModel : PageViewModel
             _audioTotal = audioTotal; _audioOffset = 0;
             _mountById = mount; _labelById = label;
             _imageBuilt = _audioBuilt = false;
+            // Освобождаем нативную память миниатюр СТАРЫХ результатов (B5): Bitmap-ы без Dispose
+            // копились между перезагрузками, GC их почти не собирал (малое managed-давление).
+            DisposeGroupThumbnails(_allImage);
+            DisposeGroupThumbnails(_allAudio);
+            DisposeGroupThumbnails(ExactGroups);
             _allImage.Clear(); _allAudio.Clear();
             ExactGroups.Clear(); SimilarImageGroups.Clear(); SimilarAudioGroups.Clear();
             CanShowMoreSimilarImages = CanShowMoreSimilarAudio = false;
@@ -187,8 +207,15 @@ public partial class ResultsViewModel : PageViewModel
         }
     }
 
+    private static void DisposeGroupThumbnails(IEnumerable<GroupItemViewModel> groups)
+    {
+        foreach (var g in groups)
+            foreach (var f in g.Files)
+                f.DisposeThumbnail();
+    }
+
     private GroupItemViewModel Build(DuplicateGroup g,
-        Dictionary<long, string> mountById, Dictionary<long, string> labelById)
+        Dictionary<long, string> mountById, Dictionary<long, string> labelById, bool withThumbnails = true)
     {
         // Точная группа разрешает удаление ТОЛЬКО если сверена байт-в-байт (Confidence>=1.0):
         // hash-only/офлайн exact (Confidence<1.0) — лишь информ., удалять нельзя, пока не перепроверено
@@ -208,7 +235,8 @@ public partial class ResultsViewModel : PageViewModel
             string? label = labelById.GetValueOrDefault(f.VolumeId);
             bool isRep = m.IsRepresentative || f.Id == g.RepresentativeId;
             bool prot = full is not null && IsUnderReference(full);
-            return new FileItemViewModel(f, m.Similarity, isRep, full, label, _thumbs, prot, groupAllowsDeletion);
+            return new FileItemViewModel(f, m.Similarity, isRep, full, label, _thumbs, prot,
+                groupAllowsDeletion, loadThumbnail: withThumbnails);
         });
         var gvm = new GroupItemViewModel(g, files);
         gvm.PropertyChanged += OnGroupPropertyChanged; // отметки → пересчёт доступности «Удалить»
@@ -231,26 +259,30 @@ public partial class ResultsViewModel : PageViewModel
     }
 
     /// <summary>Достроить следующую страницу точных групп из БД (первая страница + «Показать ещё»).</summary>
-    private void AppendExactPage()
+    private void AppendExactPage(bool withThumbnails = true)
     {
         // Нет завершённой сессии → ничего не показываем (не читаем чужие/частичные группы). Ревью P7.
         if (_sessionFilter is null) { CanShowMoreExact = false; return; }
         var page = _groups.GetGroupsPage(ExactTypes, _sessionFilter, _exactOffset, PageSize);
         _exactOffset += page.Count;
-        foreach (var g in page) ExactGroups.Add(Build(g, _mountById, _labelById));
+        foreach (var g in page) ExactGroups.Add(Build(g, _mountById, _labelById, withThumbnails));
         CanShowMoreExact = ExactGroups.Count < _exactTotal;
     }
 
     [RelayCommand]
     private void ShowMoreExact() => AppendExactPage();
 
-    /// <summary>Достроить ВСЕ точные группы — для действий «над всем»: авто-выбор и экспорт.</summary>
+    /// <summary>
+    /// Достроить ВСЕ точные группы — для действий «над всем»: авто-выбор и экспорт.
+    /// БЕЗ миниатюр: эти VM строятся ради галочек/CSV, а жадное декодирование превью
+    /// для десятков тысяч фото давало гигабайты Bitmap-ов и OOM (B5).
+    /// </summary>
     private void EnsureAllExactBuilt()
     {
         while (ExactGroups.Count < _exactTotal)
         {
             int before = ExactGroups.Count;
-            AppendExactPage();
+            AppendExactPage(withThumbnails: false);
             if (ExactGroups.Count == before) break; // защита от зацикливания, если БД отдала меньше
         }
     }
@@ -275,22 +307,22 @@ public partial class ResultsViewModel : PageViewModel
     }
 
     /// <summary>Достроить следующую страницу похожих фото из БД (миниатюры декодируются только для неё, P1).</summary>
-    private void AppendSimilarImagePage()
+    private void AppendSimilarImagePage(bool withThumbnails = true)
     {
         if (_sessionFilter is null) { CanShowMoreSimilarImages = false; return; }
         var page = _groups.GetGroupsPage(MatchType.SimilarImage, _sessionFilter, _imageOffset, PageSize);
         _imageOffset += page.Count;
-        foreach (var g in page) _allImage.Add(Build(g, _mountById, _labelById));
+        foreach (var g in page) _allImage.Add(Build(g, _mountById, _labelById, withThumbnails));
         CanShowMoreSimilarImages = _imageOffset < _imageTotal;
         RefilterImages();
     }
 
-    private void AppendSimilarAudioPage()
+    private void AppendSimilarAudioPage(bool withThumbnails = true)
     {
         if (_sessionFilter is null) { CanShowMoreSimilarAudio = false; return; }
         var page = _groups.GetGroupsPage(MatchType.SimilarAudio, _sessionFilter, _audioOffset, PageSize);
         _audioOffset += page.Count;
-        foreach (var g in page) _allAudio.Add(Build(g, _mountById, _labelById));
+        foreach (var g in page) _allAudio.Add(Build(g, _mountById, _labelById, withThumbnails));
         CanShowMoreSimilarAudio = _audioOffset < _audioTotal;
         RefilterAudio();
     }
@@ -301,14 +333,14 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private void ShowMoreSimilarAudio() => AppendSimilarAudioPage();
 
-    /// <summary>Достроить ВСЕ похожие фото — для экспорта (как EnsureAllExactBuilt для точных).</summary>
+    /// <summary>Достроить ВСЕ похожие фото — для экспорта. Без миниатюр: они нужны только на экране (B5).</summary>
     private void EnsureAllSimilarImagesBuilt()
     {
         EnsureImageBuilt();
         while (_imageOffset < _imageTotal)
         {
             int before = _imageOffset;
-            AppendSimilarImagePage();
+            AppendSimilarImagePage(withThumbnails: false);
             if (_imageOffset == before) break; // защита от зацикливания, если БД отдала меньше
         }
     }
@@ -319,7 +351,7 @@ public partial class ResultsViewModel : PageViewModel
         while (_audioOffset < _audioTotal)
         {
             int before = _audioOffset;
-            AppendSimilarAudioPage();
+            AppendSimilarAudioPage(withThumbnails: false);
             if (_audioOffset == before) break;
         }
     }
@@ -348,6 +380,11 @@ public partial class ResultsViewModel : PageViewModel
         ImageEmpty = _imageTotal == 0 ? Strings.NoGroups
             : SimilarImageGroups.Count == 0 ? "Похожие есть, но скрыты текущим порогом — сдвиньте слайдер влево."
             : null;
+        // Порог мог скрыть группы с отметками — кнопки действий обязаны пересчитать доступность,
+        // иначе остаются визуально активными и «не работают» (аудит 2026-07-02).
+        DeleteSelectedCommand.NotifyCanExecuteChanged();
+        RenameSelectedCommand.NotifyCanExecuteChanged();
+        DistributeSelectedCommand.NotifyCanExecuteChanged();
     }
 
     private void RefilterAudio()
@@ -358,6 +395,9 @@ public partial class ResultsViewModel : PageViewModel
         AudioEmpty = _audioTotal == 0 ? Strings.NoGroups
             : SimilarAudioGroups.Count == 0 ? "Похожие есть, но скрыты текущим порогом — сдвиньте слайдер влево."
             : null;
+        DeleteSelectedCommand.NotifyCanExecuteChanged();
+        RenameSelectedCommand.NotifyCanExecuteChanged();
+        DistributeSelectedCommand.NotifyCanExecuteChanged();
     }
 
     private IReadOnlyList<GroupItemViewModel> CurrentGroups() => SelectedTab switch
@@ -472,6 +512,9 @@ public partial class ResultsViewModel : PageViewModel
         try
         {
             var m = file.Model;
+            // Файл «ушёл в облако» (OneDrive-плейсхолдер): содержимое сверить нельзя, не скачав его,
+            // а удаление плейсхолдера удаляет и облачную копию. Не трогаем (B4).
+            if (CloudFiles.IsPlaceholderPath(file.FullPath!)) return false;
             var fi = new FileInfo(LongPath.Fix(file.FullPath!));
             if (!fi.Exists) return false;
             if (fi.Length != m.Size) return false;
@@ -650,9 +693,10 @@ public partial class ResultsViewModel : PageViewModel
         {
             // P0.4: ошибку показываем в видимом баннере страницы, а не в скрытом диалоге.
             var msg = $"Переименование отменено из-за ошибки: {result.Error}";
-            if (result.OrphanedTempPaths.Count > 0)
-                msg += "\nНе удалось вернуть имена (восстановите вручную):\n" +
-                       string.Join("\n", result.OrphanedTempPaths);
+            if (result.Orphans.Count > 0)
+                msg += "\nНе удалось вернуть имена автоматически (будет повторено при следующем запуске):\n" +
+                       string.Join("\n", result.Orphans.Select(o =>
+                           $"{o.CurrentPath}  →  исходное имя: {Path.GetFileName(o.OriginalPath)}"));
             OperationErrorText = msg;
             await LoadAsync();
             return;
@@ -674,6 +718,11 @@ public partial class ResultsViewModel : PageViewModel
     private int UpdateIndexAfterRename(IReadOnlyList<RenamePair> pairs)
     {
         var failures = new List<(RenamePair pair, string reason)>();
+
+        // Пакет собираем целиком и обновляем ОДНИМ вызовом (одна транзакция, два прохода):
+        // по-файловое обновление при пересечении имён внутри пакета (сдвиг нумерации) удаляло
+        // строку живого файла из индекса и маскировало это как успех (аудит 2026-07-02, B2).
+        var updates = new List<RenameDbUpdate>(pairs.Count);
         foreach (var pair in pairs)
         {
             try
@@ -686,11 +735,29 @@ public partial class ResultsViewModel : PageViewModel
                 var fi = new FileInfo(pair.NewFullPath);
                 var newRel = Path.GetRelativePath(meta.mount, pair.NewFullPath);
                 var ext = Path.GetExtension(pair.NewFullPath);
-                _files.UpdatePathAfterRename(pair.FileId, meta.volumeId, newRel, Path.GetFileName(pair.NewFullPath),
-                    string.IsNullOrEmpty(ext) ? null : ext,
-                    fi.LastWriteTimeUtc, fi.CreationTimeUtc, fi.Length);
+                updates.Add(new RenameDbUpdate(pair.FileId, meta.volumeId, newRel,
+                    Path.GetFileName(pair.NewFullPath), string.IsNullOrEmpty(ext) ? null : ext,
+                    fi.LastWriteTimeUtc, fi.CreationTimeUtc, fi.Length));
             }
-            catch (Exception ex) { failures.Add((pair, "db-exception: " + ex.Message)); }
+            catch (Exception ex) { failures.Add((pair, "meta-exception: " + ex.Message)); }
+        }
+
+        try
+        {
+            var failedIds = _files.UpdatePathsAfterRename(updates);
+            foreach (var id in failedIds)
+            {
+                var pair = pairs.FirstOrDefault(p => p.FileId == id);
+                if (pair is not null) failures.Add((pair, "db-row-not-updated"));
+            }
+        }
+        catch (Exception ex)
+        {
+            foreach (var u in updates)
+            {
+                var pair = pairs.First(p => p.FileId == u.FileId);
+                failures.Add((pair, "db-exception: " + ex.Message));
+            }
         }
 
         // Safety (P0.1): физический rename прошёл, но БД не обновилась — пишем recovery-файл с путями + причиной.
@@ -750,8 +817,17 @@ public partial class ResultsViewModel : PageViewModel
         AppendGroups(sb, _allImage, Strings.TabSimilarImages);
         AppendGroups(sb, _allAudio, Strings.TabSimilarAudio);
 
-        try { await File.WriteAllTextAsync(path, sb.ToString(), new UTF8Encoding(true)); }
-        catch { }
+        try
+        {
+            await File.WriteAllTextAsync(path, sb.ToString(), new UTF8Encoding(true));
+            OperationSuccessText = $"Отчёт сохранён: {path}";
+        }
+        catch (Exception ex)
+        {
+            // Молчаливый провал (файл открыт в Excel, носитель защищён от записи) оставлял
+            // пользователя в уверенности, что отчёт обновлён (B9).
+            OperationErrorText = $"Не удалось сохранить отчёт: {ex.Message}";
+        }
     }
 
     private static void AppendGroups(StringBuilder sb, IEnumerable<GroupItemViewModel> groups, string type)

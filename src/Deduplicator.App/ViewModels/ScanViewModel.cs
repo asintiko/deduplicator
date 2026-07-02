@@ -256,6 +256,21 @@ public partial class ScanViewModel : PageViewModel
             return;
         }
 
+        // B6 (аудит 2026-07-02): раньше блокировался старт, только если недоступны ВСЕ выбранные тома,
+        // а частично отвалившийся (выдернутая флешка) молча выпадал — скан завершался «успехом» и
+        // затирал прежнюю полную сессию, включая группы по отсутствующему диску. Теперь честно
+        // останавливаемся и называем недоступные тома; пользователь сам решит — переподключить
+        // или снять галочку.
+        var missing = selected.Where(v => !connectedById.ContainsKey(v.Id)).ToList();
+        if (missing.Count > 0)
+        {
+            EmptyHint = "Недоступны выбранные носители: " +
+                        string.Join(", ", missing.Select(m => m.DisplayName)) +
+                        ". Подключите их или снимите отметку — иначе результаты будут неполными.";
+            _ = LoadVolumesAsync();
+            return;
+        }
+
         var ids = new List<long>();
         var folders = new List<string>();
         foreach (var item in selected)
@@ -336,6 +351,19 @@ public partial class ScanViewModel : PageViewModel
         try
         {
             await _scan.RunAsync(options, _cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Отмена до фактического старта задачи (Task.Run с ct) — не сбой.
+        }
+        catch (Exception ex)
+        {
+            // RunCore переводит сбои в состояние Failed сам, но исключение может прилететь и вне
+            // его try (например, БД недоступна при создании сессии). Без catch оно уходило из
+            // async-команды и роняло приложение «в рабочий стол» (аудит 2026-07-02).
+            Core.Util.AppLog.Error("ScanViewModel.StartAsync", ex);
+            IsFailed = true;
+            FailText = ex.Message;
         }
         finally
         {

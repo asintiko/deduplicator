@@ -21,6 +21,25 @@ public sealed class ProgressCoalescer<T> : IDisposable
     private long _lastEmit;
     private bool _disposed;
 
+    // Гард порядка доставки (аудит 2026-07-02): trailing-колбэк таймера, снявший снимок ДО
+    // терминального immediate-события, мог доставить устаревший снимок ПОСЛЕ него (вытеснение
+    // между выходом из _lock и вызовом _sink) — UI после отмены/завершения перезаписывался
+    // старым этапом. Номер снимка выдаётся под _lock, доставка сериализуется под _emitLock,
+    // снимки со «старым» номером отбрасываются.
+    private long _seq;
+    private long _lastDelivered;
+    private readonly object _emitLock = new();
+
+    private void Emit(T value, long seq)
+    {
+        lock (_emitLock)
+        {
+            if (seq <= _lastDelivered) return; // более новый снимок уже доставлен
+            _lastDelivered = seq;
+            _sink(value);
+        }
+    }
+
     public ProgressCoalescer(Action<T> sink, TimeSpan? interval = null)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
@@ -35,6 +54,7 @@ public sealed class ProgressCoalescer<T> : IDisposable
     public void Report(T value, bool immediate = false)
     {
         T toEmit = default!;
+        long seq = 0;
         bool emit = false;
         lock (_lock)
         {
@@ -46,6 +66,7 @@ public sealed class ProgressCoalescer<T> : IDisposable
             if (immediate || now - _lastEmit >= _intervalTicks)
             {
                 toEmit = _pending;
+                seq = ++_seq;
                 emit = true;
                 _hasPending = false;
                 _lastEmit = now;
@@ -59,29 +80,32 @@ public sealed class ProgressCoalescer<T> : IDisposable
                 _timer.Change(remainMs, Timeout.Infinite);
             }
         }
-        if (emit) _sink(toEmit); // вне лока: sink не должен держать наш лок
+        if (emit) Emit(toEmit, seq); // вне _lock: sink не должен держать наш лок
     }
 
     private void OnTimer()
     {
         T toEmit = default!;
+        long seq = 0;
         bool emit = false;
         lock (_lock)
         {
             _timerArmed = false;
             if (_disposed || !_hasPending) return;
             toEmit = _pending;
+            seq = ++_seq;
             emit = true;
             _hasPending = false;
             _lastEmit = Stopwatch.GetTimestamp();
         }
-        if (emit) _sink(toEmit);
+        if (emit) Emit(toEmit, seq);
     }
 
     /// <summary>Немедленно отдать последнее накопленное значение (вызывать в конце скана).</summary>
     public void Flush()
     {
         T toEmit = default!;
+        long seq = 0;
         bool emit = false;
         lock (_lock)
         {
@@ -90,12 +114,13 @@ public sealed class ProgressCoalescer<T> : IDisposable
             if (_hasPending)
             {
                 toEmit = _pending;
+                seq = ++_seq;
                 emit = true;
                 _hasPending = false;
                 _lastEmit = Stopwatch.GetTimestamp();
             }
         }
-        if (emit) _sink(toEmit);
+        if (emit) Emit(toEmit, seq);
     }
 
     public void Dispose()

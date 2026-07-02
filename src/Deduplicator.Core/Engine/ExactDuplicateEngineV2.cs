@@ -57,8 +57,11 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
         }
 
         // Точные группы (включая кросс-том/офлайн hash-only) — безопасная побайтовая сверка внутри.
+        // waitGate: сверка читает файлы целиком (часто самый долгий этап) — пауза обязана работать
+        // и здесь, а не только в size-батчах и хэш-воронке (аудит 2026-07-02).
         rep.Stage(ScanStage.Grouping);
-        result.GroupsCreated = _grouper.BuildExactGroups(req.VolumesById, req.InScope, req.Rule, rep.ExactGroups, ct, req.SessionId);
+        result.GroupsCreated = _grouper.BuildExactGroups(req.VolumesById, req.InScope, req.Rule, rep.ExactGroups,
+            ct, req.SessionId, rep.WaitGate);
         return result;
     }
 
@@ -76,7 +79,11 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
             if (inScope.Count == 0) return;
 
             // --- частичный хэш: только подключённые in-scope без хэша ---
-            var needPartial = inScope.Where(f => f.PartialHash is null).ToList();
+            // 1.6: у крупных файлов (>128 МБ) частичный хэш v2 включает средний блок — строки со
+            // старой версией пересчитываем (иначе смешение v1/v2 в одной корзине размера маскирует
+            // дубликаты). Для мелких файлов алгоритм не менялся — их не трогаем.
+            var needPartial = inScope.Where(f => f.PartialHash is null ||
+                (f.Size > HashService.MiddleBlockThreshold && f.PartialVer < HashService.CurrentPartialVersion)).ToList();
             if (needPartial.Count > 0)
             {
                 HashByVolume(needPartial, partial: true, req, rep, ct);
@@ -127,7 +134,11 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
                     {
                         // Передаём ожидаемый размер: бросит FileChangedDuringScanException, если файл
                         // изменился между metadata-этапом и чтением — тогда хэш не сохраняется.
-                        f.PartialHash = _hash.ComputePartialHash(path, f.Size, ct);
+                        // 1.4: на носителе со штрафом позиционирования средние файлы читаем одним
+                        // последовательным чтением (хэш тот же, на один сик меньше).
+                        bool seq = req.ReadPlans.TryGetValue(f.VolumeId, out var plan) && plan.PreferSequential;
+                        f.PartialHash = _hash.ComputePartialHash(path, f.Size, ct, preferWholeRead: seq);
+                        f.PartialVer = HashService.CurrentPartialVersion;
                         if (f.ScanState < ScanState.Partial) f.ScanState = ScanState.Partial;
                     }
                     else

@@ -47,11 +47,23 @@ public sealed class VolumeRecord
     /// <summary>Тип носителя по WMI: 3 = HDD, 4 = SSD, 0 = неизвестно.</summary>
     public int MediaType { get; set; }
 
+    /// <summary>
+    /// Есть ли у носителя штраф позиционирования (IOCTL_STORAGE_QUERY_PROPERTY / seek-penalty):
+    /// true — механика (HDD, в т.ч. внешний в USB-боксе, который WMI видит как «Fixed unknown»),
+    /// false — флэш/SSD (в т.ч. СЪЁМНЫЕ USB-SSD и флешки), null — неизвестно (сеть/нет доступа).
+    /// Первичный сигнал для плана чтения — точнее WMI-типа (этап 1.2 дорожной карты).
+    /// </summary>
+    public bool? HasSeekPenalty { get; set; }
+
     public bool IsHdd => MediaType == 3;
     public bool IsSsd => MediaType == 4;
 
-    /// <summary>Для HDD, съёмных и сетевых носителей чтение сериализуется (NFR-7, P1.4).</summary>
-    public bool PreferSequentialReads => IsHdd || IsRemovable || IsNetwork;
+    /// <summary>
+    /// Сериализовать ли чтение содержимого (NFR-7, P1.4). Первичен seek-penalty: съёмный USB3-SSD
+    /// получает параллельные чтения (2–4x на хэшировании), а HDD в USB-боксе — последовательные
+    /// (без seek-шторма). Фолбэк при неизвестном — прежняя консервативная эвристика.
+    /// </summary>
+    public bool PreferSequentialReads => HasSeekPenalty ?? (IsHdd || IsRemovable || IsNetwork);
 
     public string DisplayName
     {

@@ -66,6 +66,21 @@ public sealed class VolumeService : IVolumeService
         var root = d.RootDirectory.FullName;
         bool isNetwork = d.DriveType == DriveType.Network;
         int media = root.Length > 0 && mediaByLetter.TryGetValue(char.ToUpperInvariant(root[0]), out var m) ? m : 0;
+
+        // 1.2: seek-penalty IOCTL — первичный сигнал «механика vs флэш» (без прав администратора).
+        // Точнее WMI: USB3-SSD/флешка → нет штрафа → параллельные чтения; HDD в USB-боксе,
+        // который WMI считает «Fixed unknown», → штраф есть → последовательные.
+        bool? seekPenalty = null;
+        if (!isNetwork && root.Length >= 2 && root[1] == ':')
+        {
+            seekPenalty = FastDedup.Engine.EngineEnvironment.DetectStorage(root[..2]) switch
+            {
+                FastDedup.Engine.StorageType.Hdd => true,
+                FastDedup.Engine.StorageType.Ssd => false,
+                _ => null
+            };
+        }
+
         return new VolumeRecord
         {
             Label = string.IsNullOrWhiteSpace(d.VolumeLabel) ? d.Name.TrimEnd('\\') : d.VolumeLabel,
@@ -77,7 +92,8 @@ public sealed class VolumeService : IVolumeService
             MountPath = root,
             IsRemovable = d.DriveType == DriveType.Removable,
             IsNetwork = isNetwork,
-            MediaType = media
+            MediaType = media,
+            HasSeekPenalty = seekPenalty
         };
     }
 
@@ -163,6 +179,7 @@ public sealed class VolumeService : IVolumeService
                 v.IsRemovable = c.IsRemovable;
                 v.IsNetwork = c.IsNetwork; // HIGH (ревью projact5): без этого сетевой диск читался параллельно
                 v.MediaType = c.MediaType;
+                v.HasSeekPenalty = c.HasSeekPenalty; // 1.2: сигнал IOCTL обязан пережить merge (как IsNetwork)
                 if (v.TotalBytes == 0) v.TotalBytes = c.TotalBytes;
             }
             else

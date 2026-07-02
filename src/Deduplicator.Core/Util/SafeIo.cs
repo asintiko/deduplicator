@@ -70,7 +70,39 @@ public static class SafeIo
             TryDelete(dst);
             throw new IOException($"Копия повреждена (хэш не совпал): {src}");
         }
-        File.Delete(LongPath.Fix(src));
+        try
+        {
+            DeleteAllowReadOnly(src);
+        }
+        catch
+        {
+            // Источник удалить не удалось — подчищаем копию, иначе в назначении (карантине)
+            // остаётся неучтённая копия-сирота, множащаяся при повторных попытках.
+            TryDelete(dst);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Удаление файла, санкционированное пользователем: атрибут «только для чтения» не повод
+    /// падать (файлы с CD/бэкапов). File.Move на одном томе переносит read-only без вопросов,
+    /// а File.Delete в межтомовой ветке бросал UnauthorizedAccessException — и это ломало
+    /// удаление в карантин для целого класса файлов на внешних носителях.
+    /// </summary>
+    private static void DeleteAllowReadOnly(string path)
+    {
+        var p = LongPath.Fix(path);
+        try
+        {
+            File.Delete(p);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            var attrs = File.GetAttributes(p);
+            if ((attrs & FileAttributes.ReadOnly) == 0) throw; // не read-only — настоящая проблема прав
+            File.SetAttributes(p, attrs & ~FileAttributes.ReadOnly);
+            File.Delete(p);
+        }
     }
 
     private static byte[] HashFile(string path, CancellationToken ct)

@@ -386,10 +386,61 @@ public sealed class GroupRepository
         tx.Commit();
     }
 
+    /// <summary>
+    /// Роспуск вырожденных групп после каскадного удаления файлов (например, «Забыть носитель»):
+    /// FK-каскад удаляет files/duplicate_members, но строки duplicate_groups остаются — пустые и
+    /// одиночные группы показывались в результатах, статистика считала устаревший total_bytes, а
+    /// осиротевший эталон (ON DELETE SET NULL) позволял «Выбрать все» отметить ВСЕ файлы группы
+    /// (аудит 2026-07-02). Возвращает число распущенных групп.
+    /// </summary>
+    public int DissolveDegenerateGroups()
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+
+        int removed;
+        using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = """
+                DELETE FROM duplicate_groups
+                WHERE (SELECT COUNT(*) FROM duplicate_members m WHERE m.group_id = duplicate_groups.id) < 2
+                """;
+            removed = del.ExecuteNonQuery();
+        }
+
+        using (var fix = conn.CreateCommand())
+        {
+            fix.Transaction = tx;
+            fix.CommandText = """
+                UPDATE duplicate_groups
+                SET representative = (SELECT file_id FROM duplicate_members m
+                                      WHERE m.group_id = duplicate_groups.id ORDER BY file_id LIMIT 1)
+                WHERE representative IS NULL
+                """;
+            fix.ExecuteNonQuery();
+        }
+
+        using (var tb = conn.CreateCommand())
+        {
+            tb.Transaction = tx;
+            tb.CommandText = """
+                UPDATE duplicate_groups
+                SET total_bytes = (SELECT COALESCE(SUM(f.size), 0)
+                                   FROM duplicate_members m JOIN files f ON f.id = m.file_id
+                                   WHERE m.group_id = duplicate_groups.id)
+                """;
+            tb.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+        return removed;
+    }
+
     // Подзапрос «последняя успешно завершённая сессия» — чтобы статистика считалась по ТЕМ ЖЕ группам,
     // что показывает экран результатов (P0.2/ревью projact5: Home/Статистика не должны расходиться с Results).
     private const string LatestCompletedSub =
-        "(SELECT id FROM scan_sessions WHERE stage=$done ORDER BY finished_at DESC, id DESC LIMIT 1)";
+        "(SELECT id FROM scan_sessions WHERE stage=$done ORDER BY id DESC LIMIT 1)"; // по id: finished_at — локальная строка, ломается при смене пояса
 
     /// <summary>Статистика по группам для сводного экрана — только последний завершённый скан.</summary>
     public DuplicateStatistics GetStatistics()

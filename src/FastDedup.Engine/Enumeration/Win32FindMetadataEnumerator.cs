@@ -99,7 +99,11 @@ public sealed class Win32FindMetadataEnumerator : IMetadataEnumerator
                     if ((attrs & Native.FILE_ATTRIBUTE_DIRECTORY) != 0)
                     {
                         bool isReparse = (attrs & Native.FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                        if (isReparse && !options.IncludeReparsePoints) continue;
+                        if (isReparse && !options.IncludeReparsePoints)
+                        {
+                            options.OnReparseSkipped?.Invoke(full, true);
+                            continue;
+                        }
                         if (options.SkipHiddenSystem && (attrs & (Native.FILE_ATTRIBUTE_HIDDEN | Native.FILE_ATTRIBUTE_SYSTEM)) != 0) continue;
                         if (ScanFilters.ShouldSkipDirectoryName(name, options)) continue;
                         // В reparse-каталог заходим лишь ОДИН раз по его identity (том+индекс): джанкшен на
@@ -114,7 +118,13 @@ public sealed class Win32FindMetadataEnumerator : IMetadataEnumerator
                     else
                     {
                         long size = ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
-                        if (ScanFilters.ShouldSkipMetadata(full, size, attrs, options)) continue;
+                        if (ScanFilters.ShouldSkipMetadata(full, size, attrs, options))
+                        {
+                            // Reparse-ФАЙЛ (облачный плейсхолдер/симлинк) — считаем, а не молчим.
+                            if ((attrs & Native.FILE_ATTRIBUTE_REPARSE_POINT) != 0 && !options.IncludeReparsePoints)
+                                options.OnReparseSkipped?.Invoke(full, false);
+                            continue;
+                        }
                         long cr = ((long)data.ftCreationTime.dwHighDateTime << 32) | data.ftCreationTime.dwLowDateTime;
                         long lw = ((long)data.ftLastWriteTime.dwHighDateTime << 32) | data.ftLastWriteTime.dwLowDateTime;
                         yield return new EnumeratedFile(full, size, cr, lw, attrs);

@@ -82,14 +82,14 @@ public class Sprint1EngineTests : IDisposable
 
     private sealed class ThrowOnCompareHash : IHashService
     {
-        public byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default)
+        public byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default, bool preferWholeRead = false)
             => throw new NotSupportedException();
         public byte[] ComputeFullHash(string fullPath, CancellationToken ct = default)
             => throw new NotSupportedException();
         public byte[] ComputeFullHash(string fullPath, long expectedSize, CancellationToken ct = default)
             => throw new NotSupportedException();
         // Файлы доступны, но прочитать не получается (заблокирован/IO-ошибка).
-        public bool FilesAreByteEqual(string a, string b, CancellationToken ct = default)
+        public bool FilesAreByteEqual(string a, string b, CancellationToken ct = default, int blockBytes = 0)
             => throw new IOException("read failure");
     }
 
@@ -170,10 +170,10 @@ public class Sprint1EngineTests : IDisposable
         private readonly HashService _real = new();
         private readonly string _needle;
         public ThrowForPathHash(string needle) => _needle = needle;
-        public byte[] ComputePartialHash(string p, long s, CancellationToken ct = default) => _real.ComputePartialHash(p, s, ct);
+        public byte[] ComputePartialHash(string p, long s, CancellationToken ct = default, bool preferWholeRead = false) => _real.ComputePartialHash(p, s, ct, preferWholeRead);
         public byte[] ComputeFullHash(string p, CancellationToken ct = default) => _real.ComputeFullHash(p, ct);
         public byte[] ComputeFullHash(string p, long s, CancellationToken ct = default) => _real.ComputeFullHash(p, s, ct);
-        public bool FilesAreByteEqual(string a, string b, CancellationToken ct = default)
+        public bool FilesAreByteEqual(string a, string b, CancellationToken ct = default, int blockBytes = 0)
         {
             if (a.EndsWith(_needle, StringComparison.OrdinalIgnoreCase) || b.EndsWith(_needle, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("simulated unreadable: " + _needle);

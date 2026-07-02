@@ -245,7 +245,11 @@ public partial class SettingsViewModel : PageViewModel
             ReferenceFolders = ReferenceFolders.ToList(),
             CheckUpdatesEnabled = CheckUpdatesEnabled,
             UpdateRepository = UpdateRepository ?? "",
-            OnboardingCompleted = _settings.Current.OnboardingCompleted
+            // Поля, которых НЕТ на этом экране, обязаны переноситься из текущих настроек —
+            // иначе «Сохранить» молча стирает выбор пользователя, сделанный в другом месте
+            // (терялись категории с экрана сканирования — аудит 2026-07-02).
+            OnboardingCompleted = _settings.Current.OnboardingCompleted,
+            IncludedCategories = _settings.Current.IncludedCategories.ToList()
         };
         _settings.Save(s);
 

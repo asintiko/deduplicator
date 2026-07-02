@@ -23,6 +23,9 @@ public sealed class FastListerOptions
 
     /// <summary>Ошибка перечисления (недоступная папка, сбой API).</summary>
     public Action<ScanError>? OnError { get; init; }
+
+    /// <summary>Пропущен reparse/облачный элемент (путь, каталог ли) — для счётчика в UI.</summary>
+    public Action<string, bool>? OnReparseSkipped { get; init; }
 }
 
 /// <summary>
@@ -43,7 +46,8 @@ public sealed class FastFileLister
         {
             Roots = new[] { root },
             IncludeReparsePoints = options.IncludeReparsePoints,
-            SkipHiddenSystem = options.SkipHiddenSystem
+            SkipHiddenSystem = options.SkipHiddenSystem,
+            OnReparseSkipped = options.OnReparseSkipped
         };
 
         try
@@ -126,7 +130,11 @@ public sealed class FastFileLister
                     {
                         if (!Native.TryGetFileInfo(path, out long size, out uint attrs, out long cr, out long lw)) return;
                         if ((attrs & Native.FILE_ATTRIBUTE_DIRECTORY) != 0) return;
-                        if (!options.IncludeReparsePoints && (attrs & Native.FILE_ATTRIBUTE_REPARSE_POINT) != 0) return;
+                        if (!options.IncludeReparsePoints && (attrs & Native.FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                        {
+                            options.OnReparseSkipped?.Invoke(path, false);
+                            return;
+                        }
                         if (options.SkipHiddenSystem && (attrs & (Native.FILE_ATTRIBUTE_HIDDEN | Native.FILE_ATTRIBUTE_SYSTEM)) != 0) return;
                         output.Add(new EnumeratedFile(path, size, cr, lw, attrs), ct);
                     });

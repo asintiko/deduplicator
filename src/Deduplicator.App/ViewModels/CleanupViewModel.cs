@@ -165,6 +165,10 @@ public partial class CleanupViewModel : PageViewModel
     [RelayCommand]
     private void CancelDelete() => ShowDeleteConfirm = false;
 
+    /// <summary>Уход со страницы гасит «вооружённый» диалог — иначе он всплывает при возврате
+    /// поверх обновлённого списка с устаревшим текстом (аудит 2026-07-02).</summary>
+    public override void OnNavigatedFrom() => ShowDeleteConfirm = false;
+
     [RelayCommand]
     private async Task ConfirmDeleteAsync()
     {

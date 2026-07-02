@@ -13,7 +13,7 @@ public sealed class FileRepository
 
     private const string Cols =
         "f.id, f.volume_id, f.rel_path, f.name, f.ext, f.size, f.mtime, f.created, f.category, " +
-        "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed";
+        "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed, f.partial_ver";
 
     // ---- Чтение ----
 
@@ -61,41 +61,78 @@ public sealed class FileRepository
     /// </summary>
     public void UpdatePathAfterRename(long fileId, long volumeId, string newRelPath, string newName, string? newExt,
         DateTimeOffset newMtime, DateTimeOffset newCreated, long newSize)
+        => UpdatePathsAfterRename(new[]
+        {
+            new RenameDbUpdate(fileId, volumeId, newRelPath, newName, newExt, newMtime, newCreated, newSize)
+        });
+
+    /// <summary>
+    /// Пакетное обновление путей после группового переименования — одна транзакция, ДВА прохода.
+    /// Прежняя по-файловая версия удаляла строку ЖИВОГО файла при пересечении имён внутри пакета
+    /// (обычный сдвиг нумерации: новое имя одного = старое имя другого) и маскировала это как успех
+    /// (UPDATE затрагивал 0 строк). Теперь: (1) все строки пакета уводятся на уникальные временные
+    /// rel_path ("ren:id" - двоеточие в именах файлов Windows недопустимо, коллизий нет), (2) устаревшие
+    /// строки ЧУЖИХ записей на целевых путях снимаются (пакетные уже на временных путях и под
+    /// удар не попадают), (3) финальные значения. 0 затронутых строк — фиксируется как сбой.
+    /// Возвращает file_id строк, которые обновить не удалось.
+    /// </summary>
+    public List<long> UpdatePathsAfterRename(IReadOnlyList<RenameDbUpdate> updates)
     {
+        var failed = new List<long>();
+        if (updates.Count == 0) return failed;
+
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
+        var ok = new HashSet<long>();
 
-        // Снимаем возможную УСТАРЕВШУЮ строку на новом пути (физический move уже прошёл на этот путь —
-        // значит прежний обитатель не существует на диске): иначе UNIQUE(volume_id, rel_path) уронит UPDATE.
-        using (var del = conn.CreateCommand())
+        // Проход 1: на временные уникальные пути (разрывает пересечения имён внутри пакета).
+        foreach (var u in updates)
         {
-            del.Transaction = tx;
-            del.CommandText = "DELETE FROM files WHERE volume_id=$v AND rel_path=$rel AND id<>$id";
-            del.Add("$v", volumeId);
-            del.Add("$rel", newRelPath);
-            del.Add("$id", fileId);
-            del.ExecuteNonQuery();
+            using var tmp = conn.CreateCommand();
+            tmp.Transaction = tx;
+            tmp.CommandText = "UPDATE files SET rel_path=$tmp WHERE id=$id AND volume_id=$v";
+            tmp.Add("$tmp", "ren:" + u.FileId);
+            tmp.Add("$id", u.FileId);
+            tmp.Add("$v", u.VolumeId);
+            if (tmp.ExecuteNonQuery() == 1) ok.Add(u.FileId);
+            else failed.Add(u.FileId); // строки нет в БД — честно сообщаем, а не молчим
         }
 
-        using (var cmd = conn.CreateCommand())
+        foreach (var u in updates)
         {
+            if (!ok.Contains(u.FileId)) continue;
+
+            // Устаревшая ЧУЖАЯ строка на целевом пути (её файл физически заменён нашим переименованием).
+            using (var del = conn.CreateCommand())
+            {
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM files WHERE volume_id=$v AND rel_path=$rel AND id<>$id";
+                del.Add("$v", u.VolumeId);
+                del.Add("$rel", u.NewRelPath);
+                del.Add("$id", u.FileId);
+                del.ExecuteNonQuery();
+            }
+
+            // Проход 2: финальные значения.
+            using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText = """
                 UPDATE files
                 SET rel_path=$rel, name=$name, ext=$ext, mtime=$mtime, created=$created, size=$size, last_indexed=$idx
                 WHERE id=$id;
                 """;
-            cmd.Add("$rel", newRelPath);
-            cmd.Add("$name", newName);
-            cmd.Add("$ext", newExt);
-            cmd.Add("$mtime", Db.Iso(newMtime));
-            cmd.Add("$created", Db.Iso(newCreated));
-            cmd.Add("$size", newSize);
+            cmd.Add("$rel", u.NewRelPath);
+            cmd.Add("$name", u.NewName);
+            cmd.Add("$ext", u.NewExt);
+            cmd.Add("$mtime", Db.Iso(u.NewMtime));
+            cmd.Add("$created", Db.Iso(u.NewCreated));
+            cmd.Add("$size", u.NewSize);
             cmd.Add("$idx", Db.IsoNow());
-            cmd.Add("$id", fileId);
-            cmd.ExecuteNonQuery();
+            cmd.Add("$id", u.FileId);
+            if (cmd.ExecuteNonQuery() != 1) failed.Add(u.FileId);
         }
         tx.Commit();
+        return failed;
     }
 
     public List<FileRecord> GetByVolume(long volumeId)
@@ -111,6 +148,16 @@ public sealed class FileRepository
     }
 
     // --- P1.2: область скана (scan_scope_files) ---
+
+    /// <summary>Старт приложения: чистим ВСЕ области сканов. Они нужны только во время активного
+    /// скана; после краха процесса строки оставались навсегда и таблица росла неограниченно.</summary>
+    public void ClearAllScopes()
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM scan_scope_files";
+        cmd.ExecuteNonQuery();
+    }
 
     /// <summary>Очистить область текущей сессии (перед заполнением).</summary>
     public void ClearScope(long sessionId)
@@ -279,6 +326,31 @@ public sealed class FileRepository
         return list;
     }
 
+    /// <summary>
+    /// Пачка файлов по НЕСКОЛЬКИМ полным хэшам одним запросом (этап 1.5): группировка делала
+    /// N+1 GetByFullHash — десятки тысяч соединений/запросов на большой библиотеке превращали
+    /// стадию Grouping в SQL-bound. Паттерн отработан на GetBySizesOrdered (короткоживущее
+    /// соединение, порядок по full_hash — потребитель группирует соседние строки).
+    /// </summary>
+    public List<FileRecord> GetByFullHashes(IReadOnlyList<byte[]> hashes)
+    {
+        var list = new List<FileRecord>();
+        if (hashes.Count == 0) return list;
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        var names = new List<string>(hashes.Count);
+        for (int i = 0; i < hashes.Count; i++)
+        {
+            var n = "$h" + i;
+            names.Add(n);
+            cmd.Add(n, hashes[i]);
+        }
+        cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.full_hash IN ({string.Join(",", names)}) ORDER BY f.full_hash, f.id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) list.Add(Map(r));
+        return list;
+    }
+
     /// <summary>Файлы заданной категории, для которых ещё не посчитан перцептивный признак.</summary>
     public List<FileRecord> GetNeedingPerceptual(FileCategory category)
     {
@@ -387,15 +459,16 @@ public sealed class FileRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT INTO files (volume_id, rel_path, name, ext, size, mtime, created, category,
-                               partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed)
+                               partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed, partial_ver)
             VALUES ($vol, $rel, $name, $ext, $size, $mtime, $created, $cat,
-                    $ph, $fh, $phash, $pix, $afp, $state, $idx)
+                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver)
             ON CONFLICT(volume_id, rel_path) DO UPDATE SET
                 name=excluded.name, ext=excluded.ext, size=excluded.size, mtime=excluded.mtime,
                 created=excluded.created, category=excluded.category,
                 partial_hash=excluded.partial_hash, full_hash=excluded.full_hash,
                 phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
-                scan_state=excluded.scan_state, last_indexed=excluded.last_indexed
+                scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
+                partial_ver=excluded.partial_ver
             RETURNING id;
             """;
         var pVol = cmd.CreateParameter(); pVol.ParameterName = "$vol"; cmd.Parameters.Add(pVol);
@@ -413,6 +486,7 @@ public sealed class FileRepository
         var pAfp = cmd.CreateParameter(); pAfp.ParameterName = "$afp"; cmd.Parameters.Add(pAfp);
         var pState = cmd.CreateParameter(); pState.ParameterName = "$state"; cmd.Parameters.Add(pState);
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
+        var pVer = cmd.CreateParameter(); pVer.ParameterName = "$pver"; cmd.Parameters.Add(pVer);
 
         foreach (var f in batch)
         {
@@ -431,6 +505,7 @@ public sealed class FileRepository
             pAfp.Value = (object?)f.AudioFp ?? DBNull.Value;
             pState.Value = Mappers.StateToDb(f.ScanState);
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
+            pVer.Value = f.PartialVer;
             f.Id = (long)cmd.ExecuteScalar()!;
         }
         tx.Commit();
@@ -446,7 +521,7 @@ public sealed class FileRepository
         cmd.Transaction = tx;
         cmd.CommandText = """
             UPDATE files SET partial_hash=$ph, full_hash=$fh, phash=$phash, pixel_hash=$pix,
-                             audio_fp=$afp, scan_state=$state, last_indexed=$idx
+                             audio_fp=$afp, scan_state=$state, last_indexed=$idx, partial_ver=$pver
             WHERE id=$id;
             """;
         var pPh = cmd.CreateParameter(); pPh.ParameterName = "$ph"; cmd.Parameters.Add(pPh);
@@ -456,6 +531,7 @@ public sealed class FileRepository
         var pAfp = cmd.CreateParameter(); pAfp.ParameterName = "$afp"; cmd.Parameters.Add(pAfp);
         var pState = cmd.CreateParameter(); pState.ParameterName = "$state"; cmd.Parameters.Add(pState);
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
+        var pVer2 = cmd.CreateParameter(); pVer2.ParameterName = "$pver"; cmd.Parameters.Add(pVer2);
         var pId = cmd.CreateParameter(); pId.ParameterName = "$id"; cmd.Parameters.Add(pId);
 
         foreach (var f in batch)
@@ -467,6 +543,7 @@ public sealed class FileRepository
             pAfp.Value = (object?)f.AudioFp ?? DBNull.Value;
             pState.Value = Mappers.StateToDb(f.ScanState);
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
+            pVer2.Value = f.PartialVer;
             pId.Value = f.Id;
             cmd.ExecuteNonQuery();
         }
@@ -560,7 +637,8 @@ public sealed class FileRepository
         PixelHash = r.Blob(12),
         AudioFp = r.Blob(13),
         ScanState = Mappers.ParseState(r.Str(14)),
-        LastIndexed = Db.ParseDateOrNull(r.Str(15))
+        LastIndexed = Db.ParseDateOrNull(r.Str(15)),
+        PartialVer = (int)r.Long(16)
     };
 }
 

@@ -25,6 +25,9 @@ public sealed class FileRecord
     public FileCategory Category { get; set; } = FileCategory.Other;
 
     public byte[]? PartialHash { get; set; }
+
+    /// <summary>Версия алгоритма частичного хэша (см. HashService.CurrentPartialVersion).</summary>
+    public int PartialVer { get; set; } = 1;
     public byte[]? FullHash { get; set; }
 
     /// <summary>Перцептивный хэш изображения (64-битный dHash/pHash в little-endian).</summary>

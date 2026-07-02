@@ -48,9 +48,21 @@ public sealed class DriveWatcher : IDriveWatcher, IDisposable
     {
         try
         {
+            // Сетевые диски участвуют в сигнатуре ДЕШЁВО: только буква + тип (без IsReady/TotalSize —
+            // это синхронные SMB-запросы, полумёртвая шара повесила бы опрос). Иначе подключение/обрыв
+            // сетевого диска не рождало DrivesChanged и экраны показывали устаревший статус.
             var parts = DriveInfo.GetDrives()
-                .Where(d => { try { return d.IsReady && d.DriveType is DriveType.Fixed or DriveType.Removable; } catch { return false; } })
-                .Select(d => { try { return d.Name + "|" + d.TotalSize; } catch { return d.Name; } })
+                .Where(d => { try { return d.DriveType is DriveType.Fixed or DriveType.Removable or DriveType.Network; } catch { return false; } })
+                .Select(d =>
+                {
+                    try
+                    {
+                        if (d.DriveType == DriveType.Network) return d.Name + "|net";
+                        return d.IsReady ? d.Name + "|" + d.TotalSize : null;
+                    }
+                    catch { return d.Name; }
+                })
+                .Where(s => s is not null)
                 .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
             return string.Join(";", parts);
         }

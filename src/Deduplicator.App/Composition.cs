@@ -39,12 +39,20 @@ public static class Composition
         Core.Util.SafeIo.CleanupTempFiles(paths.QuarantineDir);
         Core.Util.SafeIo.CleanupTempFiles(paths.ThumbnailDir);
 
+        // B1: незавершённые групповые переименования (kill/потеря питания посреди операции) —
+        // возвращаем файлам исходные имена по write-ahead журналу.
+        try { RenameJournal.RecoverAll(System.IO.Path.Combine(paths.RootDir, "recovery")); }
+        catch (Exception ex) { Core.Util.AppLog.Error("RenameJournal.RecoverAll", ex); }
+
         // P0.2: после краша/убийства приложения помечаем незавершённые сессии как Failed и убираем их
         // частичные группы — чтобы они не пережили рестарт и не показывались как готовый результат.
         try
         {
             new Core.Data.ScanSessionRepository(database).MarkUnfinishedAsFailed();
             new Core.Data.GroupRepository(database).ClearGroupsNotInCompletedSessions();
+            // Области сканов живут только во время активного скана — остатки после краша вычищаем,
+            // иначе scan_scope_files растёт неограниченно (аудит 2026-07-02).
+            new Core.Data.FileRepository(database).ClearAllScopes();
         }
         catch (Exception ex) { Core.Util.AppLog.Error("StartupSessionCleanup", ex); }
 
@@ -77,7 +85,8 @@ public static class Composition
         services.AddSingleton<FastDedup.Engine.FastFileLister>();
         services.AddSingleton<IScanService, ScanService>();
         services.AddSingleton<IConsolidationService, ConsolidationService>();
-        services.AddSingleton<IBatchRenameService, BatchRenameService>(); // P0-B
+        services.AddSingleton<IBatchRenameService>(sp => new BatchRenameService(
+            System.IO.Path.Combine(sp.GetRequiredService<AppPaths>().RootDir, "recovery"))); // P0-B + журнал B1
         services.AddSingleton<IResultDistributionService, ResultDistributionService>(); // P0-D
         services.AddSingleton<IStatisticsService, StatisticsService>();
         services.AddSingleton<IDiskHealthService, DiskHealthService>();

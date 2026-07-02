@@ -57,26 +57,43 @@ public sealed class FileOpsService : IFileOpsService
         if (!File.Exists(LongPath.Fix(fullPath)))
             return false;
 
+        // Корзина недоступна для этого файла (путь длиннее MAX_PATH — SHFileOperation его не примет;
+        // съёмный/сетевой том — Корзины там нет, и «в Корзину» означало бы БЕЗВОЗВРАТНОЕ удаление
+        // с системным диалогом на каждый файл). Фолбэк на карантин: восстановимость (FR-27) важнее
+        // буквального следования настройке; журнал честно фиксирует фактическое назначение (B7).
+        if (useRecycleBin && !RecycleBin.CanRecycle(fullPath))
+        {
+            AppLog.Write($"Корзина недоступна для «{fullPath}» (длинный путь или носитель без Корзины) — файл будет перемещён в карантин.");
+            useRecycleBin = false;
+        }
+
         long logId;
 
+        // Запись в журнал — операция с БД: при переполненном диске/занятой БД она бросает
+        // SqliteException, который раньше улетал из Delete необработанным и ронял пакетное
+        // удаление целиком (аудит 2026-07-02). Не записали намерение — файл не трогаем.
         if (useRecycleBin)
         {
             // Упреждающая запись в журнал: пишем намерение ДО перемещения. Если питание
             // пропадёт сразу после перемещения, запись о файле уже сохранена (WAL). Если
             // перемещение не удалось — запись убираем (откат). Восстановление при сбое до
             // перемещения безопасно: Restore проверяет наличие файла в назначении.
-            logId = _log.Insert(new OperationLogEntry
+            try
             {
-                OpType = OperationType.DeleteToRecycle,
-                FileId = file.Id,
-                GroupId = groupId,
-                SrcPath = fullPath,
-                DstPath = "Корзина Windows",
-                PerformedAt = DateTimeOffset.Now,
-                Reversible = false, // восстановление — средствами Корзины Windows
-                SizeBytes = file.Size,
-                FileName = file.Name
-            });
+                logId = _log.Insert(new OperationLogEntry
+                {
+                    OpType = OperationType.DeleteToRecycle,
+                    FileId = file.Id,
+                    GroupId = groupId,
+                    SrcPath = fullPath,
+                    DstPath = "Корзина Windows",
+                    PerformedAt = DateTimeOffset.Now,
+                    Reversible = false, // восстановление — средствами Корзины Windows
+                    SizeBytes = file.Size,
+                    FileName = file.Name
+                });
+            }
+            catch (Exception ex) { AppLog.Error("Delete/journal", ex); return false; }
 
             if (!RecycleBin.MoveToRecycleBin(fullPath))
             {
@@ -91,18 +108,22 @@ public sealed class FileOpsService : IFileOpsService
             lock (_quarantineLock)
             {
                 var dst = BuildQuarantinePath(file);
-                logId = _log.Insert(new OperationLogEntry
+                try
                 {
-                    OpType = OperationType.MoveToQuarantine,
-                    FileId = file.Id,
-                    GroupId = groupId,
-                    SrcPath = fullPath,
-                    DstPath = dst,
-                    PerformedAt = DateTimeOffset.Now,
-                    Reversible = true,
-                    SizeBytes = file.Size,
-                    FileName = file.Name
-                });
+                    logId = _log.Insert(new OperationLogEntry
+                    {
+                        OpType = OperationType.MoveToQuarantine,
+                        FileId = file.Id,
+                        GroupId = groupId,
+                        SrcPath = fullPath,
+                        DstPath = dst,
+                        PerformedAt = DateTimeOffset.Now,
+                        Reversible = true,
+                        SizeBytes = file.Size,
+                        FileName = file.Name
+                    });
+                }
+                catch (Exception ex) { AppLog.Error("Delete/journal", ex); return false; }
                 try
                 {
                     SafeIo.MoveSafe(fullPath, dst);
@@ -166,12 +187,52 @@ public sealed class FileOpsService : IFileOpsService
 
     public bool RecyclePath(string fullPath)
     {
-        bool exists = File.Exists(LongPath.Fix(fullPath)) || Directory.Exists(LongPath.Fix(fullPath));
-        if (!exists) return false;
+        bool isFile = File.Exists(LongPath.Fix(fullPath));
+        bool isDir = !isFile && Directory.Exists(LongPath.Fix(fullPath));
+        if (!isFile && !isDir) return false;
 
         long? size = null;
-        try { if (File.Exists(LongPath.Fix(fullPath))) size = new FileInfo(LongPath.Fix(fullPath)).Length; }
+        try { if (isFile) size = new FileInfo(LongPath.Fix(fullPath)).Length; }
         catch { }
+
+        // Корзина недоступна (флешка/сеть/длинный путь): файлы уводим в карантин (восстановимо),
+        // папки из «Мусора» — только ПУСТЫЕ, их удаляем напрямую (терять нечего) (B7).
+        if (!RecycleBin.CanRecycle(fullPath))
+        {
+            if (isDir)
+            {
+                try { Directory.Delete(LongPath.Fix(fullPath), recursive: false); }
+                catch { return false; } // не пустая/занята — не рискуем
+                _log.Insert(new OperationLogEntry
+                {
+                    OpType = OperationType.DeleteToRecycle,
+                    SrcPath = fullPath,
+                    DstPath = "Удалена пустая папка (Корзина на носителе недоступна)",
+                    PerformedAt = DateTimeOffset.Now,
+                    Reversible = false,
+                    FileName = Path.GetFileName(fullPath.TrimEnd('\\', '/'))
+                });
+                return true;
+            }
+
+            lock (_quarantineLock)
+            {
+                var dst = BuildLooseQuarantinePath(fullPath);
+                long qLogId = _log.Insert(new OperationLogEntry
+                {
+                    OpType = OperationType.MoveToQuarantine,
+                    SrcPath = fullPath,
+                    DstPath = dst,
+                    PerformedAt = DateTimeOffset.Now,
+                    Reversible = true,
+                    SizeBytes = size,
+                    FileName = Path.GetFileName(fullPath)
+                });
+                try { SafeIo.MoveSafe(fullPath, dst); }
+                catch { TryDeleteLog(qLogId); return false; }
+            }
+            return true;
+        }
 
         if (!RecycleBin.MoveToRecycleBin(fullPath)) return false;
 
@@ -244,6 +305,22 @@ public sealed class FileOpsService : IFileOpsService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
+    /// <summary>Путь в карантине для «свободного» файла без записи в БД (очистка «Мусора»).</summary>
+    private string BuildLooseQuarantinePath(string fullPath)
+    {
+        var baseDir = Path.Combine(QuarantineDir, "cleanup");
+        var target = Path.Combine(baseDir, Path.GetFileName(fullPath));
+        int i = 1;
+        while (File.Exists(LongPath.Fix(target)))
+        {
+            var nameNoExt = Path.GetFileNameWithoutExtension(fullPath);
+            var ext = Path.GetExtension(fullPath);
+            target = Path.Combine(baseDir, $"{nameNoExt}__{i}{ext}");
+            i++;
+        }
+        return target;
+    }
+
     private string BuildQuarantinePath(FileRecord file)
     {
         // Карантин/<том>/<относительный путь> — уникальность через суффикс при коллизии.
@@ -266,6 +343,24 @@ public sealed class FileOpsService : IFileOpsService
 /// <summary>Перемещение в Корзину Windows через SHFileOperation (FOF_ALLOWUNDO).</summary>
 internal static class RecycleBin
 {
+    /// <summary>
+    /// Реально ли путь попадёт в Корзину. SHFileOperation ограничен MAX_PATH и не принимает
+    /// префикс \\?\; у съёмных (флешки) и сетевых томов Корзины нет вовсе — там FO_DELETE
+    /// означает безвозвратное удаление с системным подтверждением на каждый файл (B7).
+    /// </summary>
+    public static bool CanRecycle(string path)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return false;
+        if (path.Length > 259 || path.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(root)) return false;
+            return new DriveInfo(root).DriveType == DriveType.Fixed;
+        }
+        catch { return false; }
+    }
+
     public static bool MoveToRecycleBin(string path)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))

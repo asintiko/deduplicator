@@ -18,7 +18,7 @@ public sealed class VolumeItemViewModel : ObservableObject
     public bool IsConnected => Model.IsConnected;
     public string? MountPath => Model.MountPath;
     public string CapacityText => Format.Bytes(Model.TotalBytes);
-    public string IndexedText => $"{Model.IndexedFileCount:N0} {Strings.Files}";
+    public string IndexedText => Format.Count(Model.IndexedFileCount, "файл", "файла", "файлов");
 
     public string LastScanText => Model.LastScanned is { } d
         ? $"{Strings.LastScan}: {Format.DateShort(d)}"
@@ -26,7 +26,7 @@ public sealed class VolumeItemViewModel : ObservableObject
 
     /// <summary>Сводка по индексации: количество файлов показываем только после сканирования.</summary>
     public string SummaryLine => Model.IndexedFileCount > 0
-        ? $"{Model.IndexedFileCount:N0} {Strings.Files} в индексе   ·   {LastScanText}"
+        ? $"{Format.Count(Model.IndexedFileCount, "файл", "файла", "файлов")} в индексе   ·   {LastScanText}"
         : LastScanText;
 
     public string StatusText => IsConnected ? Strings.Connected : Strings.Disconnected;

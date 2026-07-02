@@ -19,6 +19,7 @@ public partial class VolumesViewModel : PageViewModel
     private readonly IVolumeService _volumes;
     private readonly VolumeRepository _volumeRepo;
     private readonly FileRepository _files;
+    private readonly GroupRepository _groups;
     private readonly IDriveWatcher _watcher;
     private readonly NavigationService _nav;
     private bool _loading;
@@ -36,11 +37,12 @@ public partial class VolumesViewModel : PageViewModel
     private VolumeItemViewModel? _pendingRemove;
 
     public VolumesViewModel(IVolumeService volumes, VolumeRepository volumeRepo, FileRepository files,
-        IDriveWatcher watcher, NavigationService nav)
+        GroupRepository groups, IDriveWatcher watcher, NavigationService nav)
     {
         _volumes = volumes;
         _volumeRepo = volumeRepo;
         _files = files;
+        _groups = groups;
         _watcher = watcher;
         _nav = nav;
         // Живое обновление каталога при подключении/извлечении носителя.
@@ -102,7 +104,14 @@ public partial class VolumesViewModel : PageViewModel
         var item = _pendingRemove;
         _pendingRemove = null;
         if (item is null) return;
-        await Task.Run(() => _volumeRepo.Delete(item.Id));
+        await Task.Run(() =>
+        {
+            _volumeRepo.Delete(item.Id);
+            // FK-каскад снёс files/duplicate_members этого тома, но пустые/одиночные группы и
+            // осиротевшие эталоны остались бы в результатах и статистике (аудит 2026-07-02).
+            try { _groups.DissolveDegenerateGroups(); }
+            catch (Exception ex) { Core.Util.AppLog.Error("DissolveDegenerateGroups", ex); }
+        });
         await RefreshAsync();
     }
 

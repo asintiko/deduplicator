@@ -35,6 +35,7 @@ internal static class Schema
         audio_fp     BLOB,
         scan_state   TEXT,
         last_indexed TEXT,
+        partial_ver  INTEGER NOT NULL DEFAULT 1,
         UNIQUE(volume_id, rel_path)
     );
     CREATE INDEX IF NOT EXISTS idx_files_size     ON files(size);
@@ -135,6 +136,9 @@ internal static class Schema
     public static readonly (string Table, string Column, string Ddl)[] ColumnMigrations =
     {
         ("files", "created", "ALTER TABLE files ADD COLUMN created TEXT"),
-        ("duplicate_groups", "scan_session_id", "ALTER TABLE duplicate_groups ADD COLUMN scan_session_id INTEGER")
+        ("duplicate_groups", "scan_session_id", "ALTER TABLE duplicate_groups ADD COLUMN scan_session_id INTEGER"),
+        // Версия алгоритма частичного хэша (этап 1.6): v2 добавляет средний блок для файлов >128 МБ.
+        // Старые строки остаются v1 и пересчитываются ТОЛЬКО для крупных (у мелких алгоритм не менялся).
+        ("files", "partial_ver", "ALTER TABLE files ADD COLUMN partial_ver INTEGER NOT NULL DEFAULT 1")
     };
 }

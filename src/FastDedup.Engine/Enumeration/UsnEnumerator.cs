@@ -70,6 +70,11 @@ public sealed class UsnEnumerator : IFileEnumerator
     {
         string rootPrefix = NormalizeRoot(root);
         var dirCache = new Dictionary<ulong, string?>();
+        // Кэш «каталог (или его предок) скрытый/системный». MFT отдаёт плоский список файлов,
+        // и без проверки цепочки родителей режим SkipHiddenSystem под админом индексировал
+        // AppData/ProgramData — в отличие от Win32Find-режима, который в такие папки не заходит.
+        // Результаты не должны зависеть от бэкенда (аудит 2026-07-02).
+        var hiddenChain = options.SkipHiddenSystem ? new Dictionary<ulong, bool>() : null;
 
         foreach (var kv in map)
         {
@@ -78,7 +83,18 @@ public sealed class UsnEnumerator : IFileEnumerator
 
             if ((rec.Attrs & Native.FILE_ATTRIBUTE_DIRECTORY) != 0) continue; // каталоги пропускаем
             if (!options.IncludeReparsePoints && (rec.Attrs & Native.FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            {
+                string? rdir = BuildDir(rec.Parent, map, dirCache, drive);
+                if (rdir != null)
+                {
+                    var rfull = rdir.EndsWith('\\') ? rdir + rec.Name : rdir + "\\" + rec.Name;
+                    if (rfull.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+                        options.OnReparseSkipped?.Invoke(rfull, false);
+                }
                 continue;
+            }
+
+            if (hiddenChain != null && IsUnderHiddenOrSystemDir(rec.Parent, map, hiddenChain)) continue;
 
             string? dir = BuildDir(rec.Parent, map, dirCache, drive);
             if (dir == null) continue; // путь не восстановился (битая/служебная запись)
@@ -89,6 +105,32 @@ public sealed class UsnEnumerator : IFileEnumerator
                 !ScanFilters.IsExcludedByPath(full, options))
                 yield return full;
         }
+    }
+
+    /// <summary>
+    /// Лежит ли каталог (по FRN) под скрытым/системным каталогом — по цепочке родителей в карте MFT,
+    /// с мемоизацией. Корень тома (self-parent) скрытым не считается, какие бы атрибуты у него ни были.
+    /// </summary>
+    private static bool IsUnderHiddenOrSystemDir(ulong frn, Dictionary<ulong, Rec> map, Dictionary<ulong, bool> cache)
+    {
+        var chain = new List<ulong>(8);
+        bool result = false;
+        ulong cur = frn;
+        while (true)
+        {
+            if (cache.TryGetValue(cur, out var cached)) { result = cached; break; }
+            if (!map.TryGetValue(cur, out var rec)) { result = false; break; } // выше карты — верх тома
+            if (rec.Parent == cur) { result = false; break; }                  // корень тома — не скрытый
+            chain.Add(cur);
+            if ((rec.Attrs & (Native.FILE_ATTRIBUTE_HIDDEN | Native.FILE_ATTRIBUTE_SYSTEM)) != 0)
+            {
+                result = true;
+                break;
+            }
+            cur = rec.Parent;
+        }
+        foreach (var f in chain) cache[f] = result;
+        return result;
     }
 
     /// <summary>Читаем все записи MFT тома в словарь FRN -> (родитель, атрибуты, имя).</summary>

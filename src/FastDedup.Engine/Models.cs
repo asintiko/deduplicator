@@ -64,6 +64,14 @@ public sealed class ScanOptions
     /// <summary>Идти ли внутрь reparse-точек (симлинки/джанкшены). По умолчанию нет — защита от циклов.</summary>
     public bool IncludeReparsePoints { get; init; } = false;
 
+    /// <summary>
+    /// Колбэк «пропущен reparse/облачный элемент» (путь, каталог ли). Плейсхолдеры OneDrive —
+    /// reparse-точки даже в скачанном состоянии, и раньше целая библиотека молча выпадала из
+    /// скана без какого-либо следа: пользователь получал честное «дубликатов нет» по
+    /// непроверенным файлам (аудит 2026-07-02). Счётчик выводится в UI как предупреждение.
+    /// </summary>
+    public Action<string, bool>? OnReparseSkipped { get; init; }
+
     /// <summary>Пропускать скрытые/system-файлы и каталоги. По умолчанию false: режим «без потерь» видит всё доступное.</summary>
     public bool SkipHiddenSystem { get; init; } = false;
 

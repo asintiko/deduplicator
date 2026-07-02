@@ -14,7 +14,7 @@ public sealed class CategoryStat
     public double Fraction { get; init; }
 
     public string Name => Strings.Category(Category);
-    public string CountText => $"{Count:N0} {Strings.Files}";
+    public string CountText => Format.Count(Count, "файл", "файла", "файлов");
     public string BytesText => Format.Bytes(Bytes);
     public double BarWidth => System.Math.Max(2, Fraction * 280);
 

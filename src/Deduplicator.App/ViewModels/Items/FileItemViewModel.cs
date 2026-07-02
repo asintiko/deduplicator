@@ -42,7 +42,7 @@ public partial class FileItemViewModel : ObservableObject
 
     public FileItemViewModel(FileRecord model, double similarity, bool isRepresentative,
         string? fullPath, string? volumeLabel, IImageMatchService thumbs, bool isProtected = false,
-        bool groupAllowsDeletion = true)
+        bool groupAllowsDeletion = true, bool loadThumbnail = true)
     {
         Model = model;
         Similarity = similarity;
@@ -53,7 +53,10 @@ public partial class FileItemViewModel : ObservableObject
         GroupAllowsDeletion = groupAllowsDeletion;
         _thumbs = thumbs;
 
-        if (Model.Category == FileCategory.Image && FullPath is not null)
+        // loadThumbnail=false — VM строится только ради галочек/экспорта («Выбрать все», CSV):
+        // жадное декодирование превью для КАЖДОГО изображения давало гигабайты Bitmap-ов
+        // и OOM на слабых ПК (B5, аудит 2026-07-02).
+        if (loadThumbnail && Model.Category == FileCategory.Image && FullPath is not null)
             _ = LoadThumbnailAsync();
     }
 
@@ -84,14 +87,37 @@ public partial class FileItemViewModel : ObservableObject
     }
 
     // Ограничиваем число одновременных генераций миниатюр, чтобы не топить пул потоков
-    // и не вызывать лаги при открытии результатов с сотнями превью.
-    private static readonly SemaphoreSlim ThumbGate = new(3, 3);
+    // и не вызывать лаги при открытии результатов с сотнями превью. Половина ядер (2–8):
+    // фиксированные 3 недоиспользовали 8-ядерные машины и душили 2-ядерные (этап 1.11).
+    private static readonly SemaphoreSlim ThumbGate = CreateThumbGate();
+    private static SemaphoreSlim CreateThumbGate()
+    {
+        int slots = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
+        return new SemaphoreSlim(slots, slots);
+    }
+
+    private volatile bool _thumbnailDisposed;
+
+    /// <summary>
+    /// Освобождает нативную память миниатюры. Вызывается при очистке коллекций результатов:
+    /// Bitmap-ы держат Skia-память вне управляемой кучи, и без явного Dispose она копилась
+    /// до OOM при повторных загрузках результатов (B5).
+    /// </summary>
+    public void DisposeThumbnail()
+    {
+        _thumbnailDisposed = true;
+        var t = Thumbnail;
+        Thumbnail = null;
+        t?.Dispose();
+    }
 
     private async Task LoadThumbnailAsync()
     {
         await ThumbGate.WaitAsync();
         try
         {
+            if (_thumbnailDisposed) return; // коллекцию уже очистили — не декодируем впустую
+
             var key = Model.FullHash is not null
                 ? Convert.ToHexString(Model.FullHash)
                 : (Model.PHash is not null ? Convert.ToHexString(Model.PHash) : "id" + Model.Id);
@@ -100,6 +126,7 @@ public partial class FileItemViewModel : ObservableObject
             if (path is null || !File.Exists(path)) return;
 
             var bmp = await Task.Run(() => new Bitmap(path));
+            if (_thumbnailDisposed) { bmp.Dispose(); return; }
             Thumbnail = bmp;
         }
         catch { /* миниатюра необязательна */ }

@@ -7,11 +7,16 @@ namespace Deduplicator.Core.Hashing;
 
 public interface IHashService
 {
-    /// <summary>Частичный хэш: голова + хвост (~64 КБ с каждого края). Дешёвый фильтр.</summary>
+    /// <summary>Частичный хэш: голова + хвост (~64 КБ с каждого края); для файлов больше
+    /// <see cref="HashService.MiddleBlockThreshold"/> — плюс средний блок (v2, этап 1.6:
+    /// видео/ISO с одинаковой «шапкой» перестают уходить в полный хэш гигабайт).</summary>
     /// <remarks>Проверяет стабильность размера файла до и после чтения: если файл изменился
     /// между сбором метаданных и чтением, бросает <see cref="FileChangedDuringScanException"/>,
-    /// чтобы старый размер не смешивался с новым содержимым.</remarks>
-    byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default);
+    /// чтобы старый размер не смешивался с новым содержимым.
+    /// preferWholeRead=true (носитель со штрафом позиционирования): файлы до ~1 МБ читаются
+    /// ОДНИМ последовательным чтением вместо двух сиков «голова+хвост» — хэш байтово тот же
+    /// (этап 1.4: −1 сик на каждый файл-кандидат, а это типичный размер фото-миниатюр/доков).</remarks>
+    byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default, bool preferWholeRead = false);
 
     /// <summary>Полный хэш всего содержимого файла (читается целиком).</summary>
     byte[] ComputeFullHash(string fullPath, CancellationToken ct = default);
@@ -22,7 +27,10 @@ public interface IHashService
     byte[] ComputeFullHash(string fullPath, long expectedSize, CancellationToken ct = default);
 
     /// <summary>Финальная побайтовая сверка двух файлов (защита от коллизий хэша, FR-11).</summary>
-    bool FilesAreByteEqual(string pathA, string pathB, CancellationToken ct = default);
+    /// <param name="blockBytes">Размер блока чтения; 0 — по умолчанию (1 МБ). Когда оба файла на
+    /// одном носителе со штрафом позиционирования, крупный блок (16 МБ) сокращает чередование
+    /// головки A/B в ~16 раз (этап 1.3: пара 2 ГБ на HDD — десятки секунд позиционирования → секунды).</param>
+    bool FilesAreByteEqual(string pathA, string pathB, CancellationToken ct = default, int blockBytes = 0);
 }
 
 /// <summary>
@@ -53,11 +61,21 @@ public sealed class HashService : IHashService
     private const int EdgeBytes = 64 * 1024;   // 64 КБ с каждого края для частичного хэша
     private const int StreamBuffer = 1 << 20;  // 1 МБ буфер чтения
 
-    public byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default)
+    /// <summary>Файлы крупнее этого порога получают в частичный хэш третий (средний) блок (v2).</summary>
+    public const long MiddleBlockThreshold = 128L * 1024 * 1024;
+
+    /// <summary>Текущая версия алгоритма частичного хэша (пишется в files.partial_ver).</summary>
+    public const int CurrentPartialVersion = 2;
+
+    /// <summary>До ~1 МБ выгоднее прочитать файл целиком одним чтением, чем двумя сиками (HDD).</summary>
+    private const long SingleReadCap = 1L << 20;
+
+    public byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default, bool preferWholeRead = false)
     {
         // P1.3: голову/хвост читаем по СМЕЩЕНИЮ через RandomAccess (без перемотки позиции потока) —
-        // меньше seek-нагрузка на HDD/USB. Порядок добавления (голова + размер + хвост) сохранён,
-        // поэтому хэши совпадают со старой реализацией и дедуп не меняется.
+        // меньше seek-нагрузка на HDD/USB. Порядок добавления (голова + размер + [средний] + хвост)
+        // фиксирован; для файлов ≤ MiddleBlockThreshold хэш байтово совпадает с прежней версией.
+        ThrowIfCloudPlaceholder(fullPath);
         using var handle = OpenHandle(fullPath);
         long actual = RandomAccess.GetLength(handle);
         if (actual != size) throw new FileChangedDuringScanException(fullPath, size, actual);
@@ -71,6 +89,32 @@ public sealed class HashService : IHashService
             return hasher.GetCurrentHash();
         }
 
+        Span<byte> sizeBytes = stackalloc byte[8];
+        BitConverter.TryWriteBytes(sizeBytes, size);
+
+        if (preferWholeRead && size <= SingleReadCap)
+        {
+            // 1.4: носитель со штрафом позиционирования — файл до 1 МБ читаем ОДНИМ последовательным
+            // чтением и берём голову/хвост из буфера. Байты в хэшере те же → хэш идентичен, миграция
+            // БД не нужна; экономится один сик на каждый файл-кандидат (типичный размер фото/доков).
+            var whole = ArrayPool<byte>.Shared.Rent((int)size);
+            try
+            {
+                int read = ReadAtOffset(handle, whole.AsSpan(0, (int)size), 0, ct);
+                int head = Math.Min(EdgeBytes, read);
+                hasher.Append(whole.AsSpan(0, head));
+                hasher.Append(sizeBytes);
+                int tailStart = (int)Math.Max(0, size - EdgeBytes);
+                hasher.Append(whole.AsSpan(tailStart, Math.Max(0, read - tailStart)));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(whole);
+            }
+            VerifyStableSize(handle, fullPath, size);
+            return hasher.GetCurrentHash();
+        }
+
         var buffer = ArrayPool<byte>.Shared.Rent(EdgeBytes);
         try
         {
@@ -78,9 +122,16 @@ public sealed class HashService : IHashService
             hasher.Append(buffer.AsSpan(0, headRead));
 
             // Включаем размер в хэш, чтобы файлы разной длины не сталкивались по краям.
-            Span<byte> sizeBytes = stackalloc byte[8];
-            BitConverter.TryWriteBytes(sizeBytes, size);
             hasher.Append(sizeBytes);
+
+            // 1.6 (v2): для крупных файлов — средний блок. Видео/образы с одинаковыми первыми и
+            // последними мегабайтами (шапка контейнера + финализация) различаются серединой —
+            // без неё они уходили в полный хэш гигабайт ради отсева.
+            if (size > MiddleBlockThreshold)
+            {
+                int midRead = ReadAtOffset(handle, buffer.AsSpan(0, EdgeBytes), size / 2, ct);
+                hasher.Append(buffer.AsSpan(0, midRead));
+            }
 
             // Хвост — читаем по абсолютному смещению size - EdgeBytes.
             int tailRead = ReadAtOffset(handle, buffer.AsSpan(0, EdgeBytes), size - EdgeBytes, ct);
@@ -97,6 +148,7 @@ public sealed class HashService : IHashService
 
     public byte[] ComputeFullHash(string fullPath, CancellationToken ct = default)
     {
+        ThrowIfCloudPlaceholder(fullPath);
         using var fs = OpenRead(fullPath);
         var hasher = new XxHash128();
         AppendStream(fs, hasher, ct);
@@ -105,6 +157,7 @@ public sealed class HashService : IHashService
 
     public byte[] ComputeFullHash(string fullPath, long expectedSize, CancellationToken ct = default)
     {
+        ThrowIfCloudPlaceholder(fullPath);
         using var fs = OpenRead(fullPath);
         VerifyStableSize(fs, fullPath, expectedSize);
         var hasher = new XxHash128();
@@ -127,6 +180,18 @@ public sealed class HashService : IHashService
         long actual = RandomAccess.GetLength(handle);
         if (actual != expectedSize)
             throw new FileChangedDuringScanException(path, expectedSize, actual);
+    }
+
+    /// <summary>
+    /// Облачные плейсхолдеры (OneDrive «Файлы по запросу») не читаем: открытие содержимого
+    /// заставит провайдера скачать файл из облака (B4, аудит 2026-07-02). Бросаем
+    /// <see cref="FileChangedDuringScanException"/>-совместимый отказ через IOException —
+    /// конвейер обрабатывает его как «файл пропущен в этом проходе».
+    /// </summary>
+    private static void ThrowIfCloudPlaceholder(string path)
+    {
+        if (CloudFiles.IsPlaceholderPath(path))
+            throw new IOException($"Облачный файл-плейсхолдер — содержимое не читаем, чтобы не скачивать из облака: {path}");
     }
 
     /// <summary>Дескриптор только для чтения (offset-доступ через RandomAccess), без перемотки позиции.</summary>
@@ -171,21 +236,27 @@ public sealed class HashService : IHashService
         }
     }
 
-    public bool FilesAreByteEqual(string pathA, string pathB, CancellationToken ct = default)
+    public bool FilesAreByteEqual(string pathA, string pathB, CancellationToken ct = default, int blockBytes = 0)
     {
+        // Облачный плейсхолдер сверить нельзя, не скачав его содержимое — консервативно «не равны»
+        // (файл останется несгруппированным/несклеенным; данные не рискуют, трафика нет).
+        if (CloudFiles.IsPlaceholderPath(pathA) || CloudFiles.IsPlaceholderPath(pathB)) return false;
+
+        int block = blockBytes > 0 ? blockBytes : StreamBuffer;
+
         using var a = OpenRead(pathA);
         using var b = OpenRead(pathB);
         if (a.Length != b.Length) return false;
 
-        var bufA = ArrayPool<byte>.Shared.Rent(StreamBuffer);
-        var bufB = ArrayPool<byte>.Shared.Rent(StreamBuffer);
+        var bufA = ArrayPool<byte>.Shared.Rent(block);
+        var bufB = ArrayPool<byte>.Shared.Rent(block);
         try
         {
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                int nA = ReadBlock(a, bufA);
-                int nB = ReadBlock(b, bufB);
+                int nA = ReadBlock(a, bufA, block);
+                int nB = ReadBlock(b, bufB, block);
                 if (nA != nB) return false;
                 if (nA == 0) return true;
                 if (!bufA.AsSpan(0, nA).SequenceEqual(bufB.AsSpan(0, nB))) return false;
@@ -211,28 +282,45 @@ public sealed class HashService : IHashService
 
     private static void AppendStream(FileStream fs, XxHash128 hasher, CancellationToken ct)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(StreamBuffer);
+        // 1.8: двойная буферизация — пока CPU хэширует текущий блок, диск уже читает следующий
+        // (перекрытие I/O и вычислений даёт +10–25% на полном хэше; сам хэш не меняется).
+        var handle = fs.SafeFileHandle;
+        var bufA = ArrayPool<byte>.Shared.Rent(StreamBuffer);
+        var bufB = ArrayPool<byte>.Shared.Rent(StreamBuffer);
+        Task<int>? pending = null;
         try
         {
-            int n;
-            while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
+            long offset = 0;
+            var cur = bufA;
+            var next = bufB;
+            pending = RandomAccess.ReadAsync(handle, cur.AsMemory(0, StreamBuffer), offset, ct).AsTask();
+            while (true)
             {
-                ct.ThrowIfCancellationRequested();
-                hasher.Append(buffer.AsSpan(0, n));
+                int n = pending.GetAwaiter().GetResult();
+                pending = null;
+                if (n == 0) break;
+                offset += n;
+                pending = RandomAccess.ReadAsync(handle, next.AsMemory(0, StreamBuffer), offset, ct).AsTask();
+                hasher.Append(cur.AsSpan(0, n));
+                (cur, next) = (next, cur);
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            // Буферы нельзя вернуть в пул, пока последнее чтение в полёте (оно пишет в next):
+            // дожидаемся его даже на исключении/отмене.
+            if (pending is not null) { try { pending.Wait(CancellationToken.None); } catch { } }
+            ArrayPool<byte>.Shared.Return(bufA);
+            ArrayPool<byte>.Shared.Return(bufB);
         }
     }
 
-    private static int ReadBlock(FileStream fs, byte[] buffer)
+    private static int ReadBlock(FileStream fs, byte[] buffer, int block)
     {
         int read = 0;
-        while (read < buffer.Length)
+        while (read < block)
         {
-            int n = fs.Read(buffer, read, buffer.Length - read);
+            int n = fs.Read(buffer, read, block - read);
             if (n == 0) break;
             read += n;
         }

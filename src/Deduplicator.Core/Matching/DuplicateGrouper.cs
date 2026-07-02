@@ -12,14 +12,22 @@ public interface IDuplicateGrouper
     /// файлов — результат соответствует тому, что пользователь выбрал сейчас, и не подмешивает
     /// файлы из старого индекса/других дисков (раздел P0 аудита: scope-aware grouping).
     /// </param>
+    /// <param name="waitGate">
+    /// Гейт паузы: вызывается в горячих циклах (побайтовая сверка читает файлы целиком — часто
+    /// самый долгий этап). Раньше «Пауза» на этапе «Группировка» игнорировалась: UI показывал
+    /// паузу, а диск продолжал молотить на полной скорости (аудит 2026-07-02).
+    /// </param>
     int BuildExactGroups(IReadOnlyDictionary<long, VolumeRecord> volumes, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0);
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null);
 
     int BuildSimilarImageGroups(double threshold, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0);
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null);
 
     int BuildSimilarAudioGroups(double threshold, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0);
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null);
 
     /// <summary>Удалить группы прошлых сессий, оставив только текущую (P0.1 scope-aware результаты).</summary>
     void ClearGroupsNotInSession(long sessionId);
@@ -56,7 +64,8 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     // ---------------- Точные дубликаты ----------------
 
     public int BuildExactGroups(IReadOnlyDictionary<long, VolumeRecord> volumes, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0)
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null)
     {
         // Чистим ТОЛЬКО точные группы текущей сессии (а не глобально): иначе пересборка в идущем скане
         // стирала бы результаты прошлой ЗАВЕРШЁННОЙ сессии ещё до того, как текущий скан успешно завершится
@@ -67,16 +76,25 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         var pending = new List<DuplicateGroup>();
         int created = 0;
 
-        foreach (var hash in _files.GetSharedFullHashes())
+        // 1.5: файлы выбираем ПАЧКАМИ хэшей (200 за запрос), а не по одному хэшу (N+1):
+        // на больших библиотеках стадия Grouping была SQL-bound из-за десятков тысяч запросов.
+        var sharedHashes = _files.GetSharedFullHashes();
+        const int HashBatch = 200;
+        for (int bi = 0; bi < sharedHashes.Count; bi += HashBatch)
+        {
+        var hashBatch = sharedHashes.GetRange(bi, Math.Min(HashBatch, sharedHashes.Count - bi));
+        foreach (var hashGroup in _files.GetByFullHashes(hashBatch)
+                     .GroupBy(f => System.IO.Hashing.XxHash128.HashToUInt128(f.FullHash!)))
         {
             ct.ThrowIfCancellationRequested();
+            waitGate?.Invoke();
             // Scope-aware: группу строим ТОЛЬКО из файлов текущей области. Файлы с тем же хэшем из
             // старого индекса/других дисков сюда не попадают, поэтому результат соответствует именно
             // тому, что пользователь выбрал сейчас (нельзя удалить то, что не сканировали).
-            var files = _files.GetByFullHash(hash).Where(inScope).ToList();
+            var files = hashGroup.Where(inScope).ToList();
             if (files.Count < 2) continue;
 
-            foreach (var vc in ByteVerifyClusters(files, volumes, ct))
+            foreach (var vc in ByteVerifyClusters(files, volumes, ct, waitGate))
             {
                 if (vc.Members.Count < 2) continue;
 
@@ -91,12 +109,17 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
                 // Освобождаемое место: размер не-эталонного файла считаем ТОЛЬКО если у его inode нет
                 // других ссылок (LinkCount<=1). Если файл — один из нескольких hardlink-ов (в т.ч.
                 // схлопнутых или внешних), удаление одного пути не освободит блоки — не завышаем оценку.
+                // Для подключённых файлов берём РАЗМЕР НА ДИСКЕ (GetCompressedFileSize): sparse и
+                // NTFS-сжатые файлы освобождают выделенные блоки, а не логический размер — иначе
+                // «можно освободить 10 ГБ» при реальных 100 МБ (аудит 2026-07-02).
                 long reclaimable = 0;
                 foreach (var f in physical)
                 {
                     if (f.Id == rep.Id) continue;
                     bool freeable = !linkCounts.TryGetValue(f.Id, out var lc) || lc <= 1;
-                    if (freeable) reclaimable += f.Size;
+                    if (!freeable) continue;
+                    var fPath = Resolve(f, volumes);
+                    reclaimable += fPath is not null ? SizeOnDisk(fPath, f.Size) : f.Size;
                 }
 
                 var group = new DuplicateGroup
@@ -122,12 +145,30 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
                 onGroups?.Invoke(created);
             }
         }
+        }
         if (pending.Count > 0) _groups.InsertGroups(pending, sessionId);
         onGroups?.Invoke(created);
         return created;
     }
 
     private const double HashOnlyExactConfidence = 0.99;
+
+    /// <summary>Фактически занимаемое на диске место (sparse/сжатые меньше логического размера).</summary>
+    private static long SizeOnDisk(string path, long logicalSize)
+    {
+        if (!OperatingSystem.IsWindows()) return logicalSize;
+        try
+        {
+            uint low = GetCompressedFileSizeW(LongPath.Fix(path), out uint high);
+            if (low == uint.MaxValue && System.Runtime.InteropServices.Marshal.GetLastWin32Error() != 0)
+                return logicalSize;
+            return ((long)high << 32) | low;
+        }
+        catch { return logicalSize; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern uint GetCompressedFileSizeW(string lpFileName, out uint lpFileSizeHigh);
 
     /// <summary>Кластер-кандидат точных дубликатов и признак того, что он сверен байт-в-байт.</summary>
     private sealed record VerifiedCluster(List<FileRecord> Members, bool ByteVerified);
@@ -146,7 +187,8 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     /// confidence &lt; 1.0 и не подлежит автоудалению).
     /// </summary>
     private List<VerifiedCluster> ByteVerifyClusters(
-        List<FileRecord> files, IReadOnlyDictionary<long, VolumeRecord> volumes, CancellationToken ct)
+        List<FileRecord> files, IReadOnlyDictionary<long, VolumeRecord> volumes, CancellationToken ct,
+        Action? waitGate = null)
     {
         var readable = new List<(FileRecord Rec, string Path)>();
         var unverifiable = new List<FileRecord>(); // отключён ИЛИ подключён, но не читается
@@ -162,16 +204,27 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
         // Подключённые читаемые: кластеризуем строгой попарной сверкой. Нечитаемый файл сюда не
         // попадает, поэтому не может быть «головой» и испортить решение для остальных.
+        // 1.3: если ОБА файла на носителях со штрафом позиционирования — сверяем крупными блоками
+        // (16 МБ вместо 1 МБ): чередование головки A/B сокращается в ~16 раз, пара 2 ГБ на одном
+        // HDD — десятки секунд позиционирования → секунды.
+        const int LargeVerifyBlock = 16 << 20;
+        static bool Seq(IReadOnlyDictionary<long, VolumeRecord> vols, long volumeId) =>
+            vols.TryGetValue(volumeId, out var v) && v.PreferSequentialReads;
+
         var clusters = new List<List<FileRecord>>();
         var headPaths = new List<string>();
+        var headSeq = new List<bool>();
         foreach (var (rec, path) in readable)
         {
             ct.ThrowIfCancellationRequested();
+            waitGate?.Invoke(); // сверка читает файлы целиком — пауза обязана работать именно здесь
+            bool recSeq = Seq(volumes, rec.VolumeId);
             bool placed = false;
             for (int i = 0; i < clusters.Count; i++)
             {
                 bool equal;
-                try { equal = _hash.FilesAreByteEqual(headPaths[i], path, ct); }
+                int block = recSeq && headSeq[i] ? LargeVerifyBlock : 0;
+                try { equal = _hash.FilesAreByteEqual(headPaths[i], path, ct, block); }
                 catch (OperationCanceledException) { throw; }
                 catch
                 {
@@ -209,6 +262,10 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     /// <summary>Можно ли реально прочитать файл (а не только что он «существует»). Дешёвая проба 1 байта.</summary>
     private static bool IsReadable(string path)
     {
+        // Облачный плейсхолдер «читается», но проба/сверка заставит OneDrive скачать содержимое
+        // из облака (B4, аудит 2026-07-02) — считаем его непроверяемым: файл уйдёт в hash-only
+        // члены (Confidence < 1.0, автоудаление запрещено), трафика не будет.
+        if (CloudFiles.IsPlaceholderPath(path)) return false;
         try
         {
             using var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read,
@@ -252,7 +309,8 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     // ---------------- Похожие изображения ----------------
 
     public int BuildSimilarImageGroups(double threshold, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0)
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null)
     {
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.SimilarImage);
         _lsh.ClearKind(MatchType.SimilarImage);
@@ -295,11 +353,14 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         {
             // Полный перебор — гарантированная полнота для типовых библиотек.
             for (int i = 0; i < allDistinct.Count; i++)
-            for (int j = i + 1; j < allDistinct.Count; j++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (PerceptualLsh.Similarity(hashOf[allDistinct[i]], hashOf[allDistinct[j]]) >= threshold)
-                    dsu.Union(allDistinct[i], allDistinct[j]);
+                waitGate?.Invoke();
+                for (int j = i + 1; j < allDistinct.Count; j++)
+                {
+                    if (PerceptualLsh.Similarity(hashOf[allDistinct[i]], hashOf[allDistinct[j]]) >= threshold)
+                        dsu.Union(allDistinct[i], allDistinct[j]);
+                }
             }
         }
         else
@@ -309,6 +370,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             foreach (var (_, list) in buckets)
             {
                 ct.ThrowIfCancellationRequested();
+                waitGate?.Invoke();
                 var distinct = DistinctByHash(list, hashOf);
                 if (distinct.Count < 2) continue;
                 UnionSimilarInBucket(distinct, BucketPairCap,
@@ -332,7 +394,8 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
     // ---------------- Похожая музыка ----------------
 
     public int BuildSimilarAudioGroups(double threshold, Func<FileRecord, bool> inScope,
-        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0)
+        RepresentativeRule rule, Action<long>? onGroups, CancellationToken ct, long sessionId = 0,
+        Action? waitGate = null)
     {
         _groups.ClearByMatchTypeInSession(sessionId, MatchType.SimilarAudio);
         _lsh.ClearKind(MatchType.SimilarAudio);
@@ -376,11 +439,14 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         if (allIds.Count <= FullPairwiseCap)
         {
             for (int i = 0; i < allIds.Count; i++)
-            for (int j = i + 1; j < allIds.Count; j++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (EstimatedJaccard(sigOf[allIds[i]], sigOf[allIds[j]]) >= threshold)
-                    dsu.Union(allIds[i], allIds[j]);
+                waitGate?.Invoke();
+                for (int j = i + 1; j < allIds.Count; j++)
+                {
+                    if (EstimatedJaccard(sigOf[allIds[i]], sigOf[allIds[j]]) >= threshold)
+                        dsu.Union(allIds[i], allIds[j]);
+                }
             }
         }
         else
@@ -388,6 +454,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             foreach (var (_, list) in buckets)
             {
                 ct.ThrowIfCancellationRequested();
+                waitGate?.Invoke();
                 if (list.Count < 2) continue;
                 UnionSimilarInBucket(list, BucketPairCap,
                     (a, b) => EstimatedJaccard(sigOf[a], sigOf[b]) >= threshold,
@@ -470,14 +537,24 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
     private static void UnionByExactBlob(List<FileRecord> files, Func<FileRecord, byte[]?> selector, Dsu dsu)
     {
-        var seen = new Dictionary<string, long>();
+        // Ключ — XxHash128 от блоба (16 байт), а не hex-строка всего блоба: аудио-отпечатки
+        // весят ~3,8 КБ, hex-строка — ~15 КБ UTF-16 на трек, и почти все они (отпечатки уникальны)
+        // жили в словаре до конца метода — ~4x суммарного объёма отпечатков лишней памяти (B8).
+        // Коллизия XxHash128 отсекается прямой сверкой блобов внутри корзины.
+        var seen = new Dictionary<UInt128, List<(byte[] Blob, long FirstId)>>();
         foreach (var f in files)
         {
             var blob = selector(f);
             if (blob is null) continue;
-            var key = Convert.ToHexString(blob);
-            if (seen.TryGetValue(key, out var first)) dsu.Union(first, f.Id);
-            else seen[key] = f.Id;
+            var h = System.IO.Hashing.XxHash128.HashToUInt128(blob);
+            if (!seen.TryGetValue(h, out var bucket))
+            {
+                seen[h] = new List<(byte[], long)>(1) { (blob, f.Id) };
+                continue;
+            }
+            var hit = bucket.FirstOrDefault(b => b.Blob.AsSpan().SequenceEqual(blob));
+            if (hit.Blob is not null) dsu.Union(hit.FirstId, f.Id);
+            else bucket.Add((blob, f.Id));
         }
     }
 

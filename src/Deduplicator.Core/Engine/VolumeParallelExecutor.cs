@@ -2,9 +2,11 @@ namespace Deduplicator.Core.Engine;
 
 /// <summary>
 /// Запускает работу над набором элементов с параллелизмом НА КАЖДЫЙ ТОМ: разные тома обрабатываются
-/// одновременно, но внутри тома — со своим DOP (HDD=1 последовательно, SSD высокий). Общий
-/// <see cref="SemaphoreSlim"/>-потолок не даёт суммарному числу одновременных чтений разрастаться при
-/// множестве томов. Единая реализация для exact-воронки и перцептивных этапов.
+/// одновременно, но внутри тома — со своим DOP (HDD=1 последовательно, SSD высокий). Глобальный
+/// потолок применяется СТАТИЧЕСКИМИ квотами (<see cref="DistributeCap"/>), а не блокирующим
+/// семафором: gate.Wait внутри вложенного Parallel.ForEach парковал потоки и раздувал ThreadPool
+/// на слабых машинах при мультиномных сканах (этап 1.7 дорожной карты).
+/// Единая реализация для exact-воронки и перцептивных этапов.
 /// </summary>
 public static class VolumeParallelExecutor
 {
@@ -19,7 +21,8 @@ public static class VolumeParallelExecutor
         if (items.Count == 0) return;
 
         var byVolume = items.GroupBy(volumeKey).ToList();
-        using var gate = new SemaphoreSlim(GlobalCap(byVolume.Select(g => contentDopFor(g.Key)).ToList()));
+        var requested = byVolume.Select(g => (g.Key, Dop: contentDopFor(g.Key))).ToList();
+        var quotas = DistributeCap(requested, GlobalCap(requested.Select(r => r.Dop).ToList()));
 
         var outer = new ParallelOptions
         {
@@ -29,14 +32,9 @@ public static class VolumeParallelExecutor
 
         Parallel.ForEach(byVolume, outer, group =>
         {
-            int dop = Math.Max(1, contentDopFor(group.Key));
+            int dop = quotas.TryGetValue(group.Key, out var q) ? q : 1;
             var inner = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = dop };
-            Parallel.ForEach(group, inner, item =>
-            {
-                gate.Wait(ct);
-                try { body(item); }
-                finally { gate.Release(); }
-            });
+            Parallel.ForEach(group, inner, body);
         });
     }
 
@@ -51,5 +49,30 @@ public static class VolumeParallelExecutor
         int maxSingle = perVolumeDops.Max(d => Math.Max(1, d));
         int sum = perVolumeDops.Sum(d => Math.Max(1, d));
         return Math.Max(1, Math.Min(sum, Math.Max(maxSingle, Environment.ProcessorCount * 2)));
+    }
+
+    /// <summary>
+    /// Распределить глобальный потолок между томами статическими квотами (без блокировок):
+    /// каждая квота ≥ 1, суммарно вписываемся в cap, урезая самые «толстые» тома первыми.
+    /// Чистая функция — тестируема. Спроектирована так, чтобы губернатор ресурсов (этап 2.6)
+    /// мог динамически сжимать cap между пачками работы.
+    /// </summary>
+    public static Dictionary<long, int> DistributeCap(IReadOnlyList<(long Key, int Dop)> volumes, int cap)
+    {
+        var result = new Dictionary<long, int>(volumes.Count);
+        foreach (var (key, dop) in volumes) result[key] = Math.Max(1, dop);
+
+        int total = result.Values.Sum();
+        while (total > Math.Max(cap, volumes.Count)) // ниже 1 на том не ужимаем
+        {
+            long topKey = 0;
+            int topVal = 1;
+            foreach (var kv in result)
+                if (kv.Value > topVal) { topKey = kv.Key; topVal = kv.Value; }
+            if (topVal <= 1) break;
+            result[topKey] = topVal - 1;
+            total--;
+        }
+        return result;
     }
 }

@@ -134,11 +134,19 @@ public sealed class ScanService : IScanService, IDisposable
         // отправка смены этапа/завершения). Создаём на каждый запуск, освобождаем в finally.
         _coalescer = new ProgressCoalescer<ScanProgress>(snap => ProgressChanged?.Invoke(snap),
             TimeSpan.FromMilliseconds(200));
-        long sessionId = _sessions.Create(JsonSerializer.Serialize(options));
+        // Создание сессии — ВНУТРИ try: это запись в БД (диск переполнен/БД занята — реальный кейс
+        // у аудитории, чистящей забитые диски), и сбой здесь должен давать состояние «Ошибка
+        // сканирования», а не необработанное исключение с падением приложения и вечным IsRunning.
+        long sessionId = -1;
         bool succeeded = false;
+        // 1.1: телеметрия ресурсов на время скана (пики WS/heap/потоков → лог) — база «до/после»
+        // для перф-работ и диагностика поведения на слабых ПК.
+        using var telemetry = new ResourceTelemetry("скан");
 
         try
         {
+            sessionId = _sessions.Create(JsonSerializer.Serialize(options));
+
             // P0-A: «что искать» не должно быть пустым — иначе скан бессмыслен.
             if (options.IncludedCategories.Count == 0)
                 throw new InvalidOperationException("Не выбран ни один тип файлов для поиска.");
@@ -211,11 +219,13 @@ public sealed class ScanService : IScanService, IDisposable
             {
                 SetStage(ScanStage.Grouping, sessionId);
                 _grouper.BuildSimilarImageGroups(imgThreshold, imgInScope, _representativeRule,
-                    g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId);
+                    g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId,
+                    () => WaitGate(ct));
             }
             if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && wantAudio)
                 _grouper.BuildSimilarAudioGroups(audThreshold, audInScope, _representativeRule,
-                    g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId);
+                    g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId,
+                    () => WaitGate(ct));
 
             // Отметить тома как просканированные.
             foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
@@ -232,18 +242,35 @@ public sealed class ScanService : IScanService, IDisposable
         {
             // Отмена: убираем ЧАСТИЧНО построенные группы этой сессии, чтобы прерванный скан не
             // показывался как готовый результат, из которого можно удалять файлы (ревью P0.1).
-            CleanupSessionGroups(sessionId, partialOnly: true);
-            SetStage(ScanStage.Cancelled, sessionId);
-            _sessions.Finish(sessionId, ScanStage.Cancelled);
+            if (sessionId > 0)
+            {
+                CleanupSessionGroups(sessionId, partialOnly: true);
+                SetStage(ScanStage.Cancelled, sessionId);
+                try { _sessions.Finish(sessionId, ScanStage.Cancelled); }
+                catch (Exception fex) { AppLog.Error("Finish(Cancelled)", fex); }
+            }
         }
         catch (Exception ex)
         {
-            CleanupSessionGroups(sessionId, partialOnly: true);
+            if (sessionId > 0) CleanupSessionGroups(sessionId, partialOnly: true);
             Report(p => { p.Stage = ScanStage.Failed; p.Message = ex.Message; }, immediate: true);
-            _sessions.Finish(sessionId, ScanStage.Failed);
+            // Сама Finish — тоже запись в БД: если упало на Create (БД недоступна), не роняем повторно.
+            if (sessionId > 0)
+            {
+                try { _sessions.Finish(sessionId, ScanStage.Failed); }
+                catch (Exception fex) { AppLog.Error("Finish(Failed)", fex); }
+            }
         }
         finally
         {
+            // Область скана (scan_scope_files) нужна только ВО ВРЕМЯ скана (scoped-SQL перцептива и
+            // воронки); строки старых сессий никто не читает и раньше никто не удалял — таблица росла
+            // неограниченно, раздувая БД на регулярных сканах папок (аудит 2026-07-02).
+            if (sessionId > 0)
+            {
+                try { _files.ClearScope(sessionId); }
+                catch (Exception scex) { AppLog.Error("ClearScope(finally)", scex); }
+            }
             // Группы прошлых сессий убираем ТОЛЬКО на успехе: тогда в результатах остаются лишь группы
             // текущего завершённого скана. На отмене/сбое прошлый ЗАВЕРШЁННЫЙ результат СОХРАНЯЕМ —
             // частичные группы текущей сессии уже сняты в catch (ClearGroupsInSession). Это и есть
@@ -314,6 +341,8 @@ public sealed class ScanService : IScanService, IDisposable
                 ? _files.GetExistingMetaByVolume(volumeId)
                 : new Dictionary<string, ExistingFileMeta>(StringComparer.OrdinalIgnoreCase);
             bool wholeVolume = false;
+            int enumErrors = 0;   // ошибки перечисления этого тома (недоступные поддеревья, отказ корня)
+            long cloudSkipped = 0; // пропущено облачных/reparse-элементов (OneDrive-плейсхолдеры, симлинки)
 
             foreach (var target in volumeGroup)
             {
@@ -329,8 +358,16 @@ public sealed class ScanService : IScanService, IDisposable
                     OnBackend = d => NoteBackend(d, sessionId),      // режим бэкенда по диску + диагностика
                     // Ошибки перечисления — это уведомления/недоступные ПАПКИ (целые поддеревья) и откат
                     // MFT, а не пропуск одного файла. Не накручиваем FilesSkipped (это счётчик файлов) —
-                    // логируем. Реальный пропуск файлов считается на этапе хэширования.
-                    OnError = e => AppLog.Write($"Перечисление: {e.Path} — {e.Message}")
+                    // логируем и СЧИТАЕМ: при ошибках перечисления прунинг тома запрещён (B3).
+                    OnError = e =>
+                    {
+                        Interlocked.Increment(ref enumErrors);
+                        AppLog.Write($"Перечисление: {e.Path} — {e.Message}");
+                    },
+                    // Облачные плейсхолдеры (OneDrive) и симлинки не сканируем (не скачиваем из
+                    // облака), но и не молчим об этом: раньше целая фото-библиотека в OneDrive
+                    // невидимо выпадала из проверки (аудит 2026-07-02).
+                    OnReparseSkipped = (_, _) => Interlocked.Increment(ref cloudSkipped)
                 };
                 foreach (var ef in _fastLister.Enumerate(target.ScanRoot, listerOpts, ct))
                 {
@@ -420,13 +457,33 @@ public sealed class ScanService : IScanService, IDisposable
                 batch.Clear();
             }
 
+            if (Interlocked.Read(ref cloudSkipped) > 0)
+                NoteEnumerationNotice(
+                    $"Пропущено облачных/ссылочных файлов: {cloudSkipped:N0} — содержимое в облаке не проверяется и не скачивается");
+
+            // Носитель исчез во время перечисления (выдернули флешку/оборвалась сеть) — честно
+            // валим скан: частичные результаты не должны публиковаться как успех и затирать
+            // предыдущую полную сессию (catch в RunCore сохранит прежние группы). Прунинг ниже
+            // до этой точки не дойдёт — офлайн-каталог тома («память дисков») останется цел (B3).
+            if (!Directory.Exists(mountRoot))
+                throw new IOException($"Носитель {mountRoot} отключился во время сканирования — результаты неполные, прежние данные сохранены.");
+
             // Прунинг — только при полном сканировании тома И когда выбраны ВСЕ категории: удаляем записи,
             // которых больше нет. Для папок и для фильтра по типам не прунингуем — иначе снесли бы индекс
             // невыбранных категорий (P0-A) или файлов вне папки.
+            // И только при ЧИСТОМ перечислении: недоступные поддеревья дают частичный «seen»,
+            // по которому прунинг снёс бы из каталога живые записи (B3, аудит 2026-07-02).
             if (wholeVolume && _options.AllCategoriesIncluded)
             {
-                try { _files.PruneVolume(volumeId, seen); }
-                catch (Exception ex) { AppLog.Error("PruneVolume", ex); }
+                if (enumErrors == 0)
+                {
+                    try { _files.PruneVolume(volumeId, seen); }
+                    catch (Exception ex) { AppLog.Error("PruneVolume", ex); }
+                }
+                else
+                {
+                    AppLog.Write($"Том {volumeId}: перечисление с ошибками ({enumErrors}) — прунинг каталога пропущен, записи не удаляются.");
+                }
             }
 
             // P1.2: копим in-scope файлы тома; область запишем ОДНОЙ транзакцией после всех томов.
@@ -470,6 +527,14 @@ public sealed class ScanService : IScanService, IDisposable
                      $"Reason={d.Reason} IsAdmin={d.IsElevated}");
 
         var line = Fde.BackendMessages.BuildUserNotice(d);
+        if (!_enumNotices.Contains(line)) _enumNotices.Add(line);
+        Report(p => p.Message = string.Join("  ·  ", _enumNotices));
+    }
+
+    /// <summary>Добавить пользовательское уведомление этапа перечисления (показывается на карточке скана).</summary>
+    private void NoteEnumerationNotice(string line)
+    {
+        AppLog.Write(line);
         if (!_enumNotices.Contains(line)) _enumNotices.Add(line);
         Report(p => p.Message = string.Join("  ·  ", _enumNotices));
     }

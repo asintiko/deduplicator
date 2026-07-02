@@ -23,6 +23,12 @@ public sealed class BatchRenameService : IBatchRenameService
 {
     private const int MaxPathLen = 259; // классический MAX_PATH-1; длиннее → конфликт (не рискуем)
 
+    private readonly string? _journalDir;
+
+    /// <summary>journalDir — папка write-ahead журналов (восстановление имён после сбоя питания/kill
+    /// посреди операции); null — без журнала (чистые юнит-тесты).</summary>
+    public BatchRenameService(string? journalDir = null) => _journalDir = journalDir;
+
     public BatchRenamePlan BuildPlan(BatchRenameRequest req)
     {
         string baseName = Sanitize(req.BaseName);
@@ -85,24 +91,33 @@ public sealed class BatchRenameService : IBatchRenameService
         if (!plan.CanExecute)
             return new BatchRenameResult(0, skipped, 0, RolledBack: false,
                 Error: "План содержит конфликты или нечего переименовывать.",
-                RenamedPairs: Array.Empty<RenamePair>(), OrphanedTempPaths: Array.Empty<string>());
+                RenamedPairs: Array.Empty<RenamePair>(), Orphans: Array.Empty<OrphanedRename>());
 
         var todo = plan.Items.Where(i => !i.Skipped).ToList();
+
+        // Временные имена генерируем ЗАРАНЕЕ и фиксируем весь план write-ahead журналом на диске
+        // ДО первого переименования (NFR-2): kill/потеря питания посреди операции больше не
+        // оставляет файлы безымянными — RenameJournal.RecoverAll при старте вернёт исходные имена.
+        var temps = new List<string>(todo.Count);
+        foreach (var it in todo)
+        {
+            string dir = Path.GetDirectoryName(it.OldFullPath) ?? "";
+            temps.Add(Path.Combine(dir, ".dedup-ren-" + Guid.NewGuid().ToString("N") + ".tmp"));
+        }
+        var journal = RenameJournal.TryBegin(_journalDir,
+            todo.Select((it, i) => new RenameJournal.Entry(it.OldFullPath, temps[i], it.NewFullPath)).ToList());
+
         // moved[i] = (текущее расположение файла, куда вернуть при откате). Изначально текущее = исходное.
         var moved = new List<(string current, string original)>();
 
         try
         {
             // Фаза 1: исходные → временные имена (разрывает свопы/циклы и case-only).
-            var temps = new List<string>(todo.Count);
-            foreach (var it in todo)
+            for (int i = 0; i < todo.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                string dir = Path.GetDirectoryName(it.OldFullPath) ?? "";
-                string temp = Path.Combine(dir, ".dedup-ren-" + Guid.NewGuid().ToString("N") + ".tmp");
-                File.Move(LongPath.Fix(it.OldFullPath), LongPath.Fix(temp));
-                temps.Add(temp);
-                moved.Add((temp, it.OldFullPath));
+                File.Move(LongPath.Fix(todo[i].OldFullPath), LongPath.Fix(temps[i]));
+                moved.Add((temps[i], todo[i].OldFullPath));
             }
 
             // Фаза 2: временные → финальные.
@@ -116,24 +131,43 @@ public sealed class BatchRenameService : IBatchRenameService
                 done.Add(new RenamePair(it.FileId, it.OldFullPath, it.NewFullPath));
             }
 
+            RenameJournal.TryComplete(journal);
             return new BatchRenameResult(done.Count, skipped, 0, RolledBack: false, Error: null,
-                RenamedPairs: done, OrphanedTempPaths: Array.Empty<string>());
+                RenamedPairs: done, Orphans: Array.Empty<OrphanedRename>());
         }
         catch (Exception ex)
         {
-            // Откат: всё, что успели сдвинуть, возвращаем к исходным именам (best-effort, в обратном порядке).
+            // Откат двухпроходный. Прямой откат «в обратном порядке» ломался на цепочках имён
+            // (новое имя одного файла = старое имя другого): первый же возврат упирался в занятое
+            // имя, и полностью восстановимый файл становился «сиротой». Поэтому: (1) все файлы,
+            // уже вставшие на ФИНАЛЬНЫЕ места, уводим обратно на их временные GUID-имена — они
+            // гарантированно свободны; (2) затем все временные возвращаем на исходные — исходные
+            // слоты к этому моменту освобождены фазой 1.
             // СРАВНЕНИЕ Ordinal (с учётом регистра): иначе rename, меняющий только регистр (foo→FOO),
-            // считался бы «ничем не двигался» и НЕ откатывался. temp-имена — GUID, регистрового совпадения нет.
-            var orphans = new List<string>();
-            for (int i = moved.Count - 1; i >= 0; i--)
+            // считался бы «ничем не двигался» и НЕ откатывался. temp-имена — GUID, совпадений нет.
+            var orphans = new List<OrphanedRename>();
+            for (int i = 0; i < moved.Count; i++)
+            {
+                var (current, original) = moved[i];
+                if (string.Equals(current, temps[i], StringComparison.Ordinal) ||
+                    string.Equals(current, original, StringComparison.Ordinal)) continue;
+                try { File.Move(LongPath.Fix(current), LongPath.Fix(temps[i])); moved[i] = (temps[i], original); }
+                catch { /* второй проход попробует вернуть напрямую */ }
+            }
+            for (int i = 0; i < moved.Count; i++)
             {
                 var (current, original) = moved[i];
                 if (string.Equals(current, original, StringComparison.Ordinal)) continue; // двигать нечего
                 try { File.Move(LongPath.Fix(current), LongPath.Fix(original)); }
-                catch { orphans.Add(current); } // не смогли вернуть — отдадим путь пользователю (файл не потерян)
+                catch { orphans.Add(new OrphanedRename(current, original)); } // файл не потерян — путь и исходное имя известны
             }
+
+            // Полный откат → журнал не нужен. Остались сироты → журнал СОХРАНЯЕМ:
+            // следующий старт приложения попробует вернуть имена ещё раз.
+            if (orphans.Count == 0) RenameJournal.TryComplete(journal);
+
             return new BatchRenameResult(0, skipped, todo.Count, RolledBack: true, Error: ex.Message,
-                RenamedPairs: Array.Empty<RenamePair>(), OrphanedTempPaths: orphans);
+                RenamedPairs: Array.Empty<RenamePair>(), Orphans: orphans);
         }
     }
 

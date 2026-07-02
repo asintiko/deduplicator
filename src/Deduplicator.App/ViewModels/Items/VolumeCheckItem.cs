@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using Deduplicator.App.Infrastructure;
 using Deduplicator.App.Localization;
 using Deduplicator.Core.Models;
 
@@ -15,7 +16,7 @@ public partial class VolumeCheckItem : ObservableObject
     public string? MountPath => Model.MountPath;
     public bool IsConnected => Model.IsConnected;
     public string StatusText => Model.IsConnected ? Strings.Connected : Strings.Disconnected;
-    public string IndexedText => $"{Model.IndexedFileCount:N0} {Strings.Files}";
+    public string IndexedText => Format.Count(Model.IndexedFileCount, "файл", "файла", "файлов");
     public bool HasScanFolder => !string.IsNullOrWhiteSpace(ScanFolder);
     public string PickFolderText => HasScanFolder ? "Сменить папку" : "Выбрать папку";
     public string ScanScopeText => HasScanFolder

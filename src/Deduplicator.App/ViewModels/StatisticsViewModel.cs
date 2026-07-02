@@ -40,7 +40,7 @@ public partial class StatisticsViewModel : PageViewModel
         SimilarAudioText = $"{s.SimilarAudioGroups:N0}";
         TotalReclaimableText = Format.Bytes(s.TotalReclaimableBytes);
         DuplicateFilesText = $"{s.TotalDuplicateFiles:N0}";
-        IndexedText = $"{s.TotalIndexedFiles:N0} {Strings.Files} · {Format.Bytes(s.TotalIndexedBytes)}";
+        IndexedText = $"{Format.Count(s.TotalIndexedFiles, "файл", "файла", "файлов")} · {Format.Bytes(s.TotalIndexedBytes)}";
 
         long maxBytes = s.BytesByCategory.Values.DefaultIfEmpty(0).Max();
         Categories.Clear();

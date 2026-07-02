@@ -48,6 +48,9 @@ public sealed class ScanSessionRepository
     }
 
     /// <summary>ID последней УСПЕШНО завершённой сессии (для чтения только её результатов, P0.2).</summary>
+    /// <remarks>Сортировка по id, НЕ по finished_at: даты пишутся строкой с ЛОКАЛЬНЫМ смещением,
+    /// и лексикографическое сравнение после смены часового пояса выбирало старую сессию, чьи
+    /// группы уже удалены («Нет групп» после успешного скана). id монотонен всегда.</remarks>
     public long? GetLatestCompletedSessionId()
     {
         using var conn = _db.Open();
@@ -55,7 +58,7 @@ public sealed class ScanSessionRepository
         cmd.CommandText = """
             SELECT id FROM scan_sessions
             WHERE stage=$done
-            ORDER BY finished_at DESC, id DESC LIMIT 1
+            ORDER BY id DESC LIMIT 1
             """;
         cmd.Add("$done", (long)ScanStage.Completed);
         var r = cmd.ExecuteScalar();

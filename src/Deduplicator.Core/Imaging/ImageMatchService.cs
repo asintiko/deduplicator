@@ -3,6 +3,7 @@ using CoenM.ImageHash;
 using CoenM.ImageHash.HashAlgorithms;
 using Deduplicator.Core.Util;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
@@ -36,6 +37,7 @@ public sealed class ImageMatchService : IImageMatchService
 
     public byte[]? ComputePHash(string fullPath, CancellationToken ct = default)
     {
+        if (CloudFiles.IsPlaceholderPath(fullPath)) return null; // не скачиваем из облака (B4)
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -70,6 +72,7 @@ public sealed class ImageMatchService : IImageMatchService
 
     public byte[]? ComputePixelHash(string fullPath, CancellationToken ct = default)
     {
+        if (CloudFiles.IsPlaceholderPath(fullPath)) return null; // не скачиваем из облака (B4)
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -90,6 +93,7 @@ public sealed class ImageMatchService : IImageMatchService
         var safeKey = MakeSafe(cacheKey);
         var thumbPath = Path.Combine(_thumbDir, $"{safeKey}_{maxSize}.jpg");
         if (File.Exists(thumbPath)) return thumbPath;
+        if (CloudFiles.IsPlaceholderPath(fullPath)) return null; // не скачиваем из облака (B4)
 
         // Пишем во временный файл и атомарно переименовываем: сбой при кодировании не оставит
         // «обрезанный» .jpg, который при следующем вызове вернулся бы как валидный.
@@ -97,7 +101,7 @@ public sealed class ImageMatchService : IImageMatchService
         try
         {
             using (var fs = OpenRead(fullPath))
-            using (var img = Image.Load(fs))
+            using (var img = LoadForThumbnail(fs, maxSize))
             {
                 img.Mutate(x => x.Resize(new ResizeOptions
                 {
@@ -115,6 +119,35 @@ public sealed class ImageMatchService : IImageMatchService
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             return null;
         }
+    }
+
+    /// <summary>
+    /// Источник для миниатюры (этап 1.11). Сначала пробуем ВСТРОЕННУЮ EXIF-миниатюру: Identify
+    /// читает только метаданные, пиксели оригинала вообще не декодируются — открытие результатов
+    /// с сотнями фото ускоряется на порядок. Если её нет или она слишком мала — полный декод, но
+    /// сразу в маленький размер (TargetSize: scaled-IDCT для JPEG, без полноразмерного буфера).
+    /// </summary>
+    private static Image LoadForThumbnail(FileStream fs, int maxSize)
+    {
+        try
+        {
+            var info = Image.Identify(fs);
+            if (info.Metadata.ExifProfile is { } exif &&
+                exif.TryCreateThumbnail(out Image? exifThumb) && exifThumb is not null)
+            {
+                // Слишком мелкую EXIF-миниатюру (обычно 160×120) не растягиваем на большой размер.
+                if (Math.Max(exifThumb.Width, exifThumb.Height) >= maxSize)
+                    return exifThumb;
+                exifThumb.Dispose();
+            }
+        }
+        catch { /* нет/битый EXIF — обычный путь */ }
+
+        fs.Position = 0;
+        return Image.Load(new DecoderOptions
+        {
+            TargetSize = new Size(maxSize * 2, maxSize * 2)
+        }, fs);
     }
 
     private static FileStream OpenRead(string path) =>

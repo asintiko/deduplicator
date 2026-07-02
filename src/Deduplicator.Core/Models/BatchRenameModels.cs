@@ -52,9 +52,11 @@ public sealed record BatchRenamePlan(
     bool CanExecute);
 
 /// <summary>
-/// Итог выполнения. RolledBack=true — была ошибка и всё откатилось обратно. Если откат какого-то файла
-/// тоже не удался, его текущий (временный) путь попадает в <see cref="OrphanedTempPaths"/>, чтобы можно
-/// было восстановить вручную (файл не потерян — лежит под GUID-именем).
+/// Итог выполнения. RolledBack=true — была ошибка и всё откатилось обратно. Если откат какого-то
+/// файла тоже не удался, пара «текущий (временный) путь + исходный путь» попадает в
+/// <see cref="Orphans"/>: файл не потерян — лежит под GUID-именем, и пользователю известно,
+/// во что его переименовать. Незавершённый журнал операции остаётся на диске — следующий старт
+/// приложения попробует вернуть имена автоматически (<see cref="Services.RenameJournal"/>).
 /// </summary>
 public sealed record BatchRenameResult(
     int Renamed,
@@ -63,7 +65,21 @@ public sealed record BatchRenameResult(
     bool RolledBack,
     string? Error,
     IReadOnlyList<RenamePair> RenamedPairs,
-    IReadOnlyList<string> OrphanedTempPaths);
+    IReadOnlyList<OrphanedRename> Orphans);
+
+/// <summary>Файл, который не удалось вернуть при откате: текущее (временное) имя + исходный путь.</summary>
+public sealed record OrphanedRename(string CurrentPath, string OriginalPath);
 
 /// <summary>Пара «было → стало» (для журнала/отмены).</summary>
 public sealed record RenamePair(long FileId, string OldFullPath, string NewFullPath);
+
+/// <summary>Данные для пакетного обновления строки индекса после физического переименования.</summary>
+public sealed record RenameDbUpdate(
+    long FileId,
+    long VolumeId,
+    string NewRelPath,
+    string NewName,
+    string? NewExt,
+    DateTimeOffset NewMtime,
+    DateTimeOffset NewCreated,
+    long NewSize);
