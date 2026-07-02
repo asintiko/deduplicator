@@ -50,8 +50,11 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
             ct.ThrowIfCancellationRequested();
             var batch = sizes.GetRange(i, Math.Min(SizeBatch, sizes.Count - i));
 
-            foreach (var sizeGroup in _files.GetBySizesOrdered(batch, req.SessionId).GroupBy(f => f.Size))
-                ProcessSizeBucket(sizeGroup.ToList(), req, rep, ct, result, ref processed, total);
+            // 2.1: корзины пачки материализуются целиком (GroupBy буферизует выборку, reader закрыт
+            // до записи хэшей), а хэширование идёт одним вызовом на ФАЗУ всей пачки — см. ProcessSizeBatch.
+            var buckets = _files.GetBySizesOrdered(batch, req.SessionId)
+                .GroupBy(f => f.Size).Select(g => g.ToList()).ToList();
+            ProcessSizeBatch(buckets, req, rep, ct, result, ref processed, total);
 
             _files.PassiveCheckpoint(); // reader закрыт → SQLite может освободить WAL
         }
@@ -65,60 +68,85 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
         return result;
     }
 
-    private void ProcessSizeBucket(List<FileRecord> sameSize, ExactScanRequest req, IExactScanReporter rep,
+    /// <summary>
+    /// Обработка ПАЧКИ размеров целиком (этап 2.1 дорожной карты). Раньше HashByVolume вызывался
+    /// на каждую корзину размера (обычно 2–10 файлов): на HDD головка металась между корзинами,
+    /// а параллелизм томов не успевал наполниться. Теперь needPartial/needFull собираются по ВСЕМ
+    /// корзинам пачки и хэшируются одним вызовом HashByVolume на фазу — партии в сотни файлов,
+    /// которые к тому же сортируются по первому LCN на томах со штрафом позиционирования.
+    /// Критерии отбора и байтовая семантика хэшей не менялись.
+    /// </summary>
+    private void ProcessSizeBatch(List<List<FileRecord>> buckets, ExactScanRequest req, IExactScanReporter rep,
         CancellationToken ct, ExactScanResult result, ref long processed, long total)
     {
-        // sameSize — все файлы этого размера (включая отключённые тома с уже сохранёнными хэшами):
+        // Корзина — все файлы одного размера (включая отключённые тома с уже сохранёнными хэшами):
         // это даёт совпадения между подключённым и ранее сохранённым носителем (FR-40/41).
-        try
+        var dupBuckets = new List<List<FileRecord>>(buckets.Count);
+
+        // --- фаза 1: частичный хэш — кандидаты по всем корзинам пачки разом ---
+        // 1.6: у крупных файлов (>128 МБ) частичный хэш v2 включает средний блок — строки со
+        // старой версией пересчитываем (иначе смешение v1/v2 в одной корзине размера маскирует
+        // дубликаты). Для мелких файлов алгоритм не менялся — их не трогаем.
+        var needPartial = new List<FileRecord>();
+        foreach (var sameSize in buckets)
         {
-            if (sameSize.Count < 2) return; // защитно; запрос и так отдаёт только дубль-размеры
-            result.SizeCandidates += sameSize.Count;
-
-            var inScope = sameSize.Where(req.InScope).ToList();
-            if (inScope.Count == 0) return;
-
-            // --- частичный хэш: только подключённые in-scope без хэша ---
-            // 1.6: у крупных файлов (>128 МБ) частичный хэш v2 включает средний блок — строки со
-            // старой версией пересчитываем (иначе смешение v1/v2 в одной корзине размера маскирует
-            // дубликаты). Для мелких файлов алгоритм не менялся — их не трогаем.
-            var needPartial = inScope.Where(f => f.PartialHash is null ||
-                (f.Size > HashService.MiddleBlockThreshold && f.PartialVer < HashService.CurrentPartialVersion)).ToList();
-            if (needPartial.Count > 0)
+            if (sameSize.Count < 2) // защитно; запрос и так отдаёт только дубль-размеры
             {
-                HashByVolume(needPartial, partial: true, req, rep, ct);
-                _files.UpdateComputedBatch(needPartial);
-                result.PartialHashed += needPartial.Count;
+                Advance(sameSize.Count, rep, ref processed, total);
+                continue;
             }
+            result.SizeCandidates += sameSize.Count;
+            dupBuckets.Add(sameSize);
+            foreach (var f in sameSize)
+            {
+                if (!req.InScope(f)) continue;
+                if (f.PartialHash is null ||
+                    (f.Size > HashService.MiddleBlockThreshold && f.PartialVer < HashService.CurrentPartialVersion))
+                    needPartial.Add(f);
+            }
+        }
+        if (needPartial.Count > 0)
+        {
+            HashByVolume(needPartial, partial: true, req, rep, ct);
+            _files.UpdateComputedBatch(needPartial);
+            result.PartialHashed += needPartial.Count;
+        }
 
-            // --- группировка по частичному → полный хэш только для коллизий ---
+        // --- фаза 2: группировка по частичному → полный хэш только для коллизий, тоже пачкой ---
+        var needFull = new List<FileRecord>();
+        foreach (var sameSize in dupBuckets)
+        {
             foreach (var grp in sameSize.Where(f => f.PartialHash is not null)
                          .GroupBy(f => Convert.ToHexString(f.PartialHash!)))
             {
                 var candidates = grp.ToList();
                 if (candidates.Count < 2) continue;
-
-                var needFull = candidates.Where(f => f.FullHash is null && req.InScope(f)).ToList();
-                if (needFull.Count == 0) continue;
-                rep.StageQuiet(ScanStage.FullHashing);
-                HashByVolume(needFull, partial: false, req, rep, ct);
-                _files.UpdateComputedBatch(needFull);
-                result.FullHashed += needFull.Count;
+                needFull.AddRange(candidates.Where(f => f.FullHash is null && req.InScope(f)));
             }
+            // Прогресс — по мере прохождения корзин пачки (как раньше processed += sameSize.Count).
+            Advance(sameSize.Count, rep, ref processed, total);
         }
-        finally
+        if (needFull.Count > 0)
         {
-            processed += sameSize.Count;
-            if (total > 0) rep.Fraction(Math.Min(1.0, processed / (double)total));
-            rep.SessionTick();
+            rep.StageQuiet(ScanStage.FullHashing);
+            HashByVolume(needFull, partial: false, req, rep, ct);
+            _files.UpdateComputedBatch(needFull);
+            result.FullHashed += needFull.Count;
         }
+    }
+
+    private static void Advance(int bucketSize, IExactScanReporter rep, ref long processed, long total)
+    {
+        processed += bucketSize;
+        if (total > 0) rep.Fraction(Math.Min(1.0, processed / (double)total));
+        rep.SessionTick();
     }
 
     private void HashByVolume(List<FileRecord> files, bool partial, ExactScanRequest req,
         IExactScanReporter rep, CancellationToken ct)
     {
         VolumeParallelExecutor.RunByVolume(
-            files,
+            OrderForSequentialReads(files, req),
             f => f.VolumeId,
             vid => req.ReadPlans.TryGetValue(vid, out var p) ? p.ContentDop : Math.Max(1, req.RequestedParallelism),
             req.MaxVolumeParallelism,
@@ -152,6 +180,50 @@ public sealed class ExactDuplicateEngineV2 : IExactDuplicateEngine
                 catch (FileChangedDuringScanException) { rep.ChangedSkipped(); }
                 catch { rep.Skipped(); } // битый/занятый файл — пропуск (NFR-1)
             });
+    }
+
+    /// <summary>
+    /// 2.1: на томах со штрафом позиционирования (план PreferSequential) сортирует файлы тома по
+    /// первому LCN (FSCTL_GET_RETRIEVAL_POINTERS, прав администратора не нужно): чтения идут в
+    /// порядке физического размещения на диске, и головка HDD движется в одну сторону, а не мечется.
+    /// SSD не трогаем — сортировка дала бы только лишние syscall-ы. Ошибка получения LCN не
+    /// критична: такой файл просто уходит в конец очереди своего тома (стабильно).
+    /// </summary>
+    private static List<FileRecord> OrderForSequentialReads(List<FileRecord> files, ExactScanRequest req)
+    {
+        if (files.Count < 2 || !OperatingSystem.IsWindows()) return files;
+        if (!files.Any(f => req.ReadPlans.TryGetValue(f.VolumeId, out var p) && p.PreferSequential))
+            return files;
+
+        var ordered = new List<FileRecord>(files.Count);
+        foreach (var volume in files.GroupBy(f => f.VolumeId)) // GroupBy стабилен: порядок внутри тома сохранён
+        {
+            var volumeFiles = volume.ToList();
+            if (volumeFiles.Count > 1 &&
+                req.ReadPlans.TryGetValue(volume.Key, out var plan) && plan.PreferSequential)
+            {
+                volumeFiles = SortByFirstLcn(volumeFiles, f =>
+                {
+                    var path = FullPath(f, req.MountById);
+                    return path is null ? null : FastDedup.Engine.FileLayoutReader.TryGetFirstLcn(path);
+                });
+            }
+            ordered.AddRange(volumeFiles); // RunByVolume группирует по тому заново — порядок МЕЖДУ томами не важен
+        }
+        return ordered;
+    }
+
+    /// <summary>
+    /// Стабильная сортировка по первому LCN: по возрастанию, элементы без LCN — в конец с
+    /// сохранением исходного порядка. Ключ вычисляется ровно один раз на элемент (получение LCN —
+    /// syscall). Чистая функция — тестируема на синтетических данных.
+    /// </summary>
+    public static List<T> SortByFirstLcn<T>(IReadOnlyList<T> items, Func<T, long?> firstLcn)
+    {
+        var keyed = new (T Item, long? Lcn)[items.Count];
+        for (int i = 0; i < items.Count; i++) keyed[i] = (items[i], firstLcn(items[i]));
+        // OrderBy/ThenBy у LINQ стабильны: равные ключи (в т.ч. все null) остаются в исходном порядке.
+        return keyed.OrderBy(t => t.Lcn is null ? 1 : 0).ThenBy(t => t.Lcn ?? 0).Select(t => t.Item).ToList();
     }
 
     private static string? FullPath(FileRecord f, IReadOnlyDictionary<long, string> mountById) =>

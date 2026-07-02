@@ -30,10 +30,12 @@ internal static class Native
     // --- IOCTL / FSCTL коды ---
     public const uint FSCTL_ENUM_USN_DATA = 0x000900b3;
     public const uint FSCTL_QUERY_USN_JOURNAL = 0x000900f4;
+    public const uint FSCTL_GET_RETRIEVAL_POINTERS = 0x00090073;
     public const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002d1400;
 
     // --- Win32 ошибки ---
     public const int ERROR_HANDLE_EOF = 38;
+    public const int ERROR_MORE_DATA = 234;
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(
@@ -143,6 +145,55 @@ internal static class Native
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Первый LCN (logical cluster number) файла через FSCTL_GET_RETRIEVAL_POINTERS — физическое
+    /// начало файла на диске. Права администратора НЕ нужны: хэндл открывается с нулевым доступом
+    /// (только метаданные, как у defrag-API). null — при любой ошибке, для резидентных в MFT
+    /// файлов (нет экстентов) и для виртуальных LCN &lt; 0 (сжатые/разрежённые). Используется для
+    /// сортировки очереди чтений на HDD, поэтому обязан деградировать молча.
+    /// </summary>
+    public static long? TryGetFirstLcn(string path)
+    {
+        SafeFileHandle? handle = null;
+        IntPtr inBuf = IntPtr.Zero, outBuf = IntPtr.Zero;
+        try
+        {
+            // dwDesiredAccess = 0: запрашиваем только расположение, право чтения содержимого не нужно.
+            handle = CreateFileW(LongPath(path), 0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+            if (handle.IsInvalid) return null;
+
+            // STARTING_VCN_INPUT_BUFFER: с какого VCN начинать — нам нужен самый первый (0).
+            inBuf = Marshal.AllocHGlobal(8);
+            Marshal.WriteInt64(inBuf, 0, 0L);
+
+            // RETRIEVAL_POINTERS_BUFFER на ОДИН экстент:
+            // ExtentCount(4) + выравнивание(4) + StartingVcn(8) + Extents[0].NextVcn(8) + Extents[0].Lcn(8).
+            const int outSize = 32;
+            outBuf = Marshal.AllocHGlobal(outSize);
+
+            bool ok = DeviceIoControl(handle, FSCTL_GET_RETRIEVAL_POINTERS,
+                inBuf, 8, outBuf, outSize, out _, IntPtr.Zero);
+            // ERROR_MORE_DATA — экстентов больше, чем вместил буфер, но ПЕРВЫЙ уже записан: его и хватает.
+            if (!ok && Marshal.GetLastWin32Error() != ERROR_MORE_DATA) return null;
+
+            if (Marshal.ReadInt32(outBuf, 0) < 1) return null; // экстентов нет (резидентный файл)
+            long lcn = Marshal.ReadInt64(outBuf, 24);
+            return lcn < 0 ? null : lcn; // виртуальный кластер позиции головки не даёт
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
+            if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
+            handle?.Dispose();
         }
     }
 
