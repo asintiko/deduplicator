@@ -25,6 +25,19 @@ public interface IScanService
     void Pause();
     void Resume();
 
+    /// <summary>
+    /// 2.8: id сессии ИДУЩЕГО скана (null вне скана). Вместе с <see cref="ActiveExactReady"/>
+    /// позволяет UI показывать предпросмотр точных групп до завершения всего скана.
+    /// </summary>
+    long? ActiveSessionId { get; }
+
+    /// <summary>
+    /// 2.8: точные группы текущей сессии уже ЦЕЛИКОМ в БД (движок exact отработал), а скан
+    /// продолжается этапами похожих. Сбрасывается по завершении скана (любым исходом).
+    /// Выводить это из Stage ненадёжно (Grouping ставится и внутри exact-движка) — явный флаг.
+    /// </summary>
+    bool ActiveExactReady { get; }
+
     /// <summary>Незавершённая сессия (для предложения возобновить).</summary>
     ScanSession? GetResumableSession();
 }
@@ -91,6 +104,20 @@ public sealed class ScanService : IScanService, IDisposable
     private volatile bool _isPaused;
     public bool IsRunning { get => _isRunning; private set => _isRunning = value; }
     public bool IsPaused { get => _isPaused; private set => _isPaused = value; }
+
+    // 2.8: прогрессивные результаты. Читаются из UI-потока, пишутся из фонового; long не атомарен
+    // на 32-бит — доступ через Interlocked (0 = скана нет). Флаг готовности exact — volatile.
+    private long _activeSessionId;
+    private volatile bool _activeExactReady;
+    public long? ActiveSessionId
+    {
+        get
+        {
+            long v = Interlocked.Read(ref _activeSessionId);
+            return v > 0 ? v : null;
+        }
+    }
+    public bool ActiveExactReady => _activeExactReady;
 
     public ScanService(
         VolumeRepository volumes, FileRepository files, ScanSessionRepository sessions,
@@ -167,6 +194,9 @@ public sealed class ScanService : IScanService, IDisposable
         try
         {
             sessionId = _sessions.Create(JsonSerializer.Serialize(options));
+            // 2.8: публикуем id идущей сессии — UI сможет предпросматривать её точные группы,
+            // как только ActiveExactReady станет true. Сбрасывается в finally.
+            Interlocked.Exchange(ref _activeSessionId, sessionId);
 
             // P0-A: «что искать» не должно быть пустым — иначе скан бессмыслен.
             if (options.IncludedCategories.Count == 0)
@@ -212,6 +242,11 @@ public sealed class ScanService : IScanService, IDisposable
                 SessionId = sessionId
             };
             var exactResult = _exactEngine.ScanExact(exactRequest, new ScanReporter(this, sessionId, ct), ct);
+            // 2.8: точные группы сессии целиком в БД — «Результаты» могут показывать предпросмотр,
+            // пока идут перцептив и похожие (на большом диске это часы). Флаг снимается в finally.
+            _activeExactReady = true;
+            if (exactResult.GroupsCreated > 0)
+                NoteEnumerationNotice("Точные дубликаты уже можно посмотреть в «Результатах» — проверка продолжается");
             // Счётчик групп кумулятивен по всем типам: точные + похожие фото + похожая музыка.
             long exactTotal = exactResult.GroupsCreated, imageTotal = 0;
 
@@ -284,6 +319,12 @@ public sealed class ScanService : IScanService, IDisposable
         }
         finally
         {
+            // 2.8: скан закончился (любым исходом) — предпросмотр активной сессии больше не валиден.
+            // Сбрасываем ДО финального Flush/IsRunning=false: UI, перечитывающий результаты по
+            // терминальному событию, уже не увидит «идущей» сессии.
+            _activeExactReady = false;
+            Interlocked.Exchange(ref _activeSessionId, 0);
+
             // Область скана (scan_scope_files) нужна только ВО ВРЕМЯ скана (scoped-SQL перцептива и
             // воронки); строки старых сессий никто не читает и раньше никто не удалял — таблица росла
             // неограниченно, раздувая БД на регулярных сканах папок (аудит 2026-07-02).

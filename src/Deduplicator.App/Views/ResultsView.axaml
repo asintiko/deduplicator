@@ -135,6 +135,17 @@
 
             <!-- P0.4: видимый баннер результата операции (rename/delete) — не прячется с диалогом -->
             <StackPanel Grid.Row="1" Spacing="8" Margin="0,0,0,12">
+                <!-- 2.8: предпросмотр идущего скана — информационный (жёлтый) баннер без кнопки закрытия:
+                     пока проверка не завершена, пользователь должен видеть, что результаты предварительные. -->
+                <Border IsVisible="{Binding PreviewBannerText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                        Background="#22FF9500" CornerRadius="8" Padding="14,10">
+                    <Grid ColumnDefinitions="Auto,*">
+                        <PathIcon Data="{StaticResource IconWarning}" Width="16" Height="16" VerticalAlignment="Top"
+                                  Margin="0,2,10,0" Foreground="{DynamicResource WarningBrush}"/>
+                        <TextBlock Grid.Column="1" Text="{Binding PreviewBannerText}" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource WarningBrush}"/>
+                    </Grid>
+                </Border>
                 <Border IsVisible="{Binding OperationErrorText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                         Background="#22D9534F" CornerRadius="8" Padding="14,10">
                     <Grid ColumnDefinitions="*,Auto">

@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Deduplicator.App.Infrastructure;
@@ -35,6 +36,7 @@ public partial class ResultsViewModel : PageViewModel
     private readonly AppPaths _paths;
     private readonly ScanSessionRepository _sessions;
     private readonly NavigationService _nav;
+    private readonly IScanService _scan;
 
     public override string Title => Strings.ResultsTitle;
 
@@ -101,6 +103,21 @@ public partial class ResultsViewModel : PageViewModel
     // UI-аудит 2026-07-02 (must №3): постоянная сводка «Отмечено: N файлов · X ГБ» + снятие отметок.
     [ObservableProperty] private string? _markedSummaryText;
 
+    // 2.8: предпросмотр идущего скана — точные группы АКТИВНОЙ сессии видны до завершения.
+    // В этом режиме все действия над файлами (удаление/переименование/распределение/ссылки/
+    // авто-выбор) отключены; галочки безвредны и продолжают работать.
+    [ObservableProperty] private bool _isPreview;
+    [ObservableProperty] private string? _previewBannerText;
+    private bool _isActive;            // страница сейчас открыта (OnNavigatedTo/OnNavigatedFrom)
+    private bool _previewLoaded;       // предпросмотр уже показан — не перезагружаться на каждый тик
+    private bool _terminalReloadQueued; // терминальная перезагрузка уже запланирована
+
+    private const string PreviewBannerMessage =
+        "Проверка ещё идёт — это предварительные результаты. Удаление станет доступно после завершения.";
+    private const string PreviewSimilarPendingMessage = "Похожие появятся после завершения проверки.";
+    private const string PreviewActionBlockedMessage =
+        "Проверка ещё идёт — действия с файлами станут доступны после её завершения.";
+
     // «Освободить N ГБ» (этап 1.9): жадный подбор проверенных групп под целевой объём.
     [ObservableProperty] private string _freeUpGbText = "5";
 
@@ -109,7 +126,7 @@ public partial class ResultsViewModel : PageViewModel
     public ResultsViewModel(GroupRepository groups, IVolumeService volumes, IImageMatchService thumbs,
         IFileOpsService fileOps, IHashService hash, ISettingsService settings, IBatchRenameService rename,
         FileRepository files, AppPaths paths, ScanSessionRepository sessions, IResultDistributionService distribute,
-        NavigationService nav)
+        NavigationService nav, IScanService scan)
     {
         _nav = nav;
         _groups = groups;
@@ -123,11 +140,53 @@ public partial class ResultsViewModel : PageViewModel
         _files = files;
         _paths = paths;
         _sessions = sessions;
+        _scan = scan;
         _imageThreshold = settings.Current.DefaultImageThreshold;
         _audioThreshold = settings.Current.DefaultAudioThreshold;
+        // 2.8: оба сервиса — синглтоны, подписка живёт всё время работы приложения (не течёт).
+        _scan.ProgressChanged += OnScanProgress;
     }
 
-    public override void OnNavigatedTo() => _ = LoadAsync();
+    /// <summary>
+    /// 2.8: следим за идущим сканом. Перезагружаемся ТОЛЬКО дважды: на первом «точные готовы»
+    /// (появился предпросмотр) и на терминальном переходе (Completed/Cancelled/Failed) — а не на
+    /// каждом тике прогресса, иначе UI дёргался бы. Паттерн диспатчера — как в ScanViewModel.OnProgress.
+    /// </summary>
+    private void OnScanProgress(ScanProgress p) => Dispatcher.UIThread.Post(() =>
+    {
+        if (p.Stage is ScanStage.Completed or ScanStage.Cancelled or ScanStage.Failed)
+        {
+            _previewLoaded = false;
+            if (_terminalReloadQueued) return;
+            _terminalReloadQueued = true;
+            _ = ReloadAfterScanEndAsync();
+            return;
+        }
+        // Первый ActiveExactReady: если страница открыта — показать предпросмотр сразу.
+        if (!_previewLoaded && _scan.IsRunning && _scan.ActiveExactReady && _scan.ActiveSessionId is not null)
+        {
+            _previewLoaded = true;
+            if (_isActive) _ = LoadAsync();
+        }
+    });
+
+    /// <summary>
+    /// Терминальное событие прилетает ДО того, как RunCore закроет сессию и подчистит группы
+    /// (finally). Дожидаемся фактического завершения (IsRunning=false) и лишь потом перечитываем:
+    /// предпросмотр сменится финальными результатами или откатится к последней завершённой сессии.
+    /// </summary>
+    private async Task ReloadAfterScanEndAsync()
+    {
+        try
+        {
+            for (int i = 0; i < 200 && _scan.IsRunning; i++)
+                await Task.Delay(50);
+        }
+        finally { _terminalReloadQueued = false; }
+        if (_isActive) await LoadAsync();
+    }
+
+    public override void OnNavigatedTo() { _isActive = true; _ = LoadAsync(); }
 
     /// <summary>
     /// Уход со страницы: сбрасываем «вооружённые» диалоги. Иначе при возврате поверх свежих
@@ -136,6 +195,7 @@ public partial class ResultsViewModel : PageViewModel
     /// </summary>
     public override void OnNavigatedFrom()
     {
+        _isActive = false;
         ShowDeleteConfirm = false;
         ShowRenameDialog = false;
         ShowDistributeDialog = false;
@@ -157,26 +217,35 @@ public partial class ResultsViewModel : PageViewModel
                 .Select(p => { try { return Path.GetFullPath(p).TrimEnd('\\', '/'); } catch { return p; } })
                 .ToArray();
 
-            var (exactTotal, imageTotal, audioTotal, mount, label, sid) = await Task.Run(() =>
+            var (exactTotal, imageTotal, audioTotal, mount, label, sid, preview) = await Task.Run(() =>
             {
                 var catalog = _volumes.SyncAndGetCatalog();
                 var mountById = catalog.Where(v => v.IsConnected && v.MountPath is not null)
                     .ToDictionary(v => v.Id, v => v.MountPath!);
                 var labelById = catalog.ToDictionary(v => v.Id, v => v.DisplayName);
 
-                // P0.2: показываем только результаты ПОСЛЕДНЕГО успешно завершённого скана. Если завершённой
-                // сессии ещё нет (первый в жизни скан, ещё идёт) — session=null. ВАЖНО (ревью P7): при null НЕ
-                // читаем группы «по всем сессиям», иначе частичные группы идущего скана показались бы как
-                // готовый результат, из которого можно удалять (счёт = 0, страницы не грузим — см. guard в Append*).
-                long? session = _sessions.GetLatestCompletedSessionId();
+                // 2.8: предпросмотр — скан ещё идёт, но точные группы АКТИВНОЙ сессии уже целиком
+                // в БД (ActiveExactReady). Показываем их, не дожидаясь похожих; все действия над
+                // файлами отключены гейтами IsPreview (правило: удалять можно только из завершённой сессии).
+                long? active = _scan.ActiveSessionId;
+                bool isPreview = _scan.IsRunning && _scan.ActiveExactReady && active is not null;
+                // P0.2: иначе показываем только результаты ПОСЛЕДНЕГО успешно завершённого скана. Если
+                // завершённой сессии ещё нет (первый в жизни скан, ещё идёт) — session=null. ВАЖНО (ревью P7):
+                // при null НЕ читаем группы «по всем сессиям», иначе частичные группы идущего скана показались
+                // бы как готовый результат, из которого можно удалять (счёт = 0, страницы не грузим — guard в Append*).
+                long? session = isPreview ? active : _sessions.GetLatestCompletedSessionId();
                 // P1.1/P1: ВСЕ вкладки грузим ПОСТРАНИЧНО из БД (счёт групп + первая страница по запросу),
                 // а не материализуем весь результат в память.
                 int exTotal = session is null ? 0 : _groups.GetGroupCount(ExactTypes, session);
-                int imTotal = session is null ? 0 : _groups.GetGroupCount(MatchType.SimilarImage, session);
-                int auTotal = session is null ? 0 : _groups.GetGroupCount(MatchType.SimilarAudio, session);
-                return (exTotal, imTotal, auTotal, mountById, labelById, session);
+                // Похожие в предпросмотре не читаем вовсе: их группы строятся ПОЗЖЕ точных и были бы частичными.
+                int imTotal = session is null || isPreview ? 0 : _groups.GetGroupCount(MatchType.SimilarImage, session);
+                int auTotal = session is null || isPreview ? 0 : _groups.GetGroupCount(MatchType.SimilarAudio, session);
+                return (exTotal, imTotal, auTotal, mountById, labelById, session, isPreview);
             });
 
+            IsPreview = preview;
+            PreviewBannerText = preview ? PreviewBannerMessage : null;
+            if (preview) _previewLoaded = true; // предпросмотр уже на экране — не перезагружаться по событию
             _sessionFilter = sid;
             _exactTotal = exactTotal; _exactOffset = 0;
             _imageTotal = imageTotal; _imageOffset = 0;
@@ -199,8 +268,9 @@ public partial class ResultsViewModel : PageViewModel
             // Счётчики похожих — всего найдено сканом (без декодирования миниатюр); слайдер порога сузит показ.
             ImageCountText = $"{_imageTotal}";
             AudioCountText = $"{_audioTotal}";
-            ImageEmpty = _imageTotal == 0 ? Strings.NoGroups : null;
-            AudioEmpty = _audioTotal == 0 ? Strings.NoGroups : null;
+            // 2.8: в предпросмотре похожие вкладки честно объясняют, почему они пустые.
+            ImageEmpty = preview ? PreviewSimilarPendingMessage : _imageTotal == 0 ? Strings.NoGroups : null;
+            AudioEmpty = preview ? PreviewSimilarPendingMessage : _audioTotal == 0 ? Strings.NoGroups : null;
 
             // Если уже открыта вкладка похожих — построить её первую страницу сразу.
             if (SelectedTab == 1) EnsureImageBuilt();
@@ -319,7 +389,8 @@ public partial class ResultsViewModel : PageViewModel
     /// <summary>Достроить следующую страницу похожих фото из БД (миниатюры декодируются только для неё, P1).</summary>
     private void AppendSimilarImagePage(bool withThumbnails = true)
     {
-        if (_sessionFilter is null) { CanShowMoreSimilarImages = false; return; }
+        // 2.8: в предпросмотре похожие не читаем — их группы ещё строятся идущим сканом (частичны).
+        if (_sessionFilter is null || IsPreview) { CanShowMoreSimilarImages = false; return; }
         var page = _groups.GetGroupsPage(MatchType.SimilarImage, _sessionFilter, _imageOffset, PageSize);
         _imageOffset += page.Count;
         foreach (var g in page) _allImage.Add(Build(g, _mountById, _labelById, withThumbnails));
@@ -329,7 +400,8 @@ public partial class ResultsViewModel : PageViewModel
 
     private void AppendSimilarAudioPage(bool withThumbnails = true)
     {
-        if (_sessionFilter is null) { CanShowMoreSimilarAudio = false; return; }
+        // 2.8: см. AppendSimilarImagePage — в предпросмотре похожие вкладки пусты.
+        if (_sessionFilter is null || IsPreview) { CanShowMoreSimilarAudio = false; return; }
         var page = _groups.GetGroupsPage(MatchType.SimilarAudio, _sessionFilter, _audioOffset, PageSize);
         _audioOffset += page.Count;
         foreach (var g in page) _allAudio.Add(Build(g, _mountById, _labelById, withThumbnails));
@@ -387,7 +459,9 @@ public partial class ResultsViewModel : PageViewModel
         // Счётчик в заголовке — ВСЕГО найдено сканом (стабилен, как у точной вкладки), а не отфильтрованная
         // страница (ревью P7: иначе число «сколько найдено» молча падало бы при пейджинге/слайдере).
         // Пустое состояние различаем: «ничего не найдено» vs «всё скрыто текущим порогом».
-        ImageEmpty = _imageTotal == 0 ? Strings.NoGroups
+        // 2.8: в предпросмотре текст свой — похожие ещё не построены (Refilter мог быть вызван слайдером).
+        ImageEmpty = IsPreview ? PreviewSimilarPendingMessage
+            : _imageTotal == 0 ? Strings.NoGroups
             : SimilarImageGroups.Count == 0 ? "Похожие есть, но скрыты текущим порогом — сдвиньте слайдер влево."
             : null;
         // Порог мог скрыть группы с отметками — кнопки действий обязаны пересчитать доступность,
@@ -402,7 +476,8 @@ public partial class ResultsViewModel : PageViewModel
         SimilarAudioGroups.Clear();
         foreach (var g in _allAudio.Where(g => g.TopSimilarity >= AudioThreshold))
             SimilarAudioGroups.Add(g);
-        AudioEmpty = _audioTotal == 0 ? Strings.NoGroups
+        AudioEmpty = IsPreview ? PreviewSimilarPendingMessage
+            : _audioTotal == 0 ? Strings.NoGroups
             : SimilarAudioGroups.Count == 0 ? "Похожие есть, но скрыты текущим порогом — сдвиньте слайдер влево."
             : null;
         DeleteSelectedCommand.NotifyCanExecuteChanged();
@@ -417,12 +492,22 @@ public partial class ResultsViewModel : PageViewModel
         _ => ExactGroups
     };
 
-    /// <summary>Удалять можно, только если в текущей вкладке есть отмеченные файлы.</summary>
-    private bool CanDeleteSelected() => CurrentGroups().Any(g => g.MarkedCount > 0);
+    /// <summary>Удалять можно, только если в текущей вкладке есть отмеченные файлы (и это не предпросмотр, 2.8).</summary>
+    private bool CanDeleteSelected() => !IsPreview && CurrentGroups().Any(g => g.MarkedCount > 0);
+
+    /// <summary>2.8: смена режима предпросмотра пересчитывает доступность всех действий над файлами.</summary>
+    partial void OnIsPreviewChanged(bool value)
+    {
+        DeleteSelectedCommand.NotifyCanExecuteChanged();
+        RenameSelectedCommand.NotifyCanExecuteChanged();
+        DistributeSelectedCommand.NotifyCanExecuteChanged();
+        AutoSelectAllCommand.NotifyCanExecuteChanged();
+    }
 
     [RelayCommand(CanExecute = nameof(CanDeleteSelected))]
     private void DeleteSelected()
     {
+        if (IsPreview) return; // 2.8: защита на случай вызова в обход CanExecute
         int count = CurrentGroups().Sum(g => g.MarkedCount);
         if (count == 0) return;
         // P2.3: явно перечисляем, что будет перемещено и что НЕ тронем (недоступные/непроверенные
@@ -500,6 +585,8 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private void FreeUpSelect()
     {
+        // 2.8: подбор «под удаление» в предпросмотре не имеет смысла — удаление отключено.
+        if (IsPreview) { OperationErrorText = PreviewActionBlockedMessage; return; }
         if (!double.TryParse(FreeUpGbText.Replace(',', '.'),
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var gb) || gb <= 0)
@@ -541,6 +628,15 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private async Task ConfirmDeleteAsync()
     {
+        // 2.8: в предпросмотре вся цепочка удаления недостижима ДАЖЕ программно — частичные
+        // результаты идущего скана удалять нельзя (правило безопасности продукта). Guard здесь,
+        // а не только в CanExecute: диалог мог быть «вооружён» до включения предпросмотра.
+        if (IsPreview)
+        {
+            ShowDeleteConfirm = false;
+            OperationErrorText = PreviewActionBlockedMessage;
+            return;
+        }
         ShowDeleteConfirm = false;
         IsBusy = true;
         BusyStatus = "Проверяем выбранные файлы перед перемещением...";
@@ -626,11 +722,12 @@ public partial class ResultsViewModel : PageViewModel
         Math.Abs((actualUtc - indexed.UtcDateTime).TotalSeconds) <= 2.0;
 
     // --- P0-B: групповое переименование выбранных файлов ---
-    private bool CanRenameSelected() => CurrentGroups().Any(g => g.MarkedCount > 0);
+    private bool CanRenameSelected() => !IsPreview && CurrentGroups().Any(g => g.MarkedCount > 0);
 
     [RelayCommand(CanExecute = nameof(CanRenameSelected))]
     private void RenameSelected()
     {
+        if (IsPreview) return; // 2.8: в предпросмотре действия над файлами отключены
         // Берём отмеченные файлы текущей вкладки как выбранный набор (отмечать можно только доступные).
         var marked = CurrentGroups().SelectMany(g => g.MarkedFiles)
             .Where(f => f.FullPath is not null).ToList();
@@ -693,11 +790,12 @@ public partial class ResultsViewModel : PageViewModel
     /// <summary>Устанавливается представлением — выбор папки назначения.</summary>
     public Func<Task<string?>>? PickDestinationFolder { get; set; }
 
-    private bool CanDistribute() => CurrentGroups().Any(g => g.MarkedCount > 0);
+    private bool CanDistribute() => !IsPreview && CurrentGroups().Any(g => g.MarkedCount > 0);
 
     [RelayCommand(CanExecute = nameof(CanDistribute))]
     private void DistributeSelected()
     {
+        if (IsPreview) return; // 2.8: в предпросмотре действия над файлами отключены
         _distributeSources = CurrentGroups()
             .SelectMany(g => g.MarkedFiles)
             .Where(f => f.FullPath is not null)
@@ -744,6 +842,8 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private async Task RunDistributeAsync()
     {
+        // 2.8: guard как в ConfirmRenameAsync — диалог мог остаться от завершённой сессии.
+        if (IsPreview) { ShowDistributeDialog = false; OperationErrorText = PreviewActionBlockedMessage; return; }
         if (string.IsNullOrWhiteSpace(DistributeDestination)) return;
         ShowDistributeDialog = false;
         IsBusy = true;
@@ -770,6 +870,8 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private async Task ConfirmRenameAsync()
     {
+        // 2.8: план мог быть построен до включения предпросмотра — физическое переименование запрещено.
+        if (IsPreview) { ShowRenameDialog = false; OperationErrorText = PreviewActionBlockedMessage; return; }
         if (_renamePlanField is null || !_renamePlanField.CanExecute) return;
         ShowRenameDialog = false;
         IsBusy = true;
@@ -868,12 +970,13 @@ public partial class ResultsViewModel : PageViewModel
     // --- Авто-выбор по правилу (оставить эталон, отметить остальные) ---
     // Доступно ТОЛЬКО на вкладке точных дубликатов. Похожие фото/музыка отмечаются исключительно
     // вручную: их «похожесть» не равна идентичности, автоудаление здесь опасно (раздел 6.3).
-    private bool CanAutoSelect() => SelectedTab == 0;
+    // 2.8: в предпросмотре отключено — авто-отметка подталкивает к удалению, которое запрещено.
+    private bool CanAutoSelect() => !IsPreview && SelectedTab == 0;
 
     [RelayCommand(CanExecute = nameof(CanAutoSelect))]
     private void AutoSelectAll()
     {
-        if (SelectedTab != 0) return; // защита на случай вызова в обход CanExecute
+        if (IsPreview || SelectedTab != 0) return; // защита на случай вызова в обход CanExecute
         EnsureAllExactBuilt();        // «Выбрать все» действует на ВСЕ точные группы, а не только на стр. 1
         foreach (var g in ExactGroups)
         {
@@ -963,7 +1066,7 @@ public partial class ResultsViewModel : PageViewModel
     [RelayCommand]
     private void Hardlink(GroupItemViewModel? group)
     {
-        if (group is null) return;
+        if (group is null || IsPreview) return; // 2.8: в предпросмотре замена ссылками отключена
         _hardlinkGroup = group;
         HardlinkConfirmText = Strings.HardlinkWarning;
         ShowHardlinkConfirm = true;
@@ -978,7 +1081,8 @@ public partial class ResultsViewModel : PageViewModel
         ShowHardlinkConfirm = false;
         var group = _hardlinkGroup;
         _hardlinkGroup = null;
-        if (group is null) return;
+        // 2.8: диалог мог быть «вооружён» до включения предпросмотра — физическая замена файлов запрещена.
+        if (group is null || IsPreview) return;
 
         var rep = group.Files.FirstOrDefault(f => f.IsRepresentative);
         if (rep?.FullPath is null) return;
