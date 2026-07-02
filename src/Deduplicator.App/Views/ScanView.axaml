@@ -32,6 +32,18 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- UI-аудит must №6: отмена — явное состояние, а не молча исчезнувший прогресс -->
+                    <Border Classes="card" IsVisible="{Binding IsCancelled}">
+                        <StackPanel Orientation="Horizontal" Spacing="12">
+                            <PathIcon Data="{StaticResource IconPause}"/>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Проверка остановлена" FontWeight="SemiBold"/>
+                                <TextBlock Classes="caption" TextWrapping="Wrap"
+                                           Text="Просмотренные файлы сохранены в каталоге — повторный запуск пройдёт быстрее. Прежние результаты не тронуты."/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
                     <Border x:Name="OnboardingScanDisks" Classes="card">
                         <StackPanel Spacing="12">
                             <Grid ColumnDefinitions="*,Auto">

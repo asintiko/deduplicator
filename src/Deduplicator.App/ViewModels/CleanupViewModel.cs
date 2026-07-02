@@ -72,7 +72,10 @@ public partial class CleanupViewModel : PageViewModel
     private void OnItemPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(JunkItemViewModel.IsSelected))
+        {
             DeleteSelectedCommand.NotifyCanExecuteChanged();
+            UpdateSelectedSummary();
+        }
     }
 
     public override void OnNavigatedTo()
@@ -145,10 +148,26 @@ public partial class CleanupViewModel : PageViewModel
     private void CancelScan() => _cts?.Cancel();
 
     [RelayCommand]
-    private void SelectAll() { foreach (var i in Items) i.IsSelected = true; }
+    private void SelectAll()
+    {
+        // UI-аудит 2026-07-02 (must №4): «Большие файлы» — это ЛИЧНЫЕ данные (видео, архивы),
+        // а не мусор; в массовое выделение они не попадают — только осознанная ручная отметка.
+        foreach (var i in Items) i.IsSelected = i.Model.Kind != JunkKind.LargeFile;
+        UpdateSelectedSummary();
+    }
 
     [RelayCommand]
-    private void ClearSelection() { foreach (var i in Items) i.IsSelected = false; }
+    private void ClearSelection() { foreach (var i in Items) i.IsSelected = false; UpdateSelectedSummary(); }
+
+    [ObservableProperty] private string? _selectedSummaryText;
+
+    /// <summary>«Выбрано: N (X ГБ)» рядом с кнопкой удаления — видно масштаб до подтверждения.</summary>
+    internal void UpdateSelectedSummary()
+    {
+        int n = 0; long bytes = 0;
+        foreach (var i in Items) if (i.IsSelected) { n++; bytes += i.Model.Size; }
+        SelectedSummaryText = n == 0 ? null : $"Выбрано: {n} ({Format.Bytes(bytes)})";
+    }
 
     // #16: удаление теперь через подтверждение (как в Результатах) — один клик не сносит всё сразу.
     private bool CanDelete() => !Busy && Items.Any(i => i.IsSelected);

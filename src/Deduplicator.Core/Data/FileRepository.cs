@@ -351,6 +351,39 @@ public sealed class FileRepository
         return list;
     }
 
+    /// <summary>
+    /// Этап 2.3: перцептивный признак (phash/pixel_hash или audio_fp) переносится SQL-запросом
+    /// с любого файла с тем же full_hash, у которого он уже посчитан — байт-идентичные копии не
+    /// декодируются повторно. Коллизия XxHash128 в худшем случае даёт неточную «похожесть», не
+    /// удаление (его защищают побайтовая сверка и ревалидация). Возвращает число заполненных строк.
+    /// </summary>
+    public int PropagatePerceptualByFullHash(FileCategory category)
+    {
+        // Имена колонок — из фиксированного списка (не пользовательский ввод).
+        string[] cols = category == FileCategory.Image
+            ? new[] { "phash", "pixel_hash" }
+            : new[] { "audio_fp" };
+
+        using var conn = _db.Open();
+        int filled = 0;
+        foreach (var col in cols)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                UPDATE files SET {col} = (
+                    SELECT f2.{col} FROM files f2
+                    WHERE f2.full_hash = files.full_hash AND f2.{col} IS NOT NULL AND f2.id <> files.id
+                    LIMIT 1)
+                WHERE {col} IS NULL AND full_hash IS NOT NULL AND category = $cat
+                  AND EXISTS (SELECT 1 FROM files f3
+                              WHERE f3.full_hash = files.full_hash AND f3.{col} IS NOT NULL AND f3.id <> files.id)
+                """;
+            cmd.Add("$cat", Mappers.CategoryToDb(category));
+            filled += cmd.ExecuteNonQuery();
+        }
+        return filled;
+    }
+
     /// <summary>Файлы заданной категории, для которых ещё не посчитан перцептивный признак.</summary>
     public List<FileRecord> GetNeedingPerceptual(FileCategory category)
     {

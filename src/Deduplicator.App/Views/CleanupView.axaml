@@ -68,8 +68,12 @@
             <Grid RowDefinitions="Auto,*">
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="10" Margin="8,6">
                     <TextBlock Text="{Binding Summary}" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    <Button Classes="ghost" Command="{Binding SelectAllCommand}" ToolTip.Tip="Отметить все найденные элементы"><TextBlock Text="{x:Static loc:Strings.FmSelectAll}" FontSize="12"/></Button>
+                    <Button Classes="ghost" Command="{Binding SelectAllCommand}"
+                            ToolTip.Tip="Отметить всё найденное, КРОМЕ больших файлов — их отмечайте вручную (это могут быть личные данные)"><TextBlock Text="{x:Static loc:Strings.FmSelectAll}" FontSize="12"/></Button>
                     <Button Classes="ghost" Command="{Binding ClearSelectionCommand}" ToolTip.Tip="Снять все отметки"><TextBlock Text="{x:Static loc:Strings.FmClear}" FontSize="12"/></Button>
+                    <!-- UI-аудит must №4: масштаб выбранного виден ДО подтверждения -->
+                    <TextBlock Text="{Binding SelectedSummaryText}" FontWeight="SemiBold" VerticalAlignment="Center"
+                               IsVisible="{Binding SelectedSummaryText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                     <Button Classes="danger" Command="{Binding DeleteSelectedCommand}"
                             ToolTip.Tip="Переместить отмеченное в корзину после подтверждения">
                         <StackPanel Orientation="Horizontal" Spacing="8">

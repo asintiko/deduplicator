@@ -108,6 +108,13 @@
                     <TextBlock Classes="muted" Text="Сначала отметьте лишние копии, затем проверьте список и уберите отмеченное в корзину." Margin="0,4,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <!-- UI-аудит must №3: объём выбранного всегда на виду + быстрый сброс отметок -->
+                    <TextBlock Text="{Binding MarkedSummaryText}" VerticalAlignment="Center" FontWeight="SemiBold"
+                               IsVisible="{Binding MarkedSummaryText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                    <Button Classes="ghost" Command="{Binding ClearAllMarksCommand}"
+                            ToolTip.Tip="Снять все отметки на текущей вкладке"
+                            IsVisible="{Binding MarkedSummaryText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                            Content="Снять отметки"/>
                     <Button x:Name="OnboardingAutoSelect"
                             Classes="primary" Command="{Binding AutoSelectAllCommand}"
                             ToolTip.Tip="Автоматически отметить лишние точные копии, не удаляя их сразу">
@@ -139,10 +146,14 @@
                 </Border>
                 <Border IsVisible="{Binding OperationSuccessText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                         Background="{DynamicResource AccentSoft}" CornerRadius="8" Padding="14,10">
-                    <Grid ColumnDefinitions="*,Auto">
+                    <Grid ColumnDefinitions="*,Auto,Auto">
                         <TextBlock Text="{Binding OperationSuccessText}" TextWrapping="Wrap"
                                    Foreground="{DynamicResource AccentBrush}"/>
-                        <Button Grid.Column="1" Classes="ghost" VerticalAlignment="Top"
+                        <!-- UI-аудит must №1: видимый путь к отмене — сразу из баннера успеха -->
+                        <Button Grid.Column="1" Classes="ghost" VerticalAlignment="Top" Margin="8,0,0,0"
+                                Command="{Binding OpenJournalCommand}" Content="Открыть историю"
+                                ToolTip.Tip="Журнал операций: восстановление из карантина"/>
+                        <Button Grid.Column="2" Classes="ghost" VerticalAlignment="Top"
                                 Command="{Binding DismissOperationBannerCommand}" Content="✕"/>
                     </Grid>
                 </Border>
@@ -176,6 +187,17 @@
                                     ToolTip.Tip="Разложить выбранные файлы по папкам: отчёт или безопасное копирование">
                                 <TextBlock Text="{x:Static loc:Strings.DistributeSelected}"/>
                             </Button>
+                            <!-- Этап 1.9: «Освободить N ГБ» — жадный предвыбор проверенных дубликатов -->
+                            <Border Classes="card" Padding="10,2" VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <TextBlock Text="Освободить" VerticalAlignment="Center"/>
+                                    <TextBox Width="56" Text="{Binding FreeUpGbText, Mode=TwoWay}"
+                                             VerticalAlignment="Center" HorizontalContentAlignment="Center"/>
+                                    <TextBlock Text="ГБ" VerticalAlignment="Center"/>
+                                    <Button Classes="ghost" Command="{Binding FreeUpSelectCommand}" Content="Подобрать"
+                                            ToolTip.Tip="Отметить самые ёмкие проверенные дубликаты на нужный объём. Ничего не удаляется без подтверждения."/>
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                         <ScrollViewer Grid.Row="1">
                             <StackPanel>

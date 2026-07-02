@@ -51,18 +51,24 @@ public sealed class Database
     public void Initialize()
     {
         using var conn = Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = Schema.Sql;
-        cmd.ExecuteNonQuery();
 
-        // Миграции для уже существующих баз: добавляем колонку только если её ещё нет.
+        // Миграции — ДО основной схемы. Schema.Sql создаёт индексы по колонкам, которые на СТАРОЙ
+        // базе появляются только миграцией (idx_groups_session_type → scan_session_id): прежний
+        // порядок ронял CREATE INDEX ещё до миграций, и приложение после обновления версии падало
+        // на старте (найдено пробой композиции на реальной пользовательской БД, 2026-07-02).
+        // На свежей БД таблиц ещё нет — миграция пропускается, колонки создаст CREATE TABLE.
         foreach (var (table, column, ddl) in Schema.ColumnMigrations)
         {
+            if (!TableExists(conn, table)) continue;
             if (ColumnExists(conn, table, column)) continue;
             using var m = conn.CreateCommand();
             m.CommandText = ddl;
             m.ExecuteNonQuery();
         }
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = Schema.Sql;
+        cmd.ExecuteNonQuery();
 
         // Носители: устранить дубли по серийнику и навесить UNIQUE-индекс,
         // чтобы гонка при параллельной синхронизации больше не плодила копии одного диска.
@@ -139,6 +145,14 @@ public sealed class Database
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type='index' AND name=$n LIMIT 1";
         cmd.Parameters.AddWithValue("$n", indexName);
+        return cmd.ExecuteScalar() is not null;
+    }
+
+    private static bool TableExists(SqliteConnection conn, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$t LIMIT 1";
+        cmd.Parameters.AddWithValue("$t", table);
         return cmd.ExecuteScalar() is not null;
     }
 

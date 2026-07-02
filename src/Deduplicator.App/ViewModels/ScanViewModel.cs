@@ -56,6 +56,7 @@ public partial class ScanViewModel : PageViewModel
     [ObservableProperty] private bool _hasResults;
     [ObservableProperty] private bool _isFailed;
     [ObservableProperty] private string? _failText;
+    [ObservableProperty] private bool _isCancelled; // must №6: отмена — явное состояние с карточкой
 
     /// <summary>Подпись кнопки-переключателя выбора носителей (меняется по состоянию).</summary>
     public string SelectAllLabel =>
@@ -310,6 +311,7 @@ public partial class ScanViewModel : PageViewModel
 
         IsFailed = false;
         FailText = null;
+        IsCancelled = false;
         var s = _settings.Current;
         var options = new ScanOptions
         {
@@ -378,6 +380,8 @@ public partial class ScanViewModel : PageViewModel
             if (IsFailed)
                 FailText = string.IsNullOrWhiteSpace(_scan.Progress.Message)
                     ? Strings.ScanFailed : _scan.Progress.Message;
+            // UI-аудит (must №6): отмена — не молчаливое исчезновение прогресса, а явное состояние.
+            IsCancelled = _scan.Progress.Stage == ScanStage.Cancelled;
             StartCommand.NotifyCanExecuteChanged();
         }
     }

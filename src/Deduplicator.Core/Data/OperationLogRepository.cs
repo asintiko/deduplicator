@@ -9,6 +9,23 @@ public sealed class OperationLogRepository
     private readonly Database _db;
     public OperationLogRepository(Database db) => _db = db;
 
+    /// <summary>
+    /// Сколько байт освобождено программой за всё время (перемещено в корзину/карантин и не
+    /// восстановлено). «Вы освободили N ГБ» на Главной — этап 1.10 дорожной карты.
+    /// </summary>
+    public long GetTotalFreedBytes()
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT COALESCE(SUM(size_bytes), 0) FROM operations_log
+            WHERE op_type IN ($rec, $quar) AND restored = 0
+            """;
+        cmd.Add("$rec", Mappers.OpTypeToDb(Models.OperationType.DeleteToRecycle));
+        cmd.Add("$quar", Mappers.OpTypeToDb(Models.OperationType.MoveToQuarantine));
+        return (long)cmd.ExecuteScalar()!;
+    }
+
     public long Insert(OperationLogEntry e)
     {
         using var conn = _db.Open();

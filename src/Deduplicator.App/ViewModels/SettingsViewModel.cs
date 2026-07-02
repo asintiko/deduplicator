@@ -41,6 +41,7 @@ public partial class SettingsViewModel : PageViewModel
     [ObservableProperty] private double _imageThreshold;
     [ObservableProperty] private double _audioThreshold;
     [ObservableProperty] private bool _useRecycleBin;
+    [ObservableProperty] private bool _ecoMode; // 2.9: тихий фоновый режим для слабых машин
     [ObservableProperty] private int _maxParallelism;
     [ObservableProperty] private bool _computePixelHash;
     [ObservableProperty] private RuleOption? _selectedRule;
@@ -98,6 +99,7 @@ public partial class SettingsViewModel : PageViewModel
         ImageThreshold = s.DefaultImageThreshold;
         AudioThreshold = s.DefaultAudioThreshold;
         UseRecycleBin = s.UseRecycleBin;
+        EcoMode = s.EcoMode;
         MaxParallelism = s.MaxParallelism;
         ComputePixelHash = s.ComputePixelHash;
         SelectedRule = Rules.FirstOrDefault(r => r.Value == s.DefaultRepresentativeRule) ?? Rules[0];
@@ -248,6 +250,7 @@ public partial class SettingsViewModel : PageViewModel
             // Поля, которых НЕТ на этом экране, обязаны переноситься из текущих настроек —
             // иначе «Сохранить» молча стирает выбор пользователя, сделанный в другом месте
             // (терялись категории с экрана сканирования — аудит 2026-07-02).
+            EcoMode = EcoMode,
             OnboardingCompleted = _settings.Current.OnboardingCompleted,
             IncludedCategories = _settings.Current.IncludedCategories.ToList()
         };

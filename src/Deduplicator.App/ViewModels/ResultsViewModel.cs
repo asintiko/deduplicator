@@ -34,6 +34,7 @@ public partial class ResultsViewModel : PageViewModel
     private readonly FileRepository _files;
     private readonly AppPaths _paths;
     private readonly ScanSessionRepository _sessions;
+    private readonly NavigationService _nav;
 
     public override string Title => Strings.ResultsTitle;
 
@@ -97,12 +98,20 @@ public partial class ResultsViewModel : PageViewModel
     [ObservableProperty] private string? _operationErrorText;
     [ObservableProperty] private string? _operationSuccessText;
 
+    // UI-аудит 2026-07-02 (must №3): постоянная сводка «Отмечено: N файлов · X ГБ» + снятие отметок.
+    [ObservableProperty] private string? _markedSummaryText;
+
+    // «Освободить N ГБ» (этап 1.9): жадный подбор проверенных групп под целевой объём.
+    [ObservableProperty] private string _freeUpGbText = "5";
+
     public string ManualHint => Strings.SimilarManualHint;
 
     public ResultsViewModel(GroupRepository groups, IVolumeService volumes, IImageMatchService thumbs,
         IFileOpsService fileOps, IHashService hash, ISettingsService settings, IBatchRenameService rename,
-        FileRepository files, AppPaths paths, ScanSessionRepository sessions, IResultDistributionService distribute)
+        FileRepository files, AppPaths paths, ScanSessionRepository sessions, IResultDistributionService distribute,
+        NavigationService nav)
     {
+        _nav = nav;
         _groups = groups;
         _volumes = volumes;
         _thumbs = thumbs;
@@ -198,6 +207,7 @@ public partial class ResultsViewModel : PageViewModel
             else if (SelectedTab == 2) EnsureAudioBuilt();
 
             DeleteSelectedCommand.NotifyCanExecuteChanged();
+            UpdateMarkedSummary();
         }
         finally
         {
@@ -425,7 +435,13 @@ public partial class ResultsViewModel : PageViewModel
         var similarWarn = SelectedTab != 0
             ? "\n\n⚠ Это ПОХОЖИЕ, а не одинаковые файлы. Удаляйте только после ручной проверки."
             : "";
-        DeleteConfirmText = $"{Strings.ConfirmDeleteBody}\n\nБудет перемещено в Корзину: {count}.{extra}{similarWarn}";
+        // Честные тексты (UI-аудит must №2): пользователь карантина не должен читать «в Корзину».
+        string dest = _settings.Current.UseRecycleBin
+            ? "в Корзину Windows"
+            : "в карантин программы (вернуть можно через раздел «История»)";
+        UpdateMarkedSummary();
+        var volume = MarkedSummaryText is null ? "" : $"\n{MarkedSummaryText}.";
+        DeleteConfirmText = $"{Strings.ConfirmDeleteBody}\n\nБудет перемещено {dest}: {count}.{volume}{extra}{similarWarn}";
         ShowDeleteConfirm = true;
     }
 
@@ -438,6 +454,7 @@ public partial class ResultsViewModel : PageViewModel
         // Похожие вкладки строим ЛЕНИВО — миниатюры декодируются только при открытии вкладки.
         if (value == 1) EnsureImageBuilt();
         else if (value == 2) EnsureAudioBuilt();
+        UpdateMarkedSummary();
     }
 
     private void OnGroupPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -447,7 +464,75 @@ public partial class ResultsViewModel : PageViewModel
             DeleteSelectedCommand.NotifyCanExecuteChanged();
             RenameSelectedCommand.NotifyCanExecuteChanged();
             DistributeSelectedCommand.NotifyCanExecuteChanged();
+            UpdateMarkedSummary();
         }
+    }
+
+    /// <summary>«Отмечено: N файлов · X ГБ» — объём выбранного всегда на виду (и в диалоге).</summary>
+    private void UpdateMarkedSummary()
+    {
+        int n = 0;
+        long bytes = 0;
+        foreach (var g in CurrentGroups())
+            foreach (var f in g.MarkedFiles) { n++; bytes += f.Model.Size; }
+        MarkedSummaryText = n == 0
+            ? null
+            : $"Отмечено: {Format.Count(n, "файл", "файла", "файлов")} · {Format.Bytes(bytes)}";
+    }
+
+    [RelayCommand]
+    private void ClearAllMarks()
+    {
+        foreach (var g in CurrentGroups())
+            foreach (var f in g.Files)
+                f.IsMarked = false;
+        UpdateMarkedSummary();
+    }
+
+    [RelayCommand]
+    private void OpenJournal() => _nav.To<JournalViewModel>();
+
+    /// <summary>
+    /// Жадный подбор под цель «освободить N ГБ»: только сверенные байт-в-байт группы (Confidence 1.0),
+    /// самые ёмкие первыми; эталон в каждой группе остаётся. Это лишь ПРЕДВЫБОР — удаление идёт через
+    /// обычный диалог подтверждения и RevalidateBeforeDelete.
+    /// </summary>
+    [RelayCommand]
+    private void FreeUpSelect()
+    {
+        if (!double.TryParse(FreeUpGbText.Replace(',', '.'),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var gb) || gb <= 0)
+        {
+            OperationErrorText = "Укажите, сколько гигабайт нужно освободить (например 5).";
+            return;
+        }
+        long target = (long)(gb * 1024 * 1024 * 1024);
+
+        SelectedTab = 0;
+        EnsureAllExactBuilt();
+        foreach (var g in ExactGroups)
+            foreach (var f in g.Files) f.IsMarked = false;
+
+        long acc = 0;
+        foreach (var g in ExactGroups
+                     .Where(g => g.Model.Confidence >= 1.0)
+                     .OrderByDescending(g => g.Model.ReclaimableBytes))
+        {
+            if (acc >= target) break;
+            foreach (var f in g.Files)
+            {
+                if (f.IsRepresentative || f.IsProtected || !f.CanMark) continue;
+                f.IsMarked = true;
+                acc += f.Model.Size;
+            }
+        }
+
+        UpdateMarkedSummary();
+        OperationErrorText = null;
+        OperationSuccessText = acc > 0
+            ? $"Подобрано дубликатов на {Format.Bytes(acc)}. Проверьте список и нажмите кнопку удаления."
+            : "Проверенных дубликатов для освобождения не нашлось — запустите поиск.";
     }
 
     [RelayCommand]
@@ -486,16 +571,19 @@ public partial class ResultsViewModel : PageViewModel
             }
         });
 
+        string destDone = useRecycle ? "в Корзину" : "в карантин";
         if (blocked > 0 || failed > 0)
         {
-            var msg = $"Перемещено в Корзину: {moved}.";
+            var msg = $"Перемещено {destDone}: {moved}.";
             if (blocked > 0)
                 msg += $" Файлы изменились после проверки и не были тронуты — запустите проверку этой папки заново: {blocked}.";
             if (failed > 0) msg += $" Не удалось переместить: {failed}.";
             OperationErrorText = msg;
         }
         else if (moved > 0)
-            OperationSuccessText = $"Перемещено в Корзину: {moved}.";
+            OperationSuccessText = useRecycle
+                ? $"Перемещено в Корзину: {moved}. Восстановить можно из Корзины Windows."
+                : $"Перемещено в карантин: {moved}. Отменить можно в разделе «История».";
 
         await LoadAsync();
     }

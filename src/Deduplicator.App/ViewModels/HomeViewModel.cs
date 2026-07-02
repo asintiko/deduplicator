@@ -23,6 +23,7 @@ public partial class HomeViewModel : PageViewModel
     private readonly NavigationService _nav;
     private readonly IVolumeService _volumes;
     private readonly IStatisticsService _statistics;
+    private readonly Deduplicator.Core.Data.OperationLogRepository _opLog;
 
     public override string Title => "Главная";
 
@@ -38,13 +39,16 @@ public partial class HomeViewModel : PageViewModel
     [ObservableProperty] private string _duplicateGroupsText = "0";
     [ObservableProperty] private string _reclaimableText = "0 Б";
     [ObservableProperty] private string _lastSnapshotText = "Снимков пока нет";
+    [ObservableProperty] private string _freedTotalText = "";
     [ObservableProperty] private string _noDisksText = "";
 
-    public HomeViewModel(NavigationService nav, IVolumeService volumes, IStatisticsService statistics)
+    public HomeViewModel(NavigationService nav, IVolumeService volumes, IStatisticsService statistics,
+        Deduplicator.Core.Data.OperationLogRepository opLog)
     {
         _nav = nav;
         _volumes = volumes;
         _statistics = statistics;
+        _opLog = opLog;
     }
 
     public override void OnNavigatedTo() => _ = RefreshAsync();
@@ -59,8 +63,11 @@ public partial class HomeViewModel : PageViewModel
             {
                 var catalog = _volumes.SyncAndGetCatalog();
                 var stats = _statistics.Compute();
+                long freed = 0;
+                try { freed = _opLog.GetTotalFreedBytes(); } catch { }
                 return new
                 {
+                    Freed = freed,
                     Catalog = catalog,
                     Stats = stats,
                     Connected = catalog.Count(v => v.IsConnected),
@@ -80,6 +87,10 @@ public partial class HomeViewModel : PageViewModel
             LastSnapshotText = summary.LastScan == default
                 ? "Снимков пока нет"
                 : $"Последний снимок: {Format.DateShort(summary.LastScan)}";
+            // 1.10: «до/после» — сколько места программа реально освободила за всё время.
+            FreedTotalText = summary.Freed > 0
+                ? $"Освобождено с помощью программы: {Format.Bytes(summary.Freed)}"
+                : "";
 
             StatusTitle = BuildStatusTitle(summary.Connected, summary.Stats);
             StatusText = BuildStatusText(summary.Connected, summary.Stats);

@@ -169,10 +169,35 @@
             <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
             <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
         </Style>
+        <!-- UI-аудит must №8: единый источник цвета контента цветных кнопок. Вложенные TextBlock/PathIcon
+             не наследуют Foreground кнопки — раньше это давало тёмный текст на синем и требовало
+             ~15 ручных Foreground="White" по вьюхам; тёмная тема ломала половину из них. -->
+        <Style Selector="Button.primary TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
+        </Style>
+        <Style Selector="Button.primary PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
+        </Style>
+        <Style Selector="Button.primary:pressed /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+        </Style>
         <Style Selector="Button.danger">
             <Setter Property="Background" Value="{DynamicResource DangerBrush}" />
             <Setter Property="Foreground" Value="#FFFFFF" />
             <Setter Property="BorderThickness" Value="0" />
+        </Style>
+        <Style Selector="Button.danger TextBlock">
+            <Setter Property="Foreground" Value="#FFFFFF" />
+        </Style>
+        <Style Selector="Button.danger PathIcon">
+            <Setter Property="Foreground" Value="#FFFFFF" />
+        </Style>
+        <!-- «Красные» кнопки не сереют при наведении/нажатии (дефолтный Fluent перекрашивал фон) -->
+        <Style Selector="Button.danger:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource DangerBrush}" />
+        </Style>
+        <Style Selector="Button.danger:pressed /template/ ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource DangerBrush}" />
         </Style>
         <Style Selector="Button.ghost">
             <Setter Property="Background" Value="Transparent" />

@@ -180,6 +180,10 @@
                                 <StackPanel>
                                     <TextBlock Text="Последние диски" FontSize="19" FontWeight="SemiBold"/>
                                     <TextBlock Text="{Binding LastSnapshotText}" Classes="caption" Margin="0,3,0,0"/>
+                                    <!-- Этап 1.10: «вы освободили N ГБ» — накопленный результат работы программы -->
+                                    <TextBlock Text="{Binding FreedTotalText}" Classes="caption" Margin="0,3,0,0"
+                                               Foreground="{DynamicResource SuccessBrush}"
+                                               IsVisible="{Binding FreedTotalText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                                 </StackPanel>
                                 <Button Grid.Column="1" Classes="ghost homeSmall" Command="{Binding OpenSavedFilesCommand}"
                                         ToolTip.Tip="Открыть сохранённый список файлов">

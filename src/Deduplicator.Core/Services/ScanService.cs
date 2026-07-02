@@ -143,6 +143,24 @@ public sealed class ScanService : IScanService, IDisposable
         // для перф-работ и диагностика поведения на слабых ПК.
         using var telemetry = new ResourceTelemetry("скан");
 
+        // 2.9: режим «Эко» — пониженный приоритет процесса + чтение содержимого в один поток;
+        // скан перестаёт душить 2-ядерный ноутбук. Приоритет ГАРАНТИРОВАННО восстанавливается в
+        // finally. PROCESS_MODE_BACKGROUND сознательно не используем: он режет и рабочий сет.
+        bool eco = _settings.Current.EcoMode;
+        System.Diagnostics.ProcessPriorityClass? savedPriority = null;
+        if (eco)
+        {
+            try
+            {
+                using var proc = System.Diagnostics.Process.GetCurrentProcess();
+                savedPriority = proc.PriorityClass;
+                proc.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal;
+                AppLog.Write("Режим «Эко»: приоритет BelowNormal, чтение в один поток.");
+            }
+            catch (Exception ex) { AppLog.Error("EcoPriority", ex); }
+        }
+        int effectiveParallelism = eco ? 1 : Math.Max(1, options.Parallelism);
+
         try
         {
             sessionId = _sessions.Create(JsonSerializer.Serialize(options));
@@ -186,7 +204,7 @@ public sealed class ScanService : IScanService, IDisposable
                 InScope = inScope,
                 ReadPlans = _readPlans,
                 MaxVolumeParallelism = _maxVolumeParallelism,
-                RequestedParallelism = Math.Max(1, options.Parallelism),
+                RequestedParallelism = effectiveParallelism,
                 Rule = _representativeRule,
                 SessionId = sessionId
             };
@@ -281,6 +299,12 @@ public sealed class ScanService : IScanService, IDisposable
 
             // Отдать последнее накопленное состояние и закрыть троттлинг до сброса флагов,
             // чтобы UI получил финальные счётчики, а поздних событий после завершения не было.
+            if (savedPriority is { } sp)
+            {
+                try { using var proc = System.Diagnostics.Process.GetCurrentProcess(); proc.PriorityClass = sp; }
+                catch { /* приоритет вернётся с завершением процесса */ }
+            }
+
             _coalescer?.Flush();
             _coalescer?.Dispose();
             _coalescer = null;
@@ -684,6 +708,17 @@ public sealed class ScanService : IScanService, IDisposable
     private void ComputeImagePerceptual(Dictionary<long, string> mountById, ScanScope scanScope,
         CancellationToken ct, long sessionId)
     {
+        // 2.3: байт-идентичные копии не декодируем повторно — pHash/pixel-hash переносится
+        // SQL-запросом с любого файла с тем же full_hash (прошлые сканы, другая копия).
+        // Библиотека с 50% точных копий проходит перцептив ~2x быстрее без чтения диска.
+        try
+        {
+            int propagated = _files.PropagatePerceptualByFullHash(FileCategory.Image);
+            if (propagated > 0)
+                AppLog.Write($"Похожие фото: признаков перенесено с байт-идентичных копий: {propagated} (без декодирования).");
+        }
+        catch (Exception ex) { AppLog.Error("PropagatePerceptual(Image)", ex); }
+
         long total = _files.CountNeedingPerceptual(FileCategory.Image, sessionId);
         if (total == 0) return; // нет работы — не мигаем этапом «Анализ похожих»
         SetStage(ScanStage.Perceptual, sessionId);
@@ -732,6 +767,15 @@ public sealed class ScanService : IScanService, IDisposable
     private void ComputeAudioPerceptual(Dictionary<long, string> mountById, ScanScope scanScope,
         CancellationToken ct, long sessionId)
     {
+        // 2.3: отпечаток переносится с байт-идентичной копии — fpcalc не запускается повторно.
+        try
+        {
+            int propagated = _files.PropagatePerceptualByFullHash(FileCategory.Audio);
+            if (propagated > 0)
+                AppLog.Write($"Похожая музыка: отпечатков перенесено с байт-идентичных копий: {propagated}.");
+        }
+        catch (Exception ex) { AppLog.Error("PropagatePerceptual(Audio)", ex); }
+
         long total = _files.CountNeedingPerceptual(FileCategory.Audio, sessionId);
         if (total == 0) return; // нет работы — не мигаем этапом «Анализ похожих»
         SetStage(ScanStage.Perceptual, sessionId);
@@ -945,7 +989,8 @@ public sealed class ScanService : IScanService, IDisposable
         // NFR-7: план чтения на каждый том. HDD/съёмные — последовательно, SSD/NVMe — параллельно.
         // Раньше один HDD среди целей делал весь скан однопоточным и убивал SSD/NVMe.
         _readPlans = VolumeReadPlanner.Build(
-            targets.Select(t => t.VolumeId), byId, Math.Max(1, options.Parallelism));
+            targets.Select(t => t.VolumeId), byId,
+            _settings.Current.EcoMode ? 1 : Math.Max(1, options.Parallelism));
         _maxVolumeParallelism = Math.Max(1, _readPlans.Count);
         foreach (var p in _readPlans.Values)
             AppLog.Write($"План чтения тома «{p.Label}»: {(p.PreferSequential ? "последовательно" : "параллельно")}, " +
