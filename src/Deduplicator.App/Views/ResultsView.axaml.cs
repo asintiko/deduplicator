@@ -1,24 +1,78 @@
+using System.ComponentModel;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Deduplicator.App.ViewModels;
+using Deduplicator.App.ViewModels.Items;
 
 namespace Deduplicator.App.Views;
 
 public partial class ResultsView : UserControl
 {
+    private ResultsViewModel? _vm;
+
     public ResultsView()
     {
         AvaloniaXamlLoader.Load(this);
+        // Клавиши просмотрщика (←/→/Esc) ловим ТУННЕЛЕМ на корне вьюхи: KeyBinding на UserControl
+        // не срабатывает без фокуса внутри него, а bubbling могли бы съесть вложенные контролы.
+        AddHandler(KeyDownEvent, OnViewerKeyDown, RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) =>
         {
-            if (DataContext is ResultsViewModel vm)
+            if (_vm is not null) _vm.PropertyChanged -= OnVmPropertyChanged;
+            _vm = DataContext as ResultsViewModel;
+            if (_vm is not null)
             {
-                vm.PickSaveFile = PickSaveFileAsync;
-                vm.PickDestinationFolder = PickFolderAsync;
+                _vm.PickSaveFile = PickSaveFileAsync;
+                _vm.PickDestinationFolder = PickFolderAsync;
+                _vm.PropertyChanged += OnVmPropertyChanged;
             }
         };
+    }
+
+    /// <summary>
+    /// При открытии просмотрщика переносим фокус на его оверлей: иначе KeyDown маршрутизируется
+    /// от элемента, имевшего фокус ДО открытия (он может быть вне этой вьюхи — например, после
+    /// двойного клика по плитке фокус вообще не менялся), и стрелки/Esc не доходили бы до нас.
+    /// </summary>
+    private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ResultsViewModel.ShowViewer) && _vm?.ShowViewer == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Border>("ViewerOverlay")?.Focus());
+    }
+
+    /// <summary>
+    /// UI-аудит must №5: двойной клик по плитке файла открывает просмотрщик сравнения
+    /// (паттерн ExplorerView.OnNodeDoubleTapped). Двойные клики по чекбоксу отметки и кнопкам
+    /// плитки игнорируем — у них своё действие, случайное открытие только мешало бы.
+    /// </summary>
+    private void OnTileDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (DataContext is not ResultsViewModel vm) return;
+        if (sender is not Control c || c.DataContext is not FileItemViewModel file) return;
+        if (e.Source is Visual v &&
+            (v.FindAncestorOfType<CheckBox>(includeSelf: true) is not null ||
+             v.FindAncestorOfType<Button>(includeSelf: true) is not null)) return;
+        vm.OpenViewerCommand.Execute(file);
+        e.Handled = true;
+    }
+
+    /// <summary>Клавиатура просмотрщика: ←/→ — листание не-эталонных файлов, Esc — закрыть.</summary>
+    private void OnViewerKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (_vm is not { ShowViewer: true } vm) return;
+        switch (e.Key)
+        {
+            case Key.Left: vm.ViewerPrevCommand.Execute(null); e.Handled = true; break;
+            case Key.Right: vm.ViewerNextCommand.Execute(null); e.Handled = true; break;
+            case Key.Escape: vm.CloseViewerCommand.Execute(null); e.Handled = true; break;
+        }
     }
 
     private async Task<string?> PickFolderAsync()

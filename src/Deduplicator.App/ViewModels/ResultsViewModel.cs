@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -203,6 +204,7 @@ public partial class ResultsViewModel : PageViewModel
         ShowHardlinkConfirm = false;
         _renamePlanField = null;
         _hardlinkGroup = null;
+        CloseViewer(); // просмотрщик держит полноразмерные Bitmap-ы — освобождаем при уходе
     }
 
     [RelayCommand]
@@ -211,6 +213,9 @@ public partial class ResultsViewModel : PageViewModel
         IsBusy = true;
         BusyStatus = Strings.Loading;
         _isLoading = true;
+        // Просмотрщик ссылается на VM файлов, которые ниже будут выброшены (Dispose миниатюр,
+        // очистка коллекций) — закрываем и освобождаем его Bitmap-ы ДО перезагрузки.
+        CloseViewer();
         try
         {
             _referenceFolders = _settings.Current.ReferenceFolders
@@ -1145,5 +1150,135 @@ public partial class ResultsViewModel : PageViewModel
                 _fileOps.ReplaceWithHardLink(f.Model, f.FullPath!, rep.FullPath!, group.Model.Id);
         });
         await LoadAsync();
+    }
+
+    // --- UI-аудит must №5: просмотрщик сравнения (текущий файл слева, эталон закреплён справа) ---
+    // Работает для всех вкладок (точные/похожие) и в предпросмотре (просмотр безопасен; отметка,
+    // как и везде, подчиняется CanMark). Не-изображения показываются иконкой категории + метаданными.
+    [ObservableProperty] private bool _showViewer;
+    [ObservableProperty] private FileItemViewModel? _viewerLeft;
+    [ObservableProperty] private FileItemViewModel? _viewerRight;
+    [ObservableProperty] private Bitmap? _viewerLeftImage;
+    [ObservableProperty] private Bitmap? _viewerRightImage;
+    [ObservableProperty] private string _viewerCounterText = "";
+    [ObservableProperty] private string _viewerLeftResolution = "—";
+    [ObservableProperty] private string _viewerRightResolution = "—";
+    [ObservableProperty] private bool _viewerCanPrev;
+    [ObservableProperty] private bool _viewerCanNext;
+
+    /// <summary>Слева листаются НЕ-эталонные файлы группы; эталон закреплён справа.</summary>
+    private List<FileItemViewModel> _viewerFiles = new();
+    private int _viewerIndex;
+    // Поколения фоновых загрузок (свои на каждую сторону): при быстром листании/закрытии
+    // «долетевший» Bitmap устаревшего запроса не публикуется, а сразу освобождается.
+    private int _viewerLeftGen, _viewerRightGen;
+
+    /// <summary>
+    /// Предел декодирования полноразмерного показа по большей стороне: 24 МП целиком в память
+    /// не тянем (паттерн B5), а больше ~1600 px на экране всё равно не видно.
+    /// </summary>
+    private const int ViewerDecodeSize = 1600;
+
+    [RelayCommand]
+    private void OpenViewer(FileItemViewModel? file)
+    {
+        if (file is null) return;
+        // Группу ищем в ВИДИМОЙ коллекции текущей вкладки — плитка, по которой кликнули, там есть.
+        var group = CurrentGroups().FirstOrDefault(g => g.Files.Contains(file));
+        if (group is null) return;
+
+        // Эталон всегда СПРАВА (стабильная точка сравнения); слева — остальные файлы группы.
+        // Клик по самому эталону открывает сравнение с первым не-эталонным файлом.
+        var right = group.Files.FirstOrDefault(f => f.IsRepresentative) ?? group.Files[0];
+        var others = group.Files.Where(f => !ReferenceEquals(f, right)).ToList();
+        if (others.Count == 0) others.Add(right); // защита: группа из одного файла (не должно быть)
+
+        _viewerFiles = others;
+        ViewerRight = right;
+        _ = LoadViewerSideAsync(right, isLeft: false);
+        SetViewerLeft(others.IndexOf(file)); // -1 (кликнули эталон) кламп даст 0
+        ShowViewer = true;
+    }
+
+    /// <summary>Переключить левую сторону на файл с индексом <paramref name="index"/> (с клампом).</summary>
+    private void SetViewerLeft(int index)
+    {
+        _viewerIndex = Math.Clamp(index, 0, _viewerFiles.Count - 1);
+        var left = _viewerFiles[_viewerIndex];
+        ViewerLeft = left;
+        ViewerCounterText = $"{_viewerIndex + 1} {Strings.Of} {_viewerFiles.Count}";
+        ViewerCanPrev = _viewerIndex > 0;
+        ViewerCanNext = _viewerIndex < _viewerFiles.Count - 1;
+        _ = LoadViewerSideAsync(left, isLeft: true);
+    }
+
+    [RelayCommand]
+    private void ViewerPrev() { if (ShowViewer && ViewerCanPrev) SetViewerLeft(_viewerIndex - 1); }
+
+    [RelayCommand]
+    private void ViewerNext() { if (ShowViewer && ViewerCanNext) SetViewerLeft(_viewerIndex + 1); }
+
+    [RelayCommand]
+    private void CloseViewer()
+    {
+        ShowViewer = false;
+        // Гонка с фоновым декодированием: поднимаем поколения, чтобы «в полёте» загрузки не публиковались.
+        _viewerLeftGen++; _viewerRightGen++;
+        _viewerFiles = new List<FileItemViewModel>();
+        ViewerLeft = null; ViewerRight = null;
+        var l = ViewerLeftImage; ViewerLeftImage = null; l?.Dispose();
+        var r = ViewerRightImage; ViewerRightImage = null; r?.Dispose();
+        ViewerLeftResolution = "—"; ViewerRightResolution = "—";
+    }
+
+    /// <summary>
+    /// Фоновая загрузка одной стороны: честное разрешение через Image.Identify (пиксели не
+    /// декодируются) + ужатый Bitmap для показа. Кэшируем только текущую пару: старый Bitmap
+    /// стороны освобождается сразу (паттерн DisposeThumbnail, B5). Отсутствующий/облачный/битый
+    /// файл и не-изображения → null-Bitmap, view покажет иконку категории.
+    /// </summary>
+    private async Task LoadViewerSideAsync(FileItemViewModel file, bool isLeft)
+    {
+        int gen = isLeft ? ++_viewerLeftGen : ++_viewerRightGen;
+
+        if (isLeft) { var old = ViewerLeftImage; ViewerLeftImage = null; old?.Dispose(); ViewerLeftResolution = "—"; }
+        else { var old = ViewerRightImage; ViewerRightImage = null; old?.Dispose(); ViewerRightResolution = "—"; }
+
+        string? path = file.FullPath;
+        bool isImage = file.Model.Category == FileCategory.Image;
+
+        var (bmp, resolution) = await Task.Run(() =>
+        {
+            Bitmap? b = null;
+            string res = "—";
+            try
+            {
+                // Облачный плейсхолдер не открываем: чтение заставило бы OneDrive скачивать файл (B4).
+                if (path is null || CloudFiles.IsPlaceholderPath(path) || !File.Exists(LongPath.Fix(path)))
+                    return (b, res);
+                if (!isImage) return (b, res); // документы/музыка: иконка категории + метаданные
+
+                var dims = _thumbs.GetDimensions(path);
+                if (dims is { } d0) res = $"{d0.Width}×{d0.Height}";
+
+                using var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                // Крупные фото декодируем сразу в ужатый размер по большей стороне; мелкие — как есть
+                // (DecodeToWidth иначе РАСТЯНУЛ бы их, впустую раздув память).
+                b = dims is { } d && Math.Max(d.Width, d.Height) > ViewerDecodeSize
+                    ? (d.Width >= d.Height
+                        ? Bitmap.DecodeToWidth(fs, ViewerDecodeSize)
+                        : Bitmap.DecodeToHeight(fs, ViewerDecodeSize))
+                    : new Bitmap(fs);
+            }
+            catch { b?.Dispose(); b = null; } // битый/недоступный файл → плейсхолдер-иконка
+            return (b, res);
+        });
+
+        // Пока декодировали, пользователь мог перелистнуть или закрыть просмотрщик.
+        bool stale = isLeft ? gen != _viewerLeftGen : gen != _viewerRightGen;
+        if (stale || !ShowViewer) { bmp?.Dispose(); return; }
+        if (isLeft) { ViewerLeftImage = bmp; ViewerLeftResolution = resolution; }
+        else { ViewerRightImage = bmp; ViewerRightResolution = resolution; }
     }
 }

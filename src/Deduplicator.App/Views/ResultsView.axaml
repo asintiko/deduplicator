@@ -6,10 +6,13 @@
 
     <UserControl.Resources>
         <!-- ===== Плитка файла ===== -->
+        <!-- UI-аудит must №5: двойной клик по плитке открывает просмотрщик сравнения
+             (обработчик в code-behind, паттерн ExplorerView; чекбокс и кнопки не задеваются). -->
         <DataTemplate x:Key="FileTile">
             <Border Width="194" Margin="6" CornerRadius="10" ClipToBounds="True"
                     BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1"
-                    Background="{DynamicResource SurfaceAlt}">
+                    Background="{DynamicResource SurfaceAlt}"
+                    DoubleTapped="OnTileDoubleTapped">
                 <StackPanel>
                     <Panel Height="130" Background="{DynamicResource HoverBackground}">
                         <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
@@ -43,6 +46,14 @@
                             </Border>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Spacing="6">
+                            <!-- UI-аудит must №5: кнопка-лупа — просмотр и сравнение с эталоном
+                                 (дублирует двойной клик по плитке; работает и для офлайн-файлов). -->
+                            <Button Classes="ghost" Padding="3"
+                                    Command="{Binding $parent[UserControl].DataContext.OpenViewerCommand}"
+                                    CommandParameter="{Binding}"
+                                    ToolTip.Tip="Просмотреть и сравнить с эталоном (или двойной клик по плитке)">
+                                <PathIcon Data="{StaticResource IconSearch}" Width="13" Height="13"/>
+                            </Button>
                             <Button Classes="ghost" Padding="3" IsEnabled="{Binding IsAvailable}"
                                     Command="{Binding $parent[UserControl].DataContext.OpenContainingCommand}"
                                     CommandParameter="{Binding}" ToolTip.Tip="{x:Static loc:Strings.OpenFolder}">
@@ -101,6 +112,16 @@
             </Border>
         </DataTemplate>
     </UserControl.Resources>
+
+    <UserControl.Styles>
+        <!-- Половина просмотрщика: рамка эталона подсвечивается зелёным (класс вешает binding). -->
+        <Style Selector="Border.viewerPane">
+            <Setter Property="BorderBrush" Value="#33FFFFFF"/>
+        </Style>
+        <Style Selector="Border.viewerPane.etalon">
+            <Setter Property="BorderBrush" Value="{DynamicResource SuccessBrush}"/>
+        </Style>
+    </UserControl.Styles>
 
     <Grid Margin="28,24">
         <Grid RowDefinitions="Auto,Auto,*">
@@ -407,6 +428,148 @@
                     </StackPanel>
                 </StackPanel>
             </Border>
+        </Border>
+
+        <!-- ===== UI-аудит must №5: просмотрщик сравнения — текущий файл слева, эталон справа =====
+             Управление: ←/→ листают не-эталонные файлы, Esc закрывает (KeyDown в code-behind,
+             фокус переносится на оверлей при открытии). Фон всегда тёмный, поэтому цвета текста
+             здесь заданы явно, а не через тему. -->
+        <Border x:Name="ViewerOverlay" IsVisible="{Binding ShowViewer}" Background="#E6000000" Focusable="True">
+            <Grid RowDefinitions="Auto,*,Auto" Margin="28,16,28,20">
+                <!-- Шапка: счётчик по центру, закрытие справа -->
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto,*">
+                    <TextBlock Grid.Column="1" Text="{Binding ViewerCounterText}" Foreground="White"
+                               FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <Button Grid.Column="2" Classes="ghost" HorizontalAlignment="Right"
+                            Command="{Binding CloseViewerCommand}" ToolTip.Tip="Закрыть (Esc)">
+                        <PathIcon Data="{StaticResource IconClose}" Foreground="White" Width="16" Height="16"/>
+                    </Button>
+                </Grid>
+
+                <Grid Grid.Row="1" ColumnDefinitions="*,Auto,*" Margin="0,12,0,14">
+                    <!-- Левая половина: текущий (листаемый) файл -->
+                    <Grid Grid.Column="0" RowDefinitions="*,Auto">
+                        <Border Grid.Row="0" Classes="viewerPane" CornerRadius="10" ClipToBounds="True"
+                                BorderThickness="2"
+                                Classes.etalon="{Binding ViewerLeft.IsRepresentative, FallbackValue=False}">
+                            <Panel>
+                                <Image Source="{Binding ViewerLeftImage}" Stretch="Uniform" Margin="6"/>
+                                <!-- Не-изображение / офлайн / битый файл — крупная иконка категории -->
+                                <PathIcon Data="{Binding ViewerLeft.CategoryIcon}" Width="72" Height="72"
+                                          Foreground="#66FFFFFF"
+                                          IsVisible="{Binding ViewerLeftImage, Converter={x:Static ObjectConverters.IsNull}}"/>
+                            </Panel>
+                        </Border>
+                        <StackPanel Grid.Row="1" Margin="2,10,2,0" Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding ViewerLeft.Name}" Foreground="White" FontWeight="SemiBold"
+                                           FontSize="15" TextTrimming="CharacterEllipsis"/>
+                                <Border IsVisible="{Binding ViewerLeft.IsRepresentative, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentBrush}"
+                                        VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <PathIcon Data="{StaticResource IconStar}" Width="11" Height="11" Foreground="White"/>
+                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border IsVisible="{Binding ViewerLeft.ShowSimilarity, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
+                                        VerticalAlignment="Center">
+                                    <TextBlock FontSize="11" Foreground="{DynamicResource AccentBrush}">
+                                        <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ViewerLeft.SimilarityText}"/>
+                                    </TextBlock>
+                                </Border>
+                            </StackPanel>
+                            <TextBlock Text="{Binding ViewerLeft.DisplayPath}" Foreground="#B0FFFFFF" FontSize="12"
+                                       TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding ViewerLeft.DisplayPath}"/>
+                            <StackPanel Orientation="Horizontal" Spacing="14">
+                                <TextBlock Text="{Binding ViewerLeft.SizeText}" Foreground="#B0FFFFFF" FontSize="12"/>
+                                <TextBlock Foreground="#B0FFFFFF" FontSize="12">
+                                    <Run Text="{x:Static loc:Strings.ColumnModified}"/><Run Text=": "/><Run Text="{Binding ViewerLeft.ModifiedText}"/>
+                                </TextBlock>
+                                <TextBlock Text="{Binding ViewerLeftResolution}" Foreground="#B0FFFFFF" FontSize="12"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Вертикальный разделитель -->
+                    <Border Grid.Column="1" Width="1" Background="#33FFFFFF" Margin="16,0"/>
+
+                    <!-- Правая половина: эталон группы (закреплён) -->
+                    <Grid Grid.Column="2" RowDefinitions="*,Auto">
+                        <Border Grid.Row="0" Classes="viewerPane" CornerRadius="10" ClipToBounds="True"
+                                BorderThickness="2"
+                                Classes.etalon="{Binding ViewerRight.IsRepresentative, FallbackValue=False}">
+                            <Panel>
+                                <Image Source="{Binding ViewerRightImage}" Stretch="Uniform" Margin="6"/>
+                                <PathIcon Data="{Binding ViewerRight.CategoryIcon}" Width="72" Height="72"
+                                          Foreground="#66FFFFFF"
+                                          IsVisible="{Binding ViewerRightImage, Converter={x:Static ObjectConverters.IsNull}}"/>
+                            </Panel>
+                        </Border>
+                        <StackPanel Grid.Row="1" Margin="2,10,2,0" Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding ViewerRight.Name}" Foreground="White" FontWeight="SemiBold"
+                                           FontSize="15" TextTrimming="CharacterEllipsis"/>
+                                <Border IsVisible="{Binding ViewerRight.IsRepresentative, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentBrush}"
+                                        VerticalAlignment="Center" ToolTip.Tip="{Binding ViewerRight.RepresentativeReason}">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <PathIcon Data="{StaticResource IconStar}" Width="11" Height="11" Foreground="White"/>
+                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border IsVisible="{Binding ViewerRight.ShowSimilarity, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
+                                        VerticalAlignment="Center">
+                                    <TextBlock FontSize="11" Foreground="{DynamicResource AccentBrush}">
+                                        <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ViewerRight.SimilarityText}"/>
+                                    </TextBlock>
+                                </Border>
+                            </StackPanel>
+                            <TextBlock Text="{Binding ViewerRight.DisplayPath}" Foreground="#B0FFFFFF" FontSize="12"
+                                       TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding ViewerRight.DisplayPath}"/>
+                            <StackPanel Orientation="Horizontal" Spacing="14">
+                                <TextBlock Text="{Binding ViewerRight.SizeText}" Foreground="#B0FFFFFF" FontSize="12"/>
+                                <TextBlock Foreground="#B0FFFFFF" FontSize="12">
+                                    <Run Text="{x:Static loc:Strings.ColumnModified}"/><Run Text=": "/><Run Text="{Binding ViewerRight.ModifiedText}"/>
+                                </TextBlock>
+                                <TextBlock Text="{Binding ViewerRightResolution}" Foreground="#B0FFFFFF" FontSize="12"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+
+                <!-- Нижняя панель: листание слева, действия над текущим файлом справа -->
+                <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto">
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6">
+                        <Button Classes="ghost" Command="{Binding ViewerPrevCommand}" IsEnabled="{Binding ViewerCanPrev}"
+                                ToolTip.Tip="Предыдущий файл (←)">
+                            <PathIcon Data="{StaticResource IconChevronLeft}" Foreground="White"/>
+                        </Button>
+                        <Button Classes="ghost" Command="{Binding ViewerNextCommand}" IsEnabled="{Binding ViewerCanNext}"
+                                ToolTip.Tip="Следующий файл (→)">
+                            <PathIcon Data="{StaticResource IconChevronRight}" Foreground="White"/>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                        <!-- Отметка подчиняется CanMark: похожие — вручную, защищённые/офлайн — нельзя -->
+                        <CheckBox IsChecked="{Binding ViewerLeft.IsMarked, Mode=TwoWay, FallbackValue=False}"
+                                  IsEnabled="{Binding ViewerLeft.CanMark, FallbackValue=False}"
+                                  ToolTip.Tip="{x:Static loc:Strings.MarkForDeletion}">
+                            <TextBlock Text="Убрать этот файл" Foreground="White"/>
+                        </CheckBox>
+                        <Button Classes="ghost" IsEnabled="{Binding ViewerLeft.IsAvailable, FallbackValue=False}"
+                                Command="{Binding OpenContainingCommand}" CommandParameter="{Binding ViewerLeft}"
+                                ToolTip.Tip="{x:Static loc:Strings.OpenFolder}">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <PathIcon Data="{StaticResource IconFolder}" Foreground="White" Width="14" Height="14"/>
+                                <TextBlock Text="{x:Static loc:Strings.OpenFolder}" Foreground="White"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Grid>
         </Border>
     </Grid>
 </UserControl>

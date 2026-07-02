@@ -76,6 +76,9 @@ public partial class FileItemViewModel : ObservableObject
     public string ModifiedText => Format.DateShort(Model.Mtime);
     public bool IsAvailable => FullPath is not null;
 
+    /// <summary>Путь для просмотрщика сравнения: полный, а для офлайн-тома — метка тома + относительный.</summary>
+    public string DisplayPath => FullPath ?? $"{VolumeText} · {RelPath}";
+
     public Geometry? CategoryIcon => Converters.Converters.CategoryGeometry.Convert(
         Model.Category, typeof(Geometry), null, System.Globalization.CultureInfo.CurrentCulture) as Geometry;
 

@@ -29,6 +29,13 @@ public interface IImageMatchService
 
     /// <summary>Сгенерировать (если нужно) миниатюру и вернуть путь к кэшированному файлу.</summary>
     string? EnsureThumbnail(string fullPath, string cacheKey, int maxSize = 256);
+
+    /// <summary>
+    /// Размеры изображения в пикселях БЕЗ декодирования (Image.Identify читает только заголовок).
+    /// Нужно просмотрщику сравнения: показ идёт по ужатой копии, а честное разрешение — отсюда.
+    /// null — файл не изображение, битый или недоступен (в т.ч. облачный плейсхолдер, B4).
+    /// </summary>
+    (int Width, int Height)? GetDimensions(string fullPath);
 }
 
 /// <summary>pHash, pixel-hash и миниатюры на ImageSharp (полностью управляемый код).</summary>
@@ -208,6 +215,18 @@ public sealed class ImageMatchService : IImageMatchService
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             return null;
         }
+    }
+
+    public (int Width, int Height)? GetDimensions(string fullPath)
+    {
+        if (CloudFiles.IsPlaceholderPath(fullPath)) return null; // не скачиваем из облака (B4)
+        try
+        {
+            using var fs = OpenRead(fullPath);
+            var info = Image.Identify(fs); // только метаданные, пиксели не декодируются
+            return (info.Width, info.Height);
+        }
+        catch { return null; } // не изображение/битый файл — разрешение просто не показываем
     }
 
     /// <summary>
