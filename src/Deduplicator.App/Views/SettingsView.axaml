@@ -45,6 +45,10 @@
                     <CheckBox IsChecked="{Binding EcoMode, Mode=TwoWay}"
                               Content="Режим «Эко»: не мешать другой работе"
                               ToolTip.Tip="Проверка идёт медленнее, но компьютер остаётся отзывчивым: пониженный приоритет и чтение в один поток"/>
+                    <!-- 3.4: переносимый кэш проверки на съёмных носителях (.dedupindex) -->
+                    <CheckBox IsChecked="{Binding PortableIndexEnabled, Mode=TwoWay}"
+                              Content="Сохранять кэш проверки на съёмных носителях (ускоряет проверку на других компьютерах)"
+                              ToolTip.Tip="После проверки флешки или внешнего диска в его корне остаётся скрытый файл .dedupindex: другой компьютер с этим приложением не пересчитывает хэши заново. Перед удалением файлы всё равно перепроверяются побайтово"/>
                     <CheckBox IsChecked="{Binding ComputePixelHash, Mode=TwoWay}"
                               Content="{x:Static loc:Strings.SetPixelHash}"
                               ToolTip.Tip="Включайте, если важнее точность, чем скорость"/>

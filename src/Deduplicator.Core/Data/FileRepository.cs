@@ -163,6 +163,40 @@ public sealed class FileRepository
         return list;
     }
 
+    // 3.4: строки «с хоть одним хэшем/признаком» — кандидаты на выгрузку в переносимый кэш.
+    private const string AnyHashCondition =
+        "(f.partial_hash IS NOT NULL OR f.full_hash IS NOT NULL OR f.phash IS NOT NULL " +
+        "OR f.pixel_hash IS NOT NULL OR f.audio_fp IS NOT NULL)";
+
+    /// <summary>3.4: сколько строк тома имеют хоть один хэш (для капа экспорта .dedupindex).</summary>
+    public long CountHashedByVolume(long volumeId)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT COUNT(*) FROM files f WHERE f.volume_id=$v AND {AnyHashCondition}";
+        cmd.Add("$v", volumeId);
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// 3.4: страница строк тома с хоть одним хэшем (keyset по id, паттерн GetNeedingPerceptualPage) —
+    /// потоковая выгрузка в переносимый кэш без материализации всего тома в памяти.
+    /// </summary>
+    public List<FileRecord> GetHashedByVolumePage(long volumeId, long afterId, int limit)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.volume_id=$v AND f.id>$a AND {AnyHashCondition} " +
+                          "ORDER BY f.id LIMIT $lim";
+        cmd.Add("$v", volumeId);
+        cmd.Add("$a", afterId);
+        cmd.Add("$lim", limit);
+        using var r = cmd.ExecuteReader();
+        var list = new List<FileRecord>();
+        while (r.Read()) list.Add(Map(r));
+        return list;
+    }
+
     // --- P1.2: область скана (scan_scope_files) ---
 
     /// <summary>Старт приложения: чистим ВСЕ области сканов. Они нужны только во время активного

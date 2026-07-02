@@ -66,6 +66,8 @@ public sealed class ScanService : IScanService, IDisposable
     private readonly Fde.FastFileLister _fastLister;
     // Движок точных дубликатов v2 (потоковая воронка вместо старого HashFunnel с N+1 по размеру).
     private readonly IExactDuplicateEngine _exactEngine;
+    // 3.4: переносимый кэш проверки на съёмных носителях (.dedupindex).
+    private readonly IPortableIndexService _portableIndex;
 
     private RepresentativeRule _representativeRule;
     private bool _computePixelHash;
@@ -138,6 +140,8 @@ public sealed class ScanService : IScanService, IDisposable
         // Зависим от абстракции IExactDuplicateEngine; конкретику собираем из уже внедрённых
         // репозиториев/хэшера/группировщика, чтобы не менять сигнатуру конструктора и все вызовы.
         _exactEngine = new ExactDuplicateEngineV2(files, hash, grouper);
+        // 3.4: тот же приём — сервис переносимого кэша собирается из уже внедрённых репозиториев.
+        _portableIndex = new PortableIndexService(volumes, files);
     }
 
     public ScanSession? GetResumableSession() => _sessions.GetUnfinished();
@@ -300,6 +304,10 @@ public sealed class ScanService : IScanService, IDisposable
             SetStage(ScanStage.Completed, sessionId);
             _sessions.Finish(sessionId, ScanStage.Completed);
             succeeded = true;
+
+            // 3.4: после УСПЕШНОГО скана выгружаем переносимый кэш на съёмные носители — другой
+            // компьютер с этим приложением прочитает его и не будет пересчитывать хэши.
+            ExportPortableIndexes(targets, volumesById, mountById);
         }
         catch (OperationCanceledException)
         {
@@ -400,6 +408,23 @@ public sealed class ScanService : IScanService, IDisposable
         };
     }
 
+    /// <summary>
+    /// 3.4: выгрузка переносимого кэша (.dedupindex) на СЪЁМНЫЕ тома текущего скана. Вызывается
+    /// только после успешного завершения; TryExport полностью guarded (readonly-носитель, нет прав,
+    /// антивирус, нет места → лог + false), поэтому сбой экспорта не влияет на результат скана.
+    /// </summary>
+    private void ExportPortableIndexes(List<ScanTarget> targets,
+        Dictionary<long, VolumeRecord> volumesById, Dictionary<long, string> mountById)
+    {
+        if (!_settings.Current.PortableIndexEnabled) return;
+        foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
+        {
+            if (!volumesById.TryGetValue(vid, out var vol) || !vol.IsRemovable) continue;
+            if (!mountById.TryGetValue(vid, out var mountRoot)) continue;
+            _portableIndex.TryExport(vid, mountRoot);
+        }
+    }
+
     /// <summary>Подчистка групп. partialOnly=true — только текущая сессия; иначе — прошлые сессии.
     /// Обёрнуто в try/catch, чтобы сбой подчистки не маскировал исходную ошибку скана.</summary>
     private void CleanupSessionGroups(long sessionId, bool partialOnly)
@@ -458,9 +483,18 @@ public sealed class ScanService : IScanService, IDisposable
                 TryApplyUsnDelta(volumeId, mountRoot, deltaPlan, sessionId, ct))
                 continue;
 
+            // 3.4: переносимый кэш проверки (.dedupindex) в корне носителя — заполнен этим
+            // приложением на ДРУГОМ компьютере. Чистый кэш хэшей второго уровня: применяется
+            // ТОЛЬКО к файлам, которых нет в нашей БД по строгой сверке (FlushLookup ниже), любое
+            // расхождение игнорируется. Только при Incremental: явный полный пересбор обязан
+            // пересчитывать хэши, а не брать их из кэша (та же семантика, что у реиспользования БД).
+            PortableIndexCache? portable = null;
+            if (_options.Incremental && _settings.Current.PortableIndexEnabled)
+                portable = _portableIndex.TryImport(volumeId, mountRoot);
+
             // Пер-томовое состояние индексирования (meta-пачки, пакетный lookup 2.7, seen) —
             // общий код обработки одного файла для перечисления и дельта-реконсайла.
-            var indexer = new VolumeIndexer(this, volumeId, mountRoot, sessionId);
+            var indexer = new VolumeIndexer(this, volumeId, mountRoot, sessionId, portable);
             bool wholeVolume = false;
             int enumErrors = 0;   // ошибки перечисления этого тома (недоступные поддеревья, отказ корня)
             long cloudSkipped = 0; // пропущено облачных/reparse-элементов (OneDrive-плейсхолдеры, симлинки)
@@ -507,6 +541,11 @@ public sealed class ScanService : IScanService, IDisposable
 
             indexer.FlushAll(); // хвост meta-пачки и буфера инкрементальных кандидатов (2.7)
             var seen = indexer.Seen;
+
+            // 3.4: пользователю видно, что скан ускорен кэшем с носителя (и сколько записей он дал).
+            if (indexer.PortableReused > 0)
+                NoteEnumerationNotice(
+                    $"Найден кэш проверки на носителе: переиспользовано записей: {indexer.PortableReused:N0}");
 
             if (Interlocked.Read(ref cloudSkipped) > 0)
                 NoteEnumerationNotice(
@@ -566,6 +605,8 @@ public sealed class ScanService : IScanService, IDisposable
         private readonly long _volumeId;
         private readonly string _mountRoot;
         private readonly long _sessionId;
+        // 3.4: проверенный переносимый кэш носителя (null — файла нет/не подошёл/выключен).
+        private readonly PortableIndexCache? _portable;
         private readonly List<FileRecord> _batch = new(MetaBatch);
         // 2.7: вместо загрузки ВСЕГО индекса тома в словарь (250–500 МБ на 1–2 млн файлов) —
         // пакетный lookup: кандидаты копятся в буфер, и одним SELECT ... rel_path IN (...) на
@@ -575,12 +616,17 @@ public sealed class ScanService : IScanService, IDisposable
         /// <summary>Id встреченных строк (заполняется на флашах) — для прунинга и области скана.</summary>
         public HashSet<long> Seen { get; } = new();
 
-        public VolumeIndexer(ScanService s, long volumeId, string mountRoot, long sessionId)
+        /// <summary>3.4: сколько строк получили хэши из переносимого кэша носителя (для уведомления).</summary>
+        public long PortableReused { get; private set; }
+
+        public VolumeIndexer(ScanService s, long volumeId, string mountRoot, long sessionId,
+            PortableIndexCache? portable = null)
         {
             _s = s;
             _volumeId = volumeId;
             _mountRoot = mountRoot;
             _sessionId = sessionId;
+            _portable = portable;
         }
 
         /// <summary>
@@ -594,6 +640,11 @@ public sealed class ScanService : IScanService, IDisposable
             // В USN-режиме движок выдаёт плоский список всего тома — $Recycle.Bin и т.п. отсекаем тут.
             var relForSkip = Path.GetRelativePath(_mountRoot, ef.FullPath);
             if (IsUnderSystemFolder(relForSkip)) return false;
+            // 3.4: сам файл переносимого кэша (и его temp при прерванной записи) — служебный,
+            // в индекс не попадает независимо от настройки «скрытые/системные».
+            if (relForSkip.Equals(PortableIndexService.FileName, StringComparison.OrdinalIgnoreCase) ||
+                relForSkip.Equals(PortableIndexService.FileName + SafeIo.TempSuffix, StringComparison.OrdinalIgnoreCase))
+                return false;
             if (_s.SkipFileByAttrs(ef.Attributes, ef.Size, ef.FullPath)) return false;
 
             var fi = new FileEntry(ef.FullPath, ef.Size,
@@ -683,13 +734,28 @@ public sealed class ScanService : IScanService, IDisposable
             foreach (var (record, fullPath) in _lookupBuffer)
             {
                 if (existingByPath.TryGetValue(record.RelPath, out var existing) &&
-                    existing.Size == record.Size &&
-                    existing.Mtime == record.Mtime &&
-                    (existing.Created == default || existing.Created == record.Created))
+                    MetaMatchesStrict(existing.Size, existing.Mtime, existing.Created, record,
+                        allowMissingCreated: true))
                 {
                     Seen.Add(existing.Id);
                     _s.Report(p => p.FilesSeen++);
                     continue; // оставляем существующую запись с её хэшами
+                }
+
+                // 3.4: файла нет в НАШЕЙ БД (или метаданные разошлись) — второй уровень lookup:
+                // переносимый кэш носителя. Та же строгая тройная сверка, но БЕЗ послабления на
+                // пустой created (кэш пишет created всегда). Совпало — строка идёт в обычный
+                // UpsertMetaBatch-поток уже С хэшами из кэша (verified_full_hash там всё равно
+                // NULL); разошлось — обычное полное индексирование без хэшей.
+                if (_portable is not null &&
+                    _portable.ByRelPath.TryGetValue(record.RelPath, out var cached) &&
+                    MetaMatchesStrict(cached.Size,
+                        new DateTimeOffset(cached.MtimeTicksUtc, TimeSpan.Zero),
+                        new DateTimeOffset(cached.CreatedTicksUtc, TimeSpan.Zero),
+                        record, allowMissingCreated: false))
+                {
+                    PortableIndexService.ApplyEntry(record, cached, _portable.Header);
+                    PortableReused++;
                 }
 
                 _batch.Add(record);
@@ -698,6 +764,17 @@ public sealed class ScanService : IScanService, IDisposable
             }
             _lookupBuffer.Clear();
         }
+
+        /// <summary>
+        /// Строгая тройная сверка метаданных size+mtime+created (раздел P0: без допуска ±2с) —
+        /// единый критерий реиспользования для строк нашей БД и записей переносимого кэша (3.4).
+        /// allowMissingCreated=true — послабление ТОЛЬКО для строк БД до миграции «created»
+        /// (значение не сохранялось): сверяем size+mtime, чтобы не гнать одноразовый перехэш базы.
+        /// </summary>
+        private static bool MetaMatchesStrict(long size, DateTimeOffset mtime, DateTimeOffset created,
+            FileRecord record, bool allowMissingCreated)
+            => size == record.Size && mtime == record.Mtime &&
+               ((allowMissingCreated && created == default) || created == record.Created);
     }
 
     /// <summary>Совпадает ли корень сканирования с корнем тома (полное сканирование тома).</summary>
