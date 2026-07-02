@@ -67,6 +67,20 @@ public static class Strings
     public const string ExplorerIndexed = "Сохранённый список файлов (диск отключён)";
     public const string ExplorerNeedScan = "Носитель отключён и ещё не сканировался — сохранённых данных нет.";
     public const string SelectVolume = "Выберите диск";
+
+    // Проводник: панель содержимого, виды и операции (ночь-2)
+    public const string ExplorerViewIcons = "Крупные значки";
+    public const string ExplorerViewList = "Список";
+    public const string ExplorerViewColumns = "Столбцы";
+    public const string ExplorerCopyTo = "Копировать на…";
+    public const string ExplorerMoveTo = "Переместить на…";
+    public const string ExplorerVolumeOffline = "Диск не подключён — операции с файлами недоступны";
+    public const string ExplorerEmptyFolder = "Папка пуста";
+    public const string ExplorerOpenFile = "Открыть";
+    public const string ExplorerPickDestination = "Куда положить файлы";
+    public const string ExplorerCancelAfterFile = "Останавливаем после текущего файла…";
+    public const string ExplorerMoveWarning = "Файлы будут удалены с исходного диска только после успешного копирования и проверки.";
+    public const string ExplorerRescanHint = "Файлы на проверенном диске изменились. Запустите проверку, чтобы обновить сохранённый список файлов.";
     public const string ColumnName = "Имя";
     public const string ColumnSize = "Размер";
     public const string ColumnModified = "Изменён";

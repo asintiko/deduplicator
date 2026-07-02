@@ -86,4 +86,10 @@ public sealed class AppSettings
 
     /// <summary>Папки, за которыми следит сторожевой режим (с подпапками).</summary>
     public List<string> SentinelFolders { get; set; } = new();
+
+    /// <summary>
+    /// Вид правой панели проводника (ночь-2): "icons" — крупные значки, "list" — список,
+    /// "columns" — столбцы (как в Finder). Незнакомое значение трактуется как "list".
+    /// </summary>
+    public string ExplorerViewMode { get; set; } = "list";
 }

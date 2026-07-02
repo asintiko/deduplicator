@@ -88,6 +88,7 @@ public static class Composition
         services.AddSingleton<IBatchRenameService>(sp => new BatchRenameService(
             System.IO.Path.Combine(sp.GetRequiredService<AppPaths>().RootDir, "recovery"))); // P0-B + журнал B1
         services.AddSingleton<IResultDistributionService, ResultDistributionService>(); // P0-D
+        services.AddSingleton<IFileTransferService, FileTransferService>(); // ночь-2: перенос/копирование в проводнике
         services.AddSingleton<IStatisticsService, StatisticsService>();
         services.AddSingleton<IDiskHealthService, DiskHealthService>();
         services.AddSingleton<IJunkScanService, JunkScanService>();
