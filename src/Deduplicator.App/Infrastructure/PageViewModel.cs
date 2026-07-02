@@ -12,4 +12,15 @@ public abstract partial class PageViewModel : ObservableObject
 
     /// <summary>Вызывается при уходе со страницы — место для очистки незавершённых диалогов/операций.</summary>
     public virtual void OnNavigatedFrom() { }
+
+    // UI-аудит 2026-07-02 (must №7): единый модальный слой. Пока у активной страницы открыт
+    // любой диалог-оверлей, MainWindow затемняет и блокирует сайдбар, а Esc закрывает диалог.
+    // Страницы с диалогами переопределяют оба члена и извещают об изменении HasOpenDialog
+    // из partial-методов OnShow*Changed.
+
+    /// <summary>Истина, когда на странице открыт какой-либо диалог-оверлей.</summary>
+    public virtual bool HasOpenDialog => false;
+
+    /// <summary>Закрыть верхний открытый диалог (реакция на Esc). Подтверждать по Enter нельзя.</summary>
+    public virtual void CloseDialog() { }
 }

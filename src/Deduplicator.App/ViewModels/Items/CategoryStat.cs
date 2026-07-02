@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Media;
 using Deduplicator.App.Infrastructure;
 using Deduplicator.App.Localization;
@@ -18,12 +19,23 @@ public sealed class CategoryStat
     public string BytesText => Format.Bytes(Bytes);
     public double BarWidth => System.Math.Max(2, Fraction * 280);
 
-    public IBrush Color => Category switch
+    // UI-аудит must №9: цвета диаграммы из ресурсов темы (раньше — хардкоды светлой палитры).
+    // Строки пересоздаются при загрузке статистики — смена темы подхватывается при навигации.
+    public IBrush Color => ResourceBrush(Category switch
     {
-        FileCategory.Image => new SolidColorBrush(Avalonia.Media.Color.Parse("#007AFF")),
-        FileCategory.Audio => new SolidColorBrush(Avalonia.Media.Color.Parse("#34C759")),
-        FileCategory.Video => new SolidColorBrush(Avalonia.Media.Color.Parse("#FF9500")),
-        FileCategory.Document => new SolidColorBrush(Avalonia.Media.Color.Parse("#AF52DE")),
-        _ => new SolidColorBrush(Avalonia.Media.Color.Parse("#8E8E93"))
-    };
+        FileCategory.Image => "AccentBrush",
+        FileCategory.Audio => "SuccessBrush",
+        FileCategory.Video => "WarningBrush",
+        FileCategory.Document => "PurpleBrush",
+        _ => "TextTertiary"
+    }, "#8E8E93");
+
+    private static IBrush ResourceBrush(string key, string fallback)
+    {
+        if (Application.Current is { } app &&
+            app.TryGetResource(key, app.ActualThemeVariant, out var value) &&
+            value is IBrush b)
+            return b;
+        return new SolidColorBrush(Avalonia.Media.Color.Parse(fallback));
+    }
 }

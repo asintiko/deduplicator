@@ -100,7 +100,7 @@
         </ScrollViewer>
 
         <!-- Подтверждение удаления носителя из каталога -->
-        <Border Grid.Row="0" Grid.RowSpan="2" IsVisible="{Binding ShowRemoveConfirm}" Background="#80000000"
+        <Border Grid.Row="0" Grid.RowSpan="2" IsVisible="{Binding ShowRemoveConfirm}" Background="{DynamicResource OverlayDim}"
                 Margin="-28,-24">
             <Border Classes="card" Width="430" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="16">

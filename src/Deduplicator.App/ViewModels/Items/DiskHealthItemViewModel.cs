@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Media;
 using Deduplicator.App.Infrastructure;
 using Deduplicator.App.Localization;
@@ -26,13 +27,25 @@ public sealed class DiskHealthItemViewModel
         _ => Strings.HealthUnknown
     };
 
-    public IBrush HealthBrush => new SolidColorBrush(Color.Parse(Model.Health switch
+    // UI-аудит must №9: статусные цвета берём из ресурсов темы (раньше — хардкоды светлой палитры).
+    // Карточки пересоздаются при заходе на экран, поэтому смена темы подхватывается при навигации
+    // (тот же компромисс, что у ResourceGeometry в ExplorerNode).
+    public IBrush HealthBrush => ResourceBrush(Model.Health switch
     {
-        DiskHealth.Healthy => "#34C759",
-        DiskHealth.Warning => "#FF9500",
-        DiskHealth.Unhealthy => "#FF3B30",
-        _ => "#8E8E93"
-    }));
+        DiskHealth.Healthy => "SuccessBrush",
+        DiskHealth.Warning => "WarningBrush",
+        DiskHealth.Unhealthy => "DangerBrush",
+        _ => "TextTertiary"
+    }, "#8E8E93");
+
+    private static IBrush ResourceBrush(string key, string fallback)
+    {
+        if (Application.Current is { } app &&
+            app.TryGetResource(key, app.ActualThemeVariant, out var value) &&
+            value is IBrush b)
+            return b;
+        return new SolidColorBrush(Color.Parse(fallback));
+    }
 
     public bool HasTemp => Model.TemperatureC is > 0;
     public string TempText => $"{Model.TemperatureC} °C";

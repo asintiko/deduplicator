@@ -97,6 +97,11 @@ public partial class VolumesViewModel : PageViewModel
     [RelayCommand]
     private void CancelRemove() { ShowRemoveConfirm = false; _pendingRemove = null; }
 
+    // UI-аудит must №7: единый модальный слой — затемнение сайдбара и Esc обслуживает MainWindow.
+    public override bool HasOpenDialog => ShowRemoveConfirm;
+    public override void CloseDialog() => CancelRemove();
+    partial void OnShowRemoveConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+
     [RelayCommand]
     private async Task ConfirmRemoveAsync()
     {

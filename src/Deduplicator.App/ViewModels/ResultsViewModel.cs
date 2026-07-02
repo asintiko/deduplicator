@@ -207,6 +207,29 @@ public partial class ResultsViewModel : PageViewModel
         CloseViewer(); // просмотрщик держит полноразмерные Bitmap-ы — освобождаем при уходе
     }
 
+    // --- UI-аудит must №7: единый модальный слой (затемнение сайдбара + Esc в MainWindow) ---
+    /// <summary>Просмотрщик тоже участвует: его Esc обрабатывается глобально (локальный хендлер
+    /// вьюхи оставляет себе только стрелки ←/→).</summary>
+    public override bool HasOpenDialog =>
+        ShowDeleteConfirm || ShowRenameDialog || ShowDistributeDialog || ShowHardlinkConfirm || ShowViewer;
+
+    /// <summary>Esc закрывает верхний диалог. Одновременно открыт максимум один (кнопки других
+    /// недоступны под оверлеем), порядок веток — на случай гонки состояний.</summary>
+    public override void CloseDialog()
+    {
+        if (ShowDeleteConfirm) CancelDelete();
+        else if (ShowRenameDialog) CancelRename();
+        else if (ShowDistributeDialog) CancelDistribute();
+        else if (ShowHardlinkConfirm) CancelHardlink();
+        else if (ShowViewer) CloseViewer();
+    }
+
+    partial void OnShowDeleteConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnShowRenameDialogChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnShowDistributeDialogChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnShowHardlinkConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnShowViewerChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+
     [RelayCommand]
     private async Task LoadAsync()
     {

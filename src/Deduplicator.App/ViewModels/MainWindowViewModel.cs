@@ -38,6 +38,11 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private bool _isOnboardingVisible;
     [ObservableProperty] private int _onboardingIndex;
 
+    // UI-аудит must №7: у активной страницы открыт диалог-оверлей → MainWindow затемняет и
+    // блокирует сайдбар (раньше диалог накрывал только область страницы, сайдбар оставался
+    // кликабельным), а Esc закрывает диалог через CloseCurrentDialog().
+    [ObservableProperty] private bool _isDialogOpen;
+
     private bool _suppress;
 
     public MainWindowViewModel(
@@ -139,12 +144,27 @@ public partial class MainWindowViewModel : ObservableObject
         var previous = CurrentPage;
         if (!ReferenceEquals(previous, page)) previous?.OnNavigatedFrom();
 
+        // must №7: следим за HasOpenDialog ТЕКУЩЕЙ страницы (отписка от прежней обязательна —
+        // иначе чужой диалог продолжал бы дёргать IsDialogOpen и копились бы подписки).
+        if (previous is not null) previous.PropertyChanged -= OnPageDialogChanged;
+        page.PropertyChanged += OnPageDialogChanged;
+
         _suppress = true;
         CurrentPage = page;
         SelectedNav = NavItems.FirstOrDefault(n => ReferenceEquals(n.Page, page));
         _suppress = false;
+        IsDialogOpen = page.HasOpenDialog;
         page.OnNavigatedTo();
     }
+
+    private void OnPageDialogChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(PageViewModel.HasOpenDialog))
+            IsDialogOpen = CurrentPage?.HasOpenDialog ?? false;
+    }
+
+    /// <summary>Esc из MainWindow: закрыть верхний диалог активной страницы.</summary>
+    public void CloseCurrentDialog() => CurrentPage?.CloseDialog();
 
     [RelayCommand]
     private void ShowOnboarding()

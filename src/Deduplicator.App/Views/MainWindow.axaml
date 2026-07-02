@@ -15,7 +15,9 @@
         <Border Grid.Column="0" Background="{DynamicResource SidebarBackground}"
                 BorderThickness="0,0,1,0"
                 BorderBrush="{DynamicResource SurfaceBorder}">
-            <DockPanel LastChildFill="True">
+            <!-- must №7: пока на странице открыт диалог, сайдбар выключен (IsEnabled глушит и
+                 клавиатуру), а подложка ниже затемняет его и глотает клики. -->
+            <DockPanel LastChildFill="True" IsEnabled="{Binding !IsDialogOpen}">
                 <!-- Логотип -->
                 <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="20,22,20,18" Spacing="12">
                     <Border Width="40" Height="40" CornerRadius="10" Background="{DynamicResource AccentBrush}">
@@ -56,6 +58,13 @@
                 </ListBox>
             </DockPanel>
         </Border>
+
+        <!-- ===== must №7: глобальная модальная подложка над САЙДБАРОМ =====
+             Диалог страница рисует сама поверх своего контента (правая колонка уже затемнена её
+             оверлеем); эта подложка закрывает только колонку навигации, чтобы модальность была
+             видна на всём окне и клики мимо диалога не переключали страницы. -->
+        <Border Grid.Column="0" Background="{DynamicResource OverlayDim}"
+                IsVisible="{Binding IsDialogOpen}"/>
 
         <!-- ===== Контент ===== -->
         <Border Grid.Column="1" Padding="0">

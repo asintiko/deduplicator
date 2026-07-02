@@ -737,6 +737,14 @@ public partial class ExplorerViewModel : PageViewModel
         _pendingDest = null;
     }
 
+    // UI-аудит must №7: единый модальный слой. Участвует ТОЛЬКО диалог подтверждения:
+    // диалог прогресса (IsTransferring) сознательно не блокирует сайдбар — уход со страницы
+    // во время переноса разрешён по дизайну (см. OnNavigatedFrom), а Esc не должен молча
+    // останавливать идущую операцию (для этого есть явная кнопка «Отмена»).
+    public override bool HasOpenDialog => ShowTransferConfirm;
+    public override void CloseDialog() { if (ShowTransferConfirm) CancelTransferDialog(); }
+    partial void OnShowTransferConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+
     [RelayCommand]
     private async Task ConfirmTransferAsync()
     {

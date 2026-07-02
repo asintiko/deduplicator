@@ -24,6 +24,12 @@ internal static class Program
             return;
         }
 
+        // Смоук-режим (DEDUP_SMOKE=1, см. MainWindow.RunSmokeAsync): Avalonia пишет предупреждения
+        // (в т.ч. binding-ошибки) через LogToTrace, но без слушателя в консоли их не видно —
+        // добавляем, чтобы критерий «0 binding-ошибок» был проверяемым по stdout.
+        if (Environment.GetEnvironmentVariable("DEDUP_SMOKE") == "1")
+            System.Diagnostics.Trace.Listeners.Add(new System.Diagnostics.ConsoleTraceListener());
+
         try
         {
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);

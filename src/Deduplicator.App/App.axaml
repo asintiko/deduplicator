@@ -29,6 +29,19 @@
                     <SolidColorBrush x:Key="DangerBrush" Color="#FF3B30" />
                     <SolidColorBrush x:Key="SuccessBrush" Color="#34C759" />
                     <SolidColorBrush x:Key="WarningBrush" Color="#FF9500" />
+                    <!-- UI-аудит must №9: мягкие статусные подложки (баннеры/плашки) и фиолетовый
+                         акцент («Архив дисков», категория «Документы») — раньше хардкоды в вьюхах. -->
+                    <SolidColorBrush x:Key="DangerSoft" Color="#FBE9E7" />
+                    <SolidColorBrush x:Key="WarningSoft" Color="#FFF3E2" />
+                    <SolidColorBrush x:Key="SuccessSoft" Color="#EAF7ED" />
+                    <SolidColorBrush x:Key="IndigoBrush" Color="#5865D9" />
+                    <SolidColorBrush x:Key="IndigoSoft" Color="#EEF0FF" />
+                    <SolidColorBrush x:Key="PurpleBrush" Color="#AF52DE" />
+                    <!-- Затемнения диалогов/просмотрщика: полупрозрачный чёрный уместен в обеих
+                         темах, но живёт в ресурсах для единообразия (и №7: подложка сайдбара). -->
+                    <SolidColorBrush x:Key="OverlayDim" Color="#80000000" />
+                    <SolidColorBrush x:Key="OverlayDimLight" Color="#33000000" />
+                    <SolidColorBrush x:Key="OverlayDimStrong" Color="#E6000000" />
                 </ResourceDictionary>
                 <!-- ===== Тёмная тема ===== -->
                 <ResourceDictionary x:Key="Dark">
@@ -48,6 +61,16 @@
                     <SolidColorBrush x:Key="DangerBrush" Color="#FF453A" />
                     <SolidColorBrush x:Key="SuccessBrush" Color="#30D158" />
                     <SolidColorBrush x:Key="WarningBrush" Color="#FF9F0A" />
+                    <!-- must №9: тёмные приглушённые версии мягких подложек -->
+                    <SolidColorBrush x:Key="DangerSoft" Color="#3A1F1E" />
+                    <SolidColorBrush x:Key="WarningSoft" Color="#3A2D18" />
+                    <SolidColorBrush x:Key="SuccessSoft" Color="#1E3524" />
+                    <SolidColorBrush x:Key="IndigoBrush" Color="#7C86E8" />
+                    <SolidColorBrush x:Key="IndigoSoft" Color="#272A48" />
+                    <SolidColorBrush x:Key="PurpleBrush" Color="#BF5AF2" />
+                    <SolidColorBrush x:Key="OverlayDim" Color="#80000000" />
+                    <SolidColorBrush x:Key="OverlayDimLight" Color="#33000000" />
+                    <SolidColorBrush x:Key="OverlayDimStrong" Color="#E6000000" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 

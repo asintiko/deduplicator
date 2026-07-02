@@ -188,6 +188,11 @@ public partial class CleanupViewModel : PageViewModel
     /// поверх обновлённого списка с устаревшим текстом (аудит 2026-07-02).</summary>
     public override void OnNavigatedFrom() => ShowDeleteConfirm = false;
 
+    // UI-аудит must №7: единый модальный слой — затемнение сайдбара и Esc обслуживает MainWindow.
+    public override bool HasOpenDialog => ShowDeleteConfirm;
+    public override void CloseDialog() => CancelDelete();
+    partial void OnShowDeleteConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+
     [RelayCommand]
     private async Task ConfirmDeleteAsync()
     {

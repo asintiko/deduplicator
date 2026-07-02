@@ -20,8 +20,10 @@ public partial class ResultsView : UserControl
     public ResultsView()
     {
         AvaloniaXamlLoader.Load(this);
-        // Клавиши просмотрщика (←/→/Esc) ловим ТУННЕЛЕМ на корне вьюхи: KeyBinding на UserControl
+        // Клавиши просмотрщика (←/→) ловим ТУННЕЛЕМ на корне вьюхи: KeyBinding на UserControl
         // не срабатывает без фокуса внутри него, а bubbling могли бы съесть вложенные контролы.
+        // Esc здесь больше не обрабатываем — must №7: его глобально ловит MainWindow и зовёт
+        // CloseDialog() (просмотрщик входит в HasOpenDialog), иначе обработка задваивалась бы.
         AddHandler(KeyDownEvent, OnViewerKeyDown, RoutingStrategies.Tunnel);
         DataContextChanged += (_, _) =>
         {
@@ -45,6 +47,10 @@ public partial class ResultsView : UserControl
     {
         if (e.PropertyName == nameof(ResultsViewModel.ShowViewer) && _vm?.ShowViewer == true)
             Dispatcher.UIThread.Post(() => this.FindControl<Border>("ViewerOverlay")?.Focus());
+        // must №7в: danger-диалог удаления открылся — фокус на БЕЗОПАСНУЮ кнопку «Отмена»,
+        // чтобы случайный Enter не подтвердил удаление.
+        if (e.PropertyName == nameof(ResultsViewModel.ShowDeleteConfirm) && _vm?.ShowDeleteConfirm == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Button>("DeleteCancelButton")?.Focus());
     }
 
     /// <summary>
@@ -63,7 +69,8 @@ public partial class ResultsView : UserControl
         e.Handled = true;
     }
 
-    /// <summary>Клавиатура просмотрщика: ←/→ — листание не-эталонных файлов, Esc — закрыть.</summary>
+    /// <summary>Клавиатура просмотрщика: ←/→ — листание не-эталонных файлов
+    /// (Esc — глобально в MainWindow, см. комментарий в конструкторе).</summary>
     private void OnViewerKeyDown(object? sender, KeyEventArgs e)
     {
         if (_vm is not { ShowViewer: true } vm) return;
@@ -71,7 +78,6 @@ public partial class ResultsView : UserControl
         {
             case Key.Left: vm.ViewerPrevCommand.Execute(null); e.Handled = true; break;
             case Key.Right: vm.ViewerNextCommand.Execute(null); e.Handled = true; break;
-            case Key.Escape: vm.CloseViewerCommand.Execute(null); e.Handled = true; break;
         }
     }
 

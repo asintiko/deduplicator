@@ -174,7 +174,7 @@
                 <!-- 2.8: предпросмотр идущего скана — информационный (жёлтый) баннер без кнопки закрытия:
                      пока проверка не завершена, пользователь должен видеть, что результаты предварительные. -->
                 <Border IsVisible="{Binding PreviewBannerText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                        Background="#22FF9500" CornerRadius="8" Padding="14,10">
+                        Background="{DynamicResource WarningSoft}" CornerRadius="8" Padding="14,10">
                     <Grid ColumnDefinitions="Auto,*">
                         <PathIcon Data="{StaticResource IconWarning}" Width="16" Height="16" VerticalAlignment="Top"
                                   Margin="0,2,10,0" Foreground="{DynamicResource WarningBrush}"/>
@@ -183,7 +183,7 @@
                     </Grid>
                 </Border>
                 <Border IsVisible="{Binding OperationErrorText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                        Background="#22D9534F" CornerRadius="8" Padding="14,10">
+                        Background="{DynamicResource DangerSoft}" CornerRadius="8" Padding="14,10">
                     <Grid ColumnDefinitions="*,Auto">
                         <TextBlock Text="{Binding OperationErrorText}" TextWrapping="Wrap"
                                    Foreground="{DynamicResource DangerBrush}"/>
@@ -340,13 +340,14 @@
         </Grid>
 
         <!-- ===== Подтверждение удаления ===== -->
-        <Border IsVisible="{Binding ShowDeleteConfirm}" Background="#80000000">
+        <Border IsVisible="{Binding ShowDeleteConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
             <Border Classes="card" Width="440" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="16">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.ConfirmDeleteTitle}"/>
                     <TextBlock Text="{Binding DeleteConfirmText}" TextWrapping="Wrap" Classes="muted"/>
                     <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
-                        <Button Command="{Binding CancelDeleteCommand}">
+                        <!-- must №7в: автофокус на безопасную кнопку — ставит code-behind по имени -->
+                        <Button x:Name="DeleteCancelButton" Command="{Binding CancelDeleteCommand}">
                             <TextBlock Text="{x:Static loc:Strings.Cancel}"/>
                         </Button>
                         <Button Classes="danger" Command="{Binding ConfirmDeleteCommand}">
@@ -358,7 +359,7 @@
         </Border>
 
         <!-- ===== P0-B: Групповое переименование ===== -->
-        <Border IsVisible="{Binding ShowRenameDialog}" Background="#80000000">
+        <Border IsVisible="{Binding ShowRenameDialog}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
             <Border Classes="card" Width="520" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="14">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.RenameTitle}"/>
@@ -393,7 +394,7 @@
         </Border>
 
         <!-- ===== P1.6: Распределение результатов ===== -->
-        <Border IsVisible="{Binding ShowDistributeDialog}" Background="#80000000">
+        <Border IsVisible="{Binding ShowDistributeDialog}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
             <Border Classes="card" Width="560" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="14">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.DistributeTitle}"/>
@@ -420,7 +421,7 @@
         </Border>
 
         <!-- ===== Индикатор загрузки результатов ===== -->
-        <Border IsVisible="{Binding IsBusy}" Background="#33000000">
+        <Border IsVisible="{Binding IsBusy}" Background="{DynamicResource OverlayDimLight}" Margin="-28,-24">
             <Border Classes="card" Width="240" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="22">
                 <StackPanel Spacing="12" HorizontalAlignment="Center">
                     <ProgressBar IsIndeterminate="True" Width="180"/>
@@ -430,7 +431,7 @@
         </Border>
 
         <!-- ===== Подтверждение замены жёсткими ссылками ===== -->
-        <Border IsVisible="{Binding ShowHardlinkConfirm}" Background="#80000000">
+        <Border IsVisible="{Binding ShowHardlinkConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
             <Border Classes="card" Width="470" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="16">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.HardlinkTitle}"/>
@@ -447,7 +448,7 @@
              Управление: ←/→ листают не-эталонные файлы, Esc закрывает (KeyDown в code-behind,
              фокус переносится на оверлей при открытии). Фон всегда тёмный, поэтому цвета текста
              здесь заданы явно, а не через тему. -->
-        <Border x:Name="ViewerOverlay" IsVisible="{Binding ShowViewer}" Background="#E6000000" Focusable="True">
+        <Border x:Name="ViewerOverlay" IsVisible="{Binding ShowViewer}" Background="{DynamicResource OverlayDimStrong}" Focusable="True" Margin="-28,-24">
             <Grid RowDefinitions="Auto,*,Auto" Margin="28,16,28,20">
                 <!-- Шапка: счётчик по центру, закрытие справа -->
                 <Grid Grid.Row="0" ColumnDefinitions="*,Auto,*">

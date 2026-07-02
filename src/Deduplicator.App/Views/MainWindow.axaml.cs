@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Notifications;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -37,6 +39,10 @@ public partial class MainWindow : Window
         DataContextChanged += (_, _) => Attach();
         SizeChanged += (_, _) => { _lastRect = new(-1, -1, 0, 0); Schedule(); };
         LayoutUpdated += (_, _) => Schedule();
+        // must №7: глобальный Esc закрывает диалог активной страницы. Туннель (паттерн
+        // ResultsView) — иначе KeyDown не дошёл бы без фокуса внутри диалога. Enter глобальным
+        // подтверждением сознательно НЕ делаем: для danger-диалогов это опасно.
+        AddHandler(KeyDownEvent, OnGlobalKeyDown, RoutingStrategies.Tunnel);
 #if DEBUG
         this.AttachDevTools();
 #endif
@@ -64,6 +70,18 @@ public partial class MainWindow : Window
         // Самопроверка: при DEDUP_SMOKE=1 прогоняем навигацию по всем экранам и закрываемся.
         if (Environment.GetEnvironmentVariable("DEDUP_SMOKE") == "1")
             _ = RunSmokeAsync();
+    }
+
+    /// <summary>must №7: Esc закрывает верхний диалог активной страницы (включая просмотрщик
+    /// Результатов — его локальный хендлер оставил себе только стрелки).</summary>
+    private void OnGlobalKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        if (_vm?.CurrentPage is { HasOpenDialog: true } page)
+        {
+            page.CloseDialog();
+            e.Handled = true;
+        }
     }
 
     private void Attach()

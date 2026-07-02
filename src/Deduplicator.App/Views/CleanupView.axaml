@@ -103,13 +103,14 @@
         </Border>
 
         <!-- #16: подтверждение удаления (как в Результатах) -->
-        <Border Grid.Row="0" Grid.RowSpan="3" IsVisible="{Binding ShowDeleteConfirm}" Background="#80000000">
+        <Border Grid.Row="0" Grid.RowSpan="3" IsVisible="{Binding ShowDeleteConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
             <Border Classes="card" Width="440" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="16">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.ConfirmDeleteTitle}"/>
                     <TextBlock Text="{Binding DeleteConfirmText}" TextWrapping="Wrap" Classes="muted"/>
                     <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
-                        <Button Command="{Binding CancelDeleteCommand}">
+                        <!-- must №7в: автофокус на безопасную кнопку — ставит code-behind по имени -->
+                        <Button x:Name="DeleteCancelButton" Command="{Binding CancelDeleteCommand}">
                             <TextBlock Text="{x:Static loc:Strings.Cancel}"/>
                         </Button>
                         <Button Classes="danger" Command="{Binding ConfirmDeleteCommand}">
