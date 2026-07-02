@@ -25,7 +25,9 @@ public enum BackendFallbackReason
     VolumeNotReady,
     AccessDenied,
     UnsupportedUsnRecord,
-    ApiError
+    ApiError,
+    /// <summary>Прогноз: карта MFT не влезет в доступную память (миллионы записей при малом RAM).</summary>
+    LowMemory
 }
 
 public sealed record BackendDecision(
@@ -115,6 +117,9 @@ public static class BackendMessages
 
         BackendFallbackReason.AccessDenied =>
             $"{Vol(d)} — MFT недоступен: {d.TechnicalDetails}. Используется совместимый быстрый режим.",
+
+        BackendFallbackReason.LowMemory =>
+            $"{Vol(d)} — мало свободной памяти для турбо-режима (MFT): используется совместимый быстрый режим.",
 
         _ => $"{Vol(d)} — используется совместимый быстрый режим."
     };

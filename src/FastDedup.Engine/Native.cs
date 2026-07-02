@@ -31,6 +31,7 @@ internal static class Native
     public const uint FSCTL_ENUM_USN_DATA = 0x000900b3;
     public const uint FSCTL_QUERY_USN_JOURNAL = 0x000900f4;
     public const uint FSCTL_GET_RETRIEVAL_POINTERS = 0x00090073;
+    public const uint FSCTL_GET_NTFS_VOLUME_DATA = 0x00090064;
     public const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002d1400;
 
     // --- Win32 ошибки ---
@@ -194,6 +195,37 @@ internal static class Native
             if (inBuf != IntPtr.Zero) Marshal.FreeHGlobal(inBuf);
             if (outBuf != IntPtr.Zero) Marshal.FreeHGlobal(outBuf);
             handle?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Валидный размер $MFT тома (байты) через FSCTL_GET_NTFS_VOLUME_DATA — для прогноза памяти
+    /// MFT-режима ДО его чтения. NTFS_VOLUME_DATA_BUFFER: MftValidDataLength — LARGE_INTEGER по
+    /// смещению 56 (после 5×LARGE_INTEGER и 4×DWORD). Права администратора не нужны (хэндл с
+    /// нулевым доступом, как у defrag-API). null — при любой ошибке: оценка деградирует молча,
+    /// и решение о MFT принимается как раньше.
+    /// </summary>
+    public static long? TryGetMftValidDataLength(string drive) // "C:"
+    {
+        IntPtr buf = IntPtr.Zero;
+        try
+        {
+            using var h = OpenVolumeQuery(@"\\.\" + drive);
+            if (h.IsInvalid) return null;
+
+            const int Size = 96; // sizeof(NTFS_VOLUME_DATA_BUFFER)
+            buf = Marshal.AllocHGlobal(Size);
+            if (!DeviceIoControl(h, FSCTL_GET_NTFS_VOLUME_DATA, IntPtr.Zero, 0, buf, Size,
+                    out uint got, IntPtr.Zero) || got < 64)
+                return null;
+
+            long len = Marshal.ReadInt64(buf, 56);
+            return len > 0 ? len : null;
+        }
+        catch { return null; }
+        finally
+        {
+            if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
         }
     }
 

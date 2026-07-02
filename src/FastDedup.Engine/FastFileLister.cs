@@ -63,7 +63,9 @@ public sealed class FastFileLister
             {
                 options.OnBackend?.Invoke(decision);
                 // Совместимый быстрый режим: метаданные напрямую из FindFirstFileExW (без второго stat).
-                foreach (var ef in new Win32FindMetadataEnumerator().EnumerateMetadata(root, engineOpts, errors, ct))
+                // Очередь каталогов разбирается параллельно (см. Win32FindDop); DOP 1 — старый путь.
+                foreach (var ef in new Win32FindMetadataEnumerator()
+                             .EnumerateMetadata(root, engineOpts, errors, ct, Win32FindDop(decision, options)))
                     yield return ef;
             }
         }
@@ -86,9 +88,14 @@ public sealed class FastFileLister
     {
         Dictionary<ulong, UsnEnumerator.Rec>? map = null;
         string drive = "";
-        MftEnumerationUnavailableException? failure = null;
-        try { (map, drive) = UsnEnumerator.ReadMap(root, ct); }
-        catch (MftEnumerationUnavailableException ex) { failure = ex; }
+        // RAM-aware (2.11): прогноз памяти карты MFT ДО её чтения. Том на 5–10 млн записей на машине
+        // с 2–4 ГБ RAM уводит Dictionary в своп — честнее сразу совместимый режим, чем «турбо»-тормоза.
+        MftEnumerationUnavailableException? failure = PlanMftMemory(root);
+        if (failure is null)
+        {
+            try { (map, drive) = UsnEnumerator.ReadMap(root, ct); }
+            catch (MftEnumerationUnavailableException ex) { failure = ex; }
+        }
 
         IEnumerable<EnumeratedFile> source;
         if (map is null)
@@ -101,7 +108,8 @@ public sealed class FastFileLister
             };
             options.OnBackend?.Invoke(fb);
             errors.Add(new ScanError(root, "MFT недоступен, используется совместимый быстрый режим: " + failure.Message));
-            source = new Win32FindMetadataEnumerator().EnumerateMetadata(root, engineOpts, errors, ct);
+            source = new Win32FindMetadataEnumerator().EnumerateMetadata(root, engineOpts, errors, ct,
+                Win32FindDop(fb, options));
         }
         else
         {
@@ -111,6 +119,43 @@ public sealed class FastFileLister
 
         // Единственная точка yield (без try/catch вокруг неё — требование итераторов C#).
         foreach (var ef in source) yield return ef;
+    }
+
+    /// <summary>
+    /// DOP обхода каталогов для Win32Find-бэкенда. Метаданные каталогов — не содержимое: даже на HDD
+    /// умеренный параллелизм допустим, и степень задаёт план тома (StatParallelism = MetadataDop из
+    /// ScanService: HDD/съёмные ≤ 2, SSD выше). Сеть/UNC — фиксированно 8: там обход упирается в
+    /// латентность каждого FindFirstFileEx, а не в позиционирование головки. DOP 1 включает СТАРЫЙ
+    /// однопоточный путь внутри перечислителя (нулевой риск регрессии).
+    /// </summary>
+    private static int Win32FindDop(BackendDecision decision, FastListerOptions options)
+        => decision.Backend == EnumerationBackend.Win32FindNetwork
+            ? 8
+            : Math.Max(1, options.StatParallelism ?? Math.Min(Environment.ProcessorCount, 8));
+
+    /// <summary>
+    /// Оценка «влезет ли карта MFT в память» ДО её чтения. FSCTL-запрос guarded: любая ошибка →
+    /// null → решаем как раньше (пробуем MFT). null — читать можно; иначе готовое исключение-причина
+    /// LowMemory для общего пути фолбэка (тот же, что при MftEnumerationUnavailableException).
+    /// </summary>
+    private static MftEnumerationUnavailableException? PlanMftMemory(string root)
+    {
+        try
+        {
+            var rootPath = Path.GetPathRoot(Path.GetFullPath(root));
+            if (rootPath is not { Length: >= 2 } || rootPath[1] != ':') return null;
+
+            long? mftLen = Native.TryGetMftValidDataLength(rootPath[..2]);
+            if (mftLen is not long len) return null; // размер MFT не узнали — поведение прежнее
+
+            long available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            if (MftMemoryPlanner.ShouldUseMft(len, available)) return null;
+
+            return new MftEnumerationUnavailableException(BackendFallbackReason.LowMemory,
+                $"прогноз карты MFT ≈ {MftMemoryPlanner.EstimateMapBytes(len) / (1024 * 1024)} МБ " +
+                $"при доступных {available / (1024 * 1024)} МБ");
+        }
+        catch { return null; } // оценка не должна ломать сам скан
     }
 
     /// <summary>MFT-путь: USN отдаёт пути, размер/время берём stat-ом (USN-записи их не содержат).</summary>
