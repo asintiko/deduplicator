@@ -199,19 +199,36 @@ public partial class CleanupViewModel : PageViewModel
         try
         {
             // #15: учитываем результат — из списка убираем только реально удалённое, об остальном сообщаем.
-            var failed = await Task.Run(() =>
+            var (failed, allGone) = await Task.Run(() =>
             {
                 var bad = new System.Collections.Generic.List<JunkItemViewModel>();
                 foreach (var i in selected)
-                    if (!_fileOps.RecyclePath(i.Path)) bad.Add(i);
-                return bad;
+                {
+                    // Страховка: исключение по одному элементу (сбой журнала/носителя) не валит пакет.
+                    bool ok;
+                    try { ok = _fileOps.RecyclePath(i.Path); }
+                    catch { ok = false; }
+                    if (!ok) bad.Add(i);
+                }
+                // Ночь-1: все неудачные пути уже не существуют → скорее всего диск выдернули,
+                // а не «не удалилось» — подсказываем это простыми словами.
+                bool gone = bad.Count > 0 && bad.All(i =>
+                {
+                    try { return !File.Exists(i.Path) && !Directory.Exists(i.Path); }
+                    catch { return false; }
+                });
+                return (bad, gone);
             });
 
             foreach (var i in selected)
                 if (!failed.Contains(i)) Items.Remove(i);
 
             UpdateSummary();
-            Status = failed.Count > 0 ? $"{Strings.CleanupDeleteFailed}: {failed.Count}" : null;
+            Status = failed.Count == 0
+                ? null
+                : allGone
+                    ? $"Файлы недоступны — возможно, диск отключён (ничего не удалено): {failed.Count}"
+                    : $"{Strings.CleanupDeleteFailed}: {failed.Count}";
         }
         finally
         {

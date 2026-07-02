@@ -64,7 +64,7 @@ public sealed class ResultDistributionService : IResultDistributionService
                 return new DistributionResult(0, 0, 0, report, null);
             }
 
-            int copied = 0, failed = 0;
+            int copied = 0, failed = 0, unavailable = 0;
             foreach (var it in plan.Items)
             {
                 ct.ThrowIfCancellationRequested();
@@ -74,11 +74,23 @@ public sealed class ResultDistributionService : IResultDistributionService
                     if (CopyVerified(it.SourcePath, it.TargetPath, req.VerifyAfterCopy)) copied++;
                     else failed++;
                 }
-                catch { failed++; }
+                catch
+                {
+                    // Сбой одного файла не валит пакет. Источник исчез (файл удалили или диск
+                    // выдернули) — считаем отдельно: это не «ошибка копирования», а честное
+                    // «недоступен», о чём UI сообщает своими словами.
+                    if (!File.Exists(LongPath.Fix(it.SourcePath))) unavailable++;
+                    else failed++;
+                }
             }
 
-            string rep = WriteReport(plan, req.OutputRoot);
-            return new DistributionResult(copied, 0, failed, rep, null);
+            // Отчёт пишем ПОСЛЕ копирования, и его сбой (папка назначения исчезла/защищена)
+            // не должен «съедать» счётчики уже сделанной работы (аудит ночь-1: выдернутый диск).
+            string? rep = null;
+            string? error = null;
+            try { rep = WriteReport(plan, req.OutputRoot); }
+            catch (Exception ex) { error = $"отчёт не записан: {ex.Message}"; }
+            return new DistributionResult(copied, 0, failed, rep, error, unavailable);
         }
         catch (Exception ex)
         {

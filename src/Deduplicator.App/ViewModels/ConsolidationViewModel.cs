@@ -158,6 +158,14 @@ public partial class ConsolidationViewModel : PageViewModel
                          $"{Strings.PlanSkipped}: {report.Skipped:N0}, {collapsedPart}" +
                          $"{Strings.FailedItems}: {report.Failed:N0}. " +
                          $"{Strings.PlanBytesCopy}: {Format.Bytes(report.BytesCopied)}";
+            // Ночь-1: причины ошибок («Носитель отключён: …») были только в отчёте-объекте и до
+            // пользователя не доходили — показываем первые несколько прямо под итогом.
+            if (report.Errors.Count > 0)
+            {
+                var shown = report.Errors.Take(3);
+                ReportText += "\n" + string.Join("\n", shown);
+                if (report.Errors.Count > 3) ReportText += $"\n… и ещё {report.Errors.Count - 3}";
+            }
         }
         catch (OperationCanceledException)
         {

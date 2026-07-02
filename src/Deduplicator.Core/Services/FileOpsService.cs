@@ -203,31 +203,43 @@ public sealed class FileOpsService : IFileOpsService
             {
                 try { Directory.Delete(LongPath.Fix(fullPath), recursive: false); }
                 catch { return false; } // не пустая/занята — не рискуем
-                _log.Insert(new OperationLogEntry
+                // Папка уже удалена — сбой записи в журнал (диск полон/БД занята) не должен
+                // ронять пакет очистки исключением (паттерн Delete, аудит 2026-07-02).
+                try
                 {
-                    OpType = OperationType.DeleteToRecycle,
-                    SrcPath = fullPath,
-                    DstPath = "Удалена пустая папка (Корзина на носителе недоступна)",
-                    PerformedAt = DateTimeOffset.Now,
-                    Reversible = false,
-                    FileName = Path.GetFileName(fullPath.TrimEnd('\\', '/'))
-                });
+                    _log.Insert(new OperationLogEntry
+                    {
+                        OpType = OperationType.DeleteToRecycle,
+                        SrcPath = fullPath,
+                        DstPath = "Удалена пустая папка (Корзина на носителе недоступна)",
+                        PerformedAt = DateTimeOffset.Now,
+                        Reversible = false,
+                        FileName = Path.GetFileName(fullPath.TrimEnd('\\', '/'))
+                    });
+                }
+                catch (Exception ex) { AppLog.Error("RecyclePath/journal", ex); }
                 return true;
             }
 
             lock (_quarantineLock)
             {
                 var dst = BuildLooseQuarantinePath(fullPath);
-                long qLogId = _log.Insert(new OperationLogEntry
+                long qLogId;
+                // Не записали намерение — файл не трогаем (иначе перемещение без следа в журнале).
+                try
                 {
-                    OpType = OperationType.MoveToQuarantine,
-                    SrcPath = fullPath,
-                    DstPath = dst,
-                    PerformedAt = DateTimeOffset.Now,
-                    Reversible = true,
-                    SizeBytes = size,
-                    FileName = Path.GetFileName(fullPath)
-                });
+                    qLogId = _log.Insert(new OperationLogEntry
+                    {
+                        OpType = OperationType.MoveToQuarantine,
+                        SrcPath = fullPath,
+                        DstPath = dst,
+                        PerformedAt = DateTimeOffset.Now,
+                        Reversible = true,
+                        SizeBytes = size,
+                        FileName = Path.GetFileName(fullPath)
+                    });
+                }
+                catch (Exception ex) { AppLog.Error("RecyclePath/journal", ex); return false; }
                 try { SafeIo.MoveSafe(fullPath, dst); }
                 catch { TryDeleteLog(qLogId); return false; }
             }
@@ -236,16 +248,21 @@ public sealed class FileOpsService : IFileOpsService
 
         if (!RecycleBin.MoveToRecycleBin(fullPath)) return false;
 
-        _log.Insert(new OperationLogEntry
+        // Файл уже в Корзине — сбой журнала лишь логируем, пакет продолжает работать.
+        try
         {
-            OpType = OperationType.DeleteToRecycle,
-            SrcPath = fullPath,
-            DstPath = "Корзина Windows",
-            PerformedAt = DateTimeOffset.Now,
-            Reversible = false,
-            SizeBytes = size,
-            FileName = Path.GetFileName(fullPath.TrimEnd('\\', '/'))
-        });
+            _log.Insert(new OperationLogEntry
+            {
+                OpType = OperationType.DeleteToRecycle,
+                SrcPath = fullPath,
+                DstPath = "Корзина Windows",
+                PerformedAt = DateTimeOffset.Now,
+                Reversible = false,
+                SizeBytes = size,
+                FileName = Path.GetFileName(fullPath.TrimEnd('\\', '/'))
+            });
+        }
+        catch (Exception ex) { AppLog.Error("RecyclePath/journal", ex); }
         return true;
     }
 

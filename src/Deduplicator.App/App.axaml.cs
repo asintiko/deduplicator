@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -103,6 +106,61 @@ public partial class App : Application
                 "Носитель с фотографиями",
                 $"Подключён носитель с фотографиями ({label}). Нажмите, чтобы проверить на дубликаты.",
                 onClick: () => home.CheckPhotoDeviceCommand.Execute(null));
+
+        // В. Диск выдернули: успокаивающий тост — ничего не потеряно (ночь-1). Метку исчезнувшего
+        // диска после извлечения уже не спросить, поэтому снапшот «корень → метка» ведём сами.
+        // Во время ИДУЩЕГО скана тост не показываем: скан сам завершится честной карточкой ошибки,
+        // и два сообщения об одном событии только путали бы.
+        var scan = Services.GetRequiredService<IScanService>();
+        var driveGate = new object(); // DrivesChanged приходит с таймера вотчера — не даём обработчикам гоняться
+        var knownDrives = SnapshotDrives();
+        Services.GetRequiredService<IDriveWatcher>().DrivesChanged += () =>
+        {
+            try
+            {
+                List<string> removed;
+                lock (driveGate)
+                {
+                    var current = SnapshotDrives();
+                    removed = knownDrives.Where(kv => !current.ContainsKey(kv.Key))
+                        .Select(kv => kv.Value).ToList();
+                    knownDrives = current;
+                }
+                if (removed.Count == 0 || scan.IsRunning) return;
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    foreach (var label in removed)
+                        main.ShowToast("Диск отключён",
+                            $"Диск {label} отключён. Всё в порядке: данные и результаты проверки сохранены.");
+                });
+            }
+            catch (Exception ex) { AppLog.Error("DriveRemovedToast", ex); }
+        };
+    }
+
+    /// <summary>Снапшот подключённых локальных/съёмных дисков: корень → человекочитаемая метка.
+    /// Сетевые не опрашиваем: синхронные SMB-запросы к полумёртвой шаре виснут (паттерн DriveWatcher).</summary>
+    private static Dictionary<string, string> SnapshotDrives()
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var d in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (d.DriveType is not (DriveType.Fixed or DriveType.Removable) || !d.IsReady) continue;
+                    var root = d.RootDirectory.FullName;      // «E:\»
+                    var letter = root.TrimEnd('\\', '/');     // «E:»
+                    string label;
+                    try { label = d.VolumeLabel; } catch { label = ""; }
+                    map[root] = string.IsNullOrWhiteSpace(label) ? letter : $"«{label}» ({letter})";
+                }
+                catch { /* носитель извлекли между перечислением и опросом */ }
+            }
+        }
+        catch { /* перечисление недоступно — тост просто промолчит */ }
+        return map;
     }
 
     /// <summary>Окно с понятной ошибкой запуска вместо краха процесса.</summary>

@@ -166,7 +166,13 @@ public sealed class BatchRenameService : IBatchRenameService
             // следующий старт приложения попробует вернуть имена ещё раз.
             if (orphans.Count == 0) RenameJournal.TryComplete(journal);
 
-            return new BatchRenameResult(0, skipped, todo.Count, RolledBack: true, Error: ex.Message,
+            // Файл/папка исчезли посреди операции (удалили или выдернули диск) — системное
+            // сообщение об этом малопонятно; говорим простыми словами (ночь-1).
+            string error = ex is FileNotFoundException or DirectoryNotFoundException or DriveNotFoundException
+                ? "Файл недоступен — возможно, диск отключён."
+                : ex.Message;
+
+            return new BatchRenameResult(0, skipped, todo.Count, RolledBack: true, Error: error,
                 RenamedPairs: Array.Empty<RenamePair>(), Orphans: orphans);
         }
     }

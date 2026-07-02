@@ -87,11 +87,22 @@ public partial class ExplorerViewModel : PageViewModel
             // Живое содержимое диска — доступно всегда, даже без сканирования.
             SourceHint = Strings.ExplorerLive;
             var mount = volume.MountPath;
-            var rootNodes = await Task.Run(() => EnumerateChildren(mount));
+            // IsConnected — снапшот на момент загрузки каталога: диск могли выдернуть только что.
+            // Тогда честно говорим «отключён», а не показываем загадочно пустой список (ночь-1).
+            var (rootNodes, mountGone) = await Task.Run(() =>
+            {
+                var nodes = EnumerateChildren(mount);
+                bool gone = false;
+                if (nodes.Count == 0)
+                    try { gone = !Directory.Exists(LongPath.Fix(mount)); } catch { gone = true; }
+                return (nodes, gone);
+            });
             if (version != _treeLoadVersion) return; // нас обогнала более новая загрузка
             Root.Clear();
             foreach (var node in rootNodes) Root.Add(node);
-            Status = rootNodes.Count == 0 ? Strings.Nothing : null;
+            Status = mountGone
+                ? "Диск отключён. Всё в порядке: сохранённый список файлов появится после обновления списка дисков."
+                : rootNodes.Count == 0 ? Strings.Nothing : null;
         }
         else
         {

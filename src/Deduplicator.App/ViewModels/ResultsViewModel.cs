@@ -731,7 +731,7 @@ public partial class ResultsViewModel : PageViewModel
             .Where(x => !x.file.IsRepresentative) // эталон не удаляем никогда
             .ToList();
 
-        int moved = 0, failed = 0, blocked = 0;
+        int moved = 0, failed = 0, blocked = 0, missing = 0;
         await Task.Run(() =>
         {
             foreach (var (group, file) in toDelete)
@@ -739,7 +739,11 @@ public partial class ResultsViewModel : PageViewModel
                 // P0.1: ПОЛНАЯ ПРОВЕРКА НА МОМЕНТ ДЕЙСТВИЯ — между сканом и удалением файл могли заменить,
                 // переместить или изменить (в т.ч. на содержимое ТОГО ЖЕ размера). Сверяем размер + время,
                 // а для точных/видео-групп — пересчитанный полный хэш. Не прошёл проверку — НЕ трогаем.
-                if (!RevalidateBeforeDelete(group, file)) { blocked++; continue; }
+                switch (RevalidateBeforeDelete(group, file))
+                {
+                    case RevalidateResult.Missing: missing++; continue; // файла нет (диск отключён?) — не «изменился»
+                    case RevalidateResult.Changed: blocked++; continue;
+                }
 
                 if (_fileOps.Delete(file.Model, file.FullPath!, useRecycle, group.Model.Id)) moved++;
                 else failed++;
@@ -747,9 +751,12 @@ public partial class ResultsViewModel : PageViewModel
         });
 
         string destDone = useRecycle ? "в Корзину" : "в карантин";
-        if (blocked > 0 || failed > 0)
+        if (blocked > 0 || failed > 0 || missing > 0)
         {
             var msg = $"Перемещено {destDone}: {moved}.";
+            // Ночь-1: выдернутый диск — не «сбой»: файлы недоступны, но ничего не потеряно.
+            if (missing > 0)
+                msg += $" Недоступно — возможно, диск отключён (эти файлы не тронуты): {missing}.";
             if (blocked > 0)
                 msg += $" Файлы изменились после проверки и не были тронуты — запустите проверку этой папки заново: {blocked}.";
             if (failed > 0) msg += $" Не удалось переместить: {failed}.";
@@ -763,6 +770,11 @@ public partial class ResultsViewModel : PageViewModel
         await LoadAsync();
     }
 
+    /// <summary>Итог ревалидации перед удалением: Ok — можно удалять; Missing — файла уже нет
+    /// (удалили или диск отключён) — не трогаем и сообщаем «недоступен», а не «изменился»;
+    /// Changed — файл изменился/не сверился — не трогаем.</summary>
+    private enum RevalidateResult { Ok, Missing, Changed }
+
     /// <summary>
     /// Ревалидация файла НА МОМЕНТ УДАЛЕНИЯ (P0.1). Удаляем только если файл не изменился с момента скана:
     /// существует, тот же размер, то же время изменения и создания, а для точных/видео-групп — совпадает
@@ -770,30 +782,36 @@ public partial class ResultsViewModel : PageViewModel
     /// но размер и время всё равно сверяем (выбранный файл мог измениться после просмотра). Любой сбой
     /// проверки трактуем как «файл изменился» — и не трогаем его (лучше не удалить, чем удалить лишнее).
     /// </summary>
-    private bool RevalidateBeforeDelete(GroupItemViewModel group, FileItemViewModel file)
+    private RevalidateResult RevalidateBeforeDelete(GroupItemViewModel group, FileItemViewModel file)
     {
         try
         {
             var m = file.Model;
             // Файл «ушёл в облако» (OneDrive-плейсхолдер): содержимое сверить нельзя, не скачав его,
             // а удаление плейсхолдера удаляет и облачную копию. Не трогаем (B4).
-            if (CloudFiles.IsPlaceholderPath(file.FullPath!)) return false;
+            if (CloudFiles.IsPlaceholderPath(file.FullPath!)) return RevalidateResult.Changed;
             var fi = new FileInfo(LongPath.Fix(file.FullPath!));
-            if (!fi.Exists) return false;
-            if (fi.Length != m.Size) return false;
-            if (!TimesMatch(fi.LastWriteTimeUtc, m.Mtime)) return false;
+            if (!fi.Exists) return RevalidateResult.Missing;
+            if (fi.Length != m.Size) return RevalidateResult.Changed;
+            if (!TimesMatch(fi.LastWriteTimeUtc, m.Mtime)) return RevalidateResult.Changed;
             // Дату создания сверяем только если она была проиндексирована (старые строки могут быть пустыми).
-            if (m.Created != default && !TimesMatch(fi.CreationTimeUtc, m.Created)) return false;
+            if (m.Created != default && !TimesMatch(fi.CreationTimeUtc, m.Created)) return RevalidateResult.Changed;
 
             bool exact = group.Model.MatchType is MatchType.Exact or MatchType.ExactVideo;
             if (exact && m.FullHash is not null)
             {
                 var current = _hash.ComputeFullHash(file.FullPath!, default);
-                if (!current.AsSpan().SequenceEqual(m.FullHash)) return false;
+                if (!current.AsSpan().SequenceEqual(m.FullHash)) return RevalidateResult.Changed;
             }
-            return true;
+            return RevalidateResult.Ok;
         }
-        catch { return false; }
+        catch
+        {
+            // Сбой чтения посреди сверки: диск могли выдернуть прямо сейчас — если файла уже
+            // не видно, честно говорим «недоступен» вместо «изменился».
+            try { if (!File.Exists(LongPath.Fix(file.FullPath!))) return RevalidateResult.Missing; } catch { }
+            return RevalidateResult.Changed;
+        }
     }
 
     /// <summary>Сравнение времён с небольшим допуском: exFAT/FAT32 и сетевые ФС огрубляют mtime (до 1–2 c).</summary>
@@ -935,10 +953,20 @@ public partial class ResultsViewModel : PageViewModel
         });
         IsBusy = false;
         if (result.Error is not null)
-            OperationErrorText = $"Распределение не удалось: {result.Error}";
+            // Часть работы могла быть сделана (файлы скопированы, но отчёт не записался) — не теряем это.
+            OperationErrorText = result.Copied > 0
+                ? $"Скопировано: {result.Copied}, но {result.Error}"
+                : $"Распределение не удалось: {result.Error}";
         else if (DistributeCopyMode)
-            OperationSuccessText = $"Скопировано: {result.Copied}, не удалось: {result.Failed}. " +
-                                   $"Оригиналы не тронуты. Отчёт: {result.ReportPath}";
+        {
+            var msg = $"Скопировано: {result.Copied}";
+            // Ночь-1: исчезнувший источник (диск отключён) отделяем от прочих сбоев копирования.
+            if (result.Unavailable > 0) msg += $", недоступно (возможно, диск отключён): {result.Unavailable}";
+            if (result.Failed > 0) msg += $", не удалось: {result.Failed}";
+            msg += $". Оригиналы не тронуты. Отчёт: {result.ReportPath}";
+            if (result.Unavailable > 0 || result.Failed > 0) OperationErrorText = msg;
+            else OperationSuccessText = msg;
+        }
         else
             OperationSuccessText = $"Отчёт сохранён: {result.ReportPath}. Файлы не двигались.";
     }
@@ -1165,7 +1193,13 @@ public partial class ResultsViewModel : PageViewModel
 
         var rep = group.Files.FirstOrDefault(f => f.IsRepresentative);
         if (rep?.FullPath is null) return;
-        if (!File.Exists(rep.FullPath)) return; // эталон мог исчезнуть, пока был открыт диалог
+        if (!File.Exists(rep.FullPath))
+        {
+            // Эталон мог исчезнуть, пока был открыт диалог (диск выдернули) — молчание выглядело
+            // как «кнопка не работает» (ночь-1). Ничего не изменено, файлы целы.
+            OperationErrorText = "Эталон недоступен — возможно, диск отключён. Файлы не тронуты.";
+            return;
+        }
 
         var targets = group.Files
             .Where(f => !f.IsRepresentative && !f.IsProtected && f.FullPath is not null)
@@ -1173,11 +1207,25 @@ public partial class ResultsViewModel : PageViewModel
         if (targets.Count == 0) return;
 
         IsBusy = true;
+        int linked = 0, notLinked = 0;
         await Task.Run(() =>
         {
             foreach (var f in targets)
-                _fileOps.ReplaceWithHardLink(f.Model, f.FullPath!, rep.FullPath!, group.Model.Id);
+            {
+                // Сбой одного файла (в т.ч. исчезновение посреди пакета) не валит остальные:
+                // ReplaceWithHardLink сам проверяет пути/том/содержимое и без replaced-оригинала
+                // ничего не удаляет; страховочный catch — на случай сбоя БД при записи журнала.
+                bool ok;
+                try { ok = _fileOps.ReplaceWithHardLink(f.Model, f.FullPath!, rep.FullPath!, group.Model.Id); }
+                catch { ok = false; }
+                if (ok) linked++; else notLinked++;
+            }
         });
+        if (notLinked > 0)
+            OperationErrorText = $"Заменено ссылками: {linked}. Пропущено: {notLinked} " +
+                                 "(файл недоступен — возможно, диск отключён, содержимое не совпало или другой том). Эти файлы не тронуты.";
+        else if (linked > 0)
+            OperationSuccessText = $"Заменено ссылками: {linked}. Место освобождено, содержимое файлов сохранено.";
         await LoadAsync();
     }
 

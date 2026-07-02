@@ -26,5 +26,7 @@ public sealed record DistributionItem(
 public sealed record DistributionPlan(
     IReadOnlyList<DistributionItem> Items, bool CanExecute);
 
+/// <summary>Unavailable — источник исчез к моменту копирования (файл удалён или носитель отключён):
+/// UI сообщает об этом отдельно от прочих ошибок, чтобы выдернутый диск не выглядел «сбоем».</summary>
 public sealed record DistributionResult(
-    int Copied, int Skipped, int Failed, string? ReportPath, string? Error);
+    int Copied, int Skipped, int Failed, string? ReportPath, string? Error, int Unavailable = 0);

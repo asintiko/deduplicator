@@ -235,7 +235,11 @@ public sealed class ConsolidationService : IConsolidationService
                 if (!File.Exists(LongPath.Fix(src)))
                 {
                     report.Failed++;
-                    report.Errors.Add($"Файл не найден: {src}");
+                    // mountById строился на старте: том могли выдернуть ПОСРЕДИ копирования.
+                    // Пропавший корень — это «носитель отключён», а не «файл не найден».
+                    report.Errors.Add(Directory.Exists(LongPath.Fix(mount))
+                        ? $"Файл не найден: {src}"
+                        : $"Носитель отключён: {item.File.RelPath}");
                     continue;
                 }
                 if (options.MoveInsteadOfCopy)
@@ -250,7 +254,11 @@ public sealed class ConsolidationService : IConsolidationService
             catch (Exception ex)
             {
                 report.Failed++;
-                report.Errors.Add($"{item.File.Name}: {ex.Message}");
+                // Диск выдернули прямо во время копирования этого файла — сообщаем понятно,
+                // а не системным текстом исключения; пакет продолжает работу.
+                report.Errors.Add(Directory.Exists(LongPath.Fix(mount))
+                    ? $"{item.File.Name}: {ex.Message}"
+                    : $"Носитель отключён: {item.File.RelPath}");
             }
         }
 
