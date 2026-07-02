@@ -568,7 +568,7 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
             ct.ThrowIfCancellationRequested();
             if (ids.Count < 2) continue;
             var members = ids.Select(id => byId[id]).ToList();
-            var rep = RepresentativeSelector.Pick(members, rule, isPreferredKeep);
+            var rep = PickSimilarRepresentative(members, type, rule, isPreferredKeep);
 
             var group = new DuplicateGroup
             {
@@ -601,6 +601,30 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
         if (pending.Count > 0) _groups.InsertGroups(pending, sessionId);
         onGroups?.Invoke(created);
         return created;
+    }
+
+    /// <summary>
+    /// 3.7 «Лучший кадр серии»: эталон группы ПОХОЖИХ ФОТО (серийная съёмка — несколько дублей
+    /// одного кадра) подсказываем по максимальной резкости, если она посчитана хотя бы у двух
+    /// членов; при равенстве максимума тай-брейк — обычное правило rule через Pick. Для аудио и
+    /// при нехватке данных (старые строки с sharpness NULL) — прежний Pick по правилу. Точные
+    /// группы (BuildExactGroups) этой ветки не касаются. Это ТОЛЬКО подсказка выбора эталона:
+    /// политика удаления похожих не меняется — они отмечаются исключительно вручную.
+    /// </summary>
+    private static FileRecord PickSimilarRepresentative(List<FileRecord> members, MatchType type,
+        RepresentativeRule rule, Func<FileRecord, bool>? isPreferredKeep)
+    {
+        if (type == MatchType.SimilarImage)
+        {
+            var withSharpness = members.Where(f => f.Sharpness is not null).ToList();
+            if (withSharpness.Count >= 2)
+            {
+                double max = withSharpness.Max(f => f.Sharpness!.Value);
+                var best = withSharpness.Where(f => f.Sharpness!.Value >= max).ToList();
+                return best.Count == 1 ? best[0] : RepresentativeSelector.Pick(best, rule, isPreferredKeep);
+            }
+        }
+        return RepresentativeSelector.Pick(members, rule, isPreferredKeep);
     }
 
     private static void UnionByExactHash(List<FileRecord> files, Dictionary<long, ulong> hashOf, Dsu dsu)

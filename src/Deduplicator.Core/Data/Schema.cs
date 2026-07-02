@@ -41,6 +41,9 @@ internal static class Schema
         -- сверку чтением против содержимого с этим хэшем; валиден только пока метаданные строки
         -- строго переиспользуются (любой Upsert/пересчёт full_hash обнуляет, см. FileRepository).
         verified_full_hash BLOB,
+        -- 3.7: резкость кадра (дисперсия Лапласиана, считается вместе с pHash) — подсказка
+        -- «лучший кадр серии» для похожих фото. NULL — не считалась (старые строки не пересчитываем).
+        sharpness REAL,
         UNIQUE(volume_id, rel_path)
     );
     CREATE INDEX IF NOT EXISTS idx_files_size     ON files(size);
@@ -150,6 +153,9 @@ internal static class Schema
         ("files", "phash_ver", "ALTER TABLE files ADD COLUMN phash_ver INTEGER NOT NULL DEFAULT 1"),
         // Кэш побайтовой сверки (этап 2.5): старые строки получают NULL — «не сверялся», первый скан
         // сверит чтением и заполнит; повторные сканы неизменённых файлов пойдут без чтения содержимого.
-        ("files", "verified_full_hash", "ALTER TABLE files ADD COLUMN verified_full_hash BLOB")
+        ("files", "verified_full_hash", "ALTER TABLE files ADD COLUMN verified_full_hash BLOB"),
+        // Резкость кадра (3.7): старые строки получают NULL — пересчёт НЕ форсируем (это лишь
+        // подсказка UI; бейдж «Лучший кадр» просто не покажется до следующего пересчёта фото).
+        ("files", "sharpness", "ALTER TABLE files ADD COLUMN sharpness REAL")
     };
 }

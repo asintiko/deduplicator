@@ -19,15 +19,28 @@
                         <PathIcon Data="{Binding CategoryIcon}" Width="40" Height="40"
                                   Foreground="{DynamicResource TextTertiary}"
                                   IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNull}}"/>
-                        <!-- 2.10: тултип — причина «почему выбран эталоном» (вычисляется при построении карточки) -->
-                        <Border IsVisible="{Binding IsRepresentative}" VerticalAlignment="Top" HorizontalAlignment="Left"
-                                Margin="8" CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}"
-                                ToolTip.Tip="{Binding RepresentativeReason}">
-                            <StackPanel Orientation="Horizontal" Spacing="4">
-                                <PathIcon Data="{StaticResource IconStar}" Width="12" Height="12" Foreground="White"/>
-                                <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
-                            </StackPanel>
-                        </Border>
+                        <!-- Бейджи слева-сверху стопкой: «Эталон» (2.10) и «Лучший кадр» (3.7) могут
+                             показываться одновременно (эталон похожей группы обычно и есть самый резкий). -->
+                        <StackPanel VerticalAlignment="Top" HorizontalAlignment="Left" Margin="8" Spacing="4">
+                            <!-- 2.10: тултип — причина «почему выбран эталоном» (вычисляется при построении карточки) -->
+                            <Border IsVisible="{Binding IsRepresentative}" HorizontalAlignment="Left"
+                                    CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}"
+                                    ToolTip.Tip="{Binding RepresentativeReason}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <PathIcon Data="{StaticResource IconStar}" Width="12" Height="12" Foreground="White"/>
+                                    <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                </StackPanel>
+                            </Border>
+                            <!-- 3.7: «Лучший кадр» — самый резкий в группе похожих фото (только подсказка, не автоудаление) -->
+                            <Border IsVisible="{Binding IsSharpest}" HorizontalAlignment="Left"
+                                    CornerRadius="6" Padding="6,3" Background="{DynamicResource SuccessBrush}"
+                                    ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
+                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                    <PathIcon Data="{StaticResource IconImage}" Width="12" Height="12" Foreground="White"/>
+                                    <TextBlock Text="{Binding SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
                         <CheckBox IsChecked="{Binding IsMarked, Mode=TwoWay}" VerticalAlignment="Top"
                                   HorizontalAlignment="Right" Margin="6" IsEnabled="{Binding CanMark}"
                                   ToolTip.Tip="{x:Static loc:Strings.MarkForDeletion}"/>
@@ -472,6 +485,15 @@
                                         <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
                                     </StackPanel>
                                 </Border>
+                                <!-- 3.7: тот же бейдж «Лучший кадр», что на плитке -->
+                                <Border IsVisible="{Binding ViewerLeft.IsSharpest, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource SuccessBrush}"
+                                        VerticalAlignment="Center" ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <PathIcon Data="{StaticResource IconImage}" Width="11" Height="11" Foreground="White"/>
+                                        <TextBlock Text="{Binding ViewerLeft.SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                    </StackPanel>
+                                </Border>
                                 <Border IsVisible="{Binding ViewerLeft.ShowSimilarity, FallbackValue=False}"
                                         CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
                                         VerticalAlignment="Center">
@@ -488,6 +510,9 @@
                                     <Run Text="{x:Static loc:Strings.ColumnModified}"/><Run Text=": "/><Run Text="{Binding ViewerLeft.ModifiedText}"/>
                                 </TextBlock>
                                 <TextBlock Text="{Binding ViewerLeftResolution}" Foreground="#B0FFFFFF" FontSize="12"/>
+                                <!-- 3.7: сравнение резкости пары (только похожие фото; сырые числа не показываем) -->
+                                <TextBlock Text="{Binding ViewerLeftSharpnessText}" Foreground="#B0FFFFFF" FontSize="12"
+                                           IsVisible="{Binding ViewerLeftSharpnessText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                             </StackPanel>
                         </StackPanel>
                     </Grid>
@@ -519,6 +544,15 @@
                                         <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
                                     </StackPanel>
                                 </Border>
+                                <!-- 3.7: тот же бейдж «Лучший кадр», что на плитке -->
+                                <Border IsVisible="{Binding ViewerRight.IsSharpest, FallbackValue=False}"
+                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource SuccessBrush}"
+                                        VerticalAlignment="Center" ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
+                                    <StackPanel Orientation="Horizontal" Spacing="4">
+                                        <PathIcon Data="{StaticResource IconImage}" Width="11" Height="11" Foreground="White"/>
+                                        <TextBlock Text="{Binding ViewerRight.SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                    </StackPanel>
+                                </Border>
                                 <Border IsVisible="{Binding ViewerRight.ShowSimilarity, FallbackValue=False}"
                                         CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
                                         VerticalAlignment="Center">
@@ -535,6 +569,9 @@
                                     <Run Text="{x:Static loc:Strings.ColumnModified}"/><Run Text=": "/><Run Text="{Binding ViewerRight.ModifiedText}"/>
                                 </TextBlock>
                                 <TextBlock Text="{Binding ViewerRightResolution}" Foreground="#B0FFFFFF" FontSize="12"/>
+                                <!-- 3.7: сравнение резкости пары (только похожие фото; сырые числа не показываем) -->
+                                <TextBlock Text="{Binding ViewerRightSharpnessText}" Foreground="#B0FFFFFF" FontSize="12"
+                                           IsVisible="{Binding ViewerRightSharpnessText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
                             </StackPanel>
                         </StackPanel>
                     </Grid>

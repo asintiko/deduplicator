@@ -32,6 +32,17 @@ public partial class FileItemViewModel : ObservableObject
     /// </summary>
     public string? RepresentativeReason { get; }
 
+    /// <summary>
+    /// 3.7: самый резкий кадр в группе ПОХОЖИХ фото (серийная съёмка). Вычисляется в
+    /// ResultsViewModel.Build: только для MatchType.SimilarImage, только когда резкость есть
+    /// у ≥2 членов и разница заметна (иначе шум — бейдж не показываем). Чистая подсказка:
+    /// на CanMark/удаление не влияет.
+    /// </summary>
+    public bool IsSharpest { get; }
+
+    /// <summary>Текст бейджа «Лучший кадр» (null — бейджа нет).</summary>
+    public string? SharpnessBadgeText => IsSharpest ? Strings.SharpestBadge : null;
+
     /// <summary>Разрешает ли ГРУППА удаление (точная сверенная — да; hash-only/похожие — по правилам).</summary>
     public bool GroupAllowsDeletion { get; }
 
@@ -48,7 +59,8 @@ public partial class FileItemViewModel : ObservableObject
 
     public FileItemViewModel(FileRecord model, double similarity, bool isRepresentative,
         string? fullPath, string? volumeLabel, IImageMatchService thumbs, bool isProtected = false,
-        bool groupAllowsDeletion = true, bool loadThumbnail = true, string? representativeReason = null)
+        bool groupAllowsDeletion = true, bool loadThumbnail = true, string? representativeReason = null,
+        bool isSharpest = false)
     {
         Model = model;
         Similarity = similarity;
@@ -58,6 +70,7 @@ public partial class FileItemViewModel : ObservableObject
         IsProtected = isProtected;
         GroupAllowsDeletion = groupAllowsDeletion;
         RepresentativeReason = representativeReason;
+        IsSharpest = isSharpest;
         _thumbs = thumbs;
 
         // loadThumbnail=false — VM строится только ради галочек/экспорта («Выбрать все», CSV):

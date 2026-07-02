@@ -45,6 +45,13 @@ public sealed class FileRecord
     /// <summary>Версия алгоритма pHash (см. ImageMatchService.CurrentPHashVersion).</summary>
     public int PHashVer { get; set; } = 1;
 
+    /// <summary>
+    /// 3.7: резкость кадра (дисперсия Лапласиана на той же ужатой копии, что pHash) — подсказка
+    /// «лучший кадр серии» в группах ПОХОЖИХ фото. null — ещё не считалась (старые строки) или
+    /// расчёт pHash не удался. Только подсказка в UI: на автоудаление не влияет никогда.
+    /// </summary>
+    public double? Sharpness { get; set; }
+
     /// <summary>Хэш декодированных пикселей (опц., для одинаковых картинок разного формата).</summary>
     public byte[]? PixelHash { get; set; }
 

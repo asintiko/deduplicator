@@ -172,16 +172,19 @@ public static class ImagePerceptualPipeline
         catch { opts.OnSkipped?.Invoke(); } // ошибка чтения одного файла — пропуск (NFR-1)
     }
 
-    /// <summary>Старый путь (2.2): расчёт по пути с диска — для плейсхолдеров и файлов крупнее бюджета.</summary>
+    /// <summary>Старый путь (2.2): расчёт по пути с диска — для плейсхолдеров и файлов крупнее бюджета.
+    /// 3.7: pHash и резкость — за один декод (ComputeSignatures), второго прохода по диску нет.</summary>
     private static void ComputeFromPath(FileRecord f, string path, IImageMatchService images,
         ImagePipelineOptions opts, CancellationToken ct)
     {
-        f.PHash = images.ComputePHash(path, ct);
+        var sig = images.ComputeSignatures(path, ct);
+        f.PHash = sig.PHash;
+        f.Sharpness = sig.Sharpness;
         if (opts.ComputePixelHash) f.PixelHash = images.ComputePixelHash(path, ct);
         opts.OnComputed?.Invoke(f, path);
     }
 
-    /// <summary>Декодер: берёт содержимое из канала, считает pHash/pixel-hash ИЗ ПАМЯТИ,
+    /// <summary>Декодер: берёт содержимое из канала, считает pHash+резкость/pixel-hash ИЗ ПАМЯТИ,
     /// освобождает байтовый бюджет. Ошибка декода одного файла — пропуск, цикл продолжается.</summary>
     private static async Task DecodeLoopAsync(ChannelReader<WorkItem> reader, IImageMatchService images,
         ImagePipelineOptions opts, ByteBudget budget, CancellationToken ct)
@@ -191,7 +194,10 @@ public static class ImagePerceptualPipeline
             try
             {
                 opts.WaitGate?.Invoke(ct); // пауза действует и на декодерах
-                item.File.PHash = images.ComputePHash(item.Content, ct);
+                // 3.7: резкость считается на той же ужатой копии, что pHash, — один декод на файл.
+                var sig = images.ComputeSignatures(item.Content, ct);
+                item.File.PHash = sig.PHash;
+                item.File.Sharpness = sig.Sharpness;
                 if (opts.ComputePixelHash) item.File.PixelHash = images.ComputePixelHash(item.Content, ct);
                 opts.OnComputed?.Invoke(item.File, item.Path);
             }

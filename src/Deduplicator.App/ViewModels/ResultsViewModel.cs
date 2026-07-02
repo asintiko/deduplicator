@@ -328,12 +328,41 @@ public partial class ResultsViewModel : PageViewModel
         // (в БД не хранится, схему не трогаем) и показывается тултипом бейджа «Эталон».
         string? repReason = ExplainRepresentative(rows);
 
+        // 3.7: «Лучший кадр» — только для похожих ФОТО (серийная съёмка), см. FindSharpestId.
+        long? sharpestId = g.MatchType == MatchType.SimilarImage
+            ? FindSharpestId(rows.Select(r => r.File))
+            : null;
+
         var files = rows.Select(r => new FileItemViewModel(r.File, r.Member.Similarity, r.IsRep,
             r.Full, r.Label, _thumbs, r.Prot, groupAllowsDeletion, loadThumbnail: withThumbnails,
-            representativeReason: r.IsRep ? repReason : null));
+            representativeReason: r.IsRep ? repReason : null,
+            isSharpest: sharpestId is not null && r.File.Id == sharpestId));
         var gvm = new GroupItemViewModel(g, files);
         gvm.PropertyChanged += OnGroupPropertyChanged; // отметки → пересчёт доступности «Удалить»
         return gvm;
+    }
+
+    /// <summary>
+    /// 3.7: порог заметности разницы резкости. Меньшая разница дисперсии Лапласиана на глаз
+    /// неотличима (шум декода/пережатия) — бейдж «Лучший кадр» не показываем, а в просмотрщике
+    /// пишем «примерно одинаковая».
+    /// </summary>
+    private const double SharpnessNoticeableRatio = 1.15;
+
+    /// <summary>
+    /// 3.7: id самого резкого кадра группы похожих фото — или null, если подсказка не убедительна:
+    /// резкость посчитана меньше чем у двух членов (старые строки до пересчёта имеют NULL) или
+    /// лидер не отрывается от второго места хотя бы на порог заметности.
+    /// </summary>
+    private static long? FindSharpestId(IEnumerable<FileRecord> files)
+    {
+        var ranked = files.Where(f => f.Sharpness is not null)
+            .OrderByDescending(f => f.Sharpness!.Value)
+            .Take(2)
+            .ToList();
+        return ranked.Count >= 2 && ranked[0].Sharpness!.Value > ranked[1].Sharpness!.Value * SharpnessNoticeableRatio
+            ? ranked[0].Id
+            : null;
     }
 
     /// <summary>
@@ -1165,6 +1194,11 @@ public partial class ResultsViewModel : PageViewModel
     [ObservableProperty] private string _viewerRightResolution = "—";
     [ObservableProperty] private bool _viewerCanPrev;
     [ObservableProperty] private bool _viewerCanNext;
+    // 3.7: сравнение резкости сторон («Резкость: выше/ниже/примерно одинаковая») — только для
+    // групп похожих фото и только когда резкость посчитана у обеих сторон. null — строка скрыта.
+    [ObservableProperty] private string? _viewerLeftSharpnessText;
+    [ObservableProperty] private string? _viewerRightSharpnessText;
+    private bool _viewerSimilarImageGroup;
 
     /// <summary>Слева листаются НЕ-эталонные файлы группы; эталон закреплён справа.</summary>
     private List<FileItemViewModel> _viewerFiles = new();
@@ -1194,6 +1228,9 @@ public partial class ResultsViewModel : PageViewModel
         if (others.Count == 0) others.Add(right); // защита: группа из одного файла (не должно быть)
 
         _viewerFiles = others;
+        // 3.7: тексты резкости показываем только в группах похожих фото (в точных группах
+        // содержимое байт-идентично, и «резкость одинаковая» была бы шумом).
+        _viewerSimilarImageGroup = group.Model.MatchType == MatchType.SimilarImage;
         ViewerRight = right;
         _ = LoadViewerSideAsync(right, isLeft: false);
         SetViewerLeft(others.IndexOf(file)); // -1 (кликнули эталон) кламп даст 0
@@ -1209,7 +1246,28 @@ public partial class ResultsViewModel : PageViewModel
         ViewerCounterText = $"{_viewerIndex + 1} {Strings.Of} {_viewerFiles.Count}";
         ViewerCanPrev = _viewerIndex > 0;
         ViewerCanNext = _viewerIndex < _viewerFiles.Count - 1;
+        UpdateViewerSharpness();
         _ = LoadViewerSideAsync(left, isLeft: true);
+    }
+
+    /// <summary>
+    /// 3.7: сравнение резкости текущей пары просмотрщика. Сырые числа пользователю не показываем
+    /// (дисперсия Лапласиана ни о чём не говорит) — только понятный вывод «выше/ниже/примерно
+    /// одинаковая» с тем же порогом заметности, что у бейджа «Лучший кадр».
+    /// </summary>
+    private void UpdateViewerSharpness()
+    {
+        string? leftText = null, rightText = null;
+        if (_viewerSimilarImageGroup && ViewerLeft is { } l && ViewerRight is { } r &&
+            !ReferenceEquals(l, r) &&
+            l.Model.Sharpness is double ls && r.Model.Sharpness is double rs)
+        {
+            if (ls > rs * SharpnessNoticeableRatio) { leftText = Strings.SharpnessHigher; rightText = Strings.SharpnessLower; }
+            else if (rs > ls * SharpnessNoticeableRatio) { leftText = Strings.SharpnessLower; rightText = Strings.SharpnessHigher; }
+            else leftText = rightText = Strings.SharpnessSame;
+        }
+        ViewerLeftSharpnessText = leftText;
+        ViewerRightSharpnessText = rightText;
     }
 
     [RelayCommand]
@@ -1225,10 +1283,12 @@ public partial class ResultsViewModel : PageViewModel
         // Гонка с фоновым декодированием: поднимаем поколения, чтобы «в полёте» загрузки не публиковались.
         _viewerLeftGen++; _viewerRightGen++;
         _viewerFiles = new List<FileItemViewModel>();
+        _viewerSimilarImageGroup = false;
         ViewerLeft = null; ViewerRight = null;
         var l = ViewerLeftImage; ViewerLeftImage = null; l?.Dispose();
         var r = ViewerRightImage; ViewerRightImage = null; r?.Dispose();
         ViewerLeftResolution = "—"; ViewerRightResolution = "—";
+        ViewerLeftSharpnessText = null; ViewerRightSharpnessText = null;
     }
 
     /// <summary>

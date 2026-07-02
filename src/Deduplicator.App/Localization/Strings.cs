@@ -126,6 +126,12 @@ public static class Strings
     public const string Representative = "Эталон";
     // 2.10: тултип бейджа «Эталон» — короткая причина, почему выбрана именно эта копия.
     public const string RepresentativeReasonFmt = "Почему эталон: {0}";
+    // 3.7: бейдж «лучший кадр серии» — самый резкий кадр в группе похожих фото (только подсказка).
+    public const string SharpestBadge = "Лучший кадр";
+    public const string SharpestTooltip = "Самый резкий кадр в этой группе похожих фото — его стоит оставить";
+    public const string SharpnessHigher = "Резкость: выше";
+    public const string SharpnessLower = "Резкость: ниже";
+    public const string SharpnessSame = "Резкость: примерно одинаковая";
     public const string KeepThis = "Оставить";
     public const string MarkForDeletion = "К удалению";
     public const string SelectAllButRepresentative = "Отметить лишние копии";

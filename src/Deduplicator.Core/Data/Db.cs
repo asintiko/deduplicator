@@ -22,6 +22,7 @@ internal static class Db
     public static long Long(this SqliteDataReader r, int i) => r.IsDBNull(i) ? 0L : r.GetInt64(i);
     public static long? LongN(this SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetInt64(i);
     public static double Dbl(this SqliteDataReader r, int i) => r.IsDBNull(i) ? 0d : r.GetDouble(i);
+    public static double? DblN(this SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetDouble(i);
     public static bool Bool(this SqliteDataReader r, int i) => !r.IsDBNull(i) && r.GetInt64(i) != 0;
 
     public static byte[]? Blob(this SqliteDataReader r, int i) =>

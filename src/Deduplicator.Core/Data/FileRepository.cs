@@ -14,7 +14,7 @@ public sealed class FileRepository
     private const string Cols =
         "f.id, f.volume_id, f.rel_path, f.name, f.ext, f.size, f.mtime, f.created, f.category, " +
         "f.partial_hash, f.full_hash, f.phash, f.pixel_hash, f.audio_fp, f.scan_state, f.last_indexed, " +
-        "f.partial_ver, f.phash_ver, f.verified_full_hash";
+        "f.partial_ver, f.phash_ver, f.verified_full_hash, f.sharpness";
 
     // ---- Чтение ----
 
@@ -399,12 +399,21 @@ public sealed class FileRepository
             // без pHash или со старой версией (им всё равно предстоял пересчёт, экономим декод).
             using (var cmd = conn.CreateCommand())
             {
+                // 3.7: резкость переносится вместе с pHash — байт-идентичное содержимое даёт ту же
+                // резкость (детерминированная функция от байтов). Без этого получатель pHash навсегда
+                // остался бы с sharpness NULL: он больше не «ждёт перцептива» и не пересчитывается.
+                // COALESCE: уже посчитанную резкость не затираем NULL-ом донора без резкости.
                 cmd.CommandText = """
                     UPDATE files SET phash = (
                         SELECT f2.phash FROM files f2
                         WHERE f2.full_hash = files.full_hash AND f2.phash IS NOT NULL
                           AND f2.phash_ver = $ver AND f2.id <> files.id
-                        LIMIT 1), phash_ver = $ver
+                        LIMIT 1), phash_ver = $ver,
+                        sharpness = COALESCE(sharpness, (
+                            SELECT f4.sharpness FROM files f4
+                            WHERE f4.full_hash = files.full_hash AND f4.sharpness IS NOT NULL
+                              AND f4.id <> files.id
+                            LIMIT 1))
                     WHERE (phash IS NULL OR phash_ver < $ver) AND full_hash IS NOT NULL AND category = $cat
                       AND EXISTS (SELECT 1 FROM files f3
                                   WHERE f3.full_hash = files.full_hash AND f3.phash IS NOT NULL
@@ -563,12 +572,14 @@ public sealed class FileRepository
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
+        // 3.7: sharpness пишется из записи, как и хэши, — у нового/изменившегося файла она null,
+        // поэтому DO UPDATE сбрасывает устаревшую резкость вместе с pHash (пересчитается заодно с ним).
         cmd.CommandText = """
             INSERT INTO files (volume_id, rel_path, name, ext, size, mtime, created, category,
                                partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed,
-                               partial_ver, phash_ver)
+                               partial_ver, phash_ver, sharpness)
             VALUES ($vol, $rel, $name, $ext, $size, $mtime, $created, $cat,
-                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver, $phver)
+                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver, $phver, $sharp)
             ON CONFLICT(volume_id, rel_path) DO UPDATE SET
                 name=excluded.name, ext=excluded.ext, size=excluded.size, mtime=excluded.mtime,
                 created=excluded.created, category=excluded.category,
@@ -576,6 +587,7 @@ public sealed class FileRepository
                 phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
                 scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
                 partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver,
+                sharpness=excluded.sharpness,
                 verified_full_hash=NULL
             RETURNING id;
             """;
@@ -596,6 +608,7 @@ public sealed class FileRepository
         var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
         var pVer = cmd.CreateParameter(); pVer.ParameterName = "$pver"; cmd.Parameters.Add(pVer);
         var pPhVer = cmd.CreateParameter(); pPhVer.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer);
+        var pSharp = cmd.CreateParameter(); pSharp.ParameterName = "$sharp"; cmd.Parameters.Add(pSharp);
 
         foreach (var f in batch)
         {
@@ -616,6 +629,7 @@ public sealed class FileRepository
             pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
             pVer.Value = f.PartialVer;
             pPhVer.Value = f.PHashVer;
+            pSharp.Value = (object?)f.Sharpness ?? DBNull.Value;
             f.Id = (long)cmd.ExecuteScalar()!;
         }
         tx.Commit();
@@ -635,7 +649,7 @@ public sealed class FileRepository
         cmd.CommandText = """
             UPDATE files SET partial_hash=$ph, full_hash=$fh, phash=$phash, pixel_hash=$pix,
                              audio_fp=$afp, scan_state=$state, last_indexed=$idx, partial_ver=$pver,
-                             phash_ver=$phver, verified_full_hash=$vfh
+                             phash_ver=$phver, verified_full_hash=$vfh, sharpness=$sharp
             WHERE id=$id;
             """;
         var pPh = cmd.CreateParameter(); pPh.ParameterName = "$ph"; cmd.Parameters.Add(pPh);
@@ -648,6 +662,7 @@ public sealed class FileRepository
         var pVer2 = cmd.CreateParameter(); pVer2.ParameterName = "$pver"; cmd.Parameters.Add(pVer2);
         var pPhVer2 = cmd.CreateParameter(); pPhVer2.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer2);
         var pVfh = cmd.CreateParameter(); pVfh.ParameterName = "$vfh"; cmd.Parameters.Add(pVfh);
+        var pSharp2 = cmd.CreateParameter(); pSharp2.ParameterName = "$sharp"; cmd.Parameters.Add(pSharp2);
         var pId = cmd.CreateParameter(); pId.ParameterName = "$id"; cmd.Parameters.Add(pId);
 
         foreach (var f in batch)
@@ -665,6 +680,7 @@ public sealed class FileRepository
             pVer2.Value = f.PartialVer;
             pPhVer2.Value = f.PHashVer;
             pVfh.Value = verifiedStillValid ? f.VerifiedFullHash! : (object)DBNull.Value;
+            pSharp2.Value = (object?)f.Sharpness ?? DBNull.Value;
             pId.Value = f.Id;
             cmd.ExecuteNonQuery();
         }
@@ -803,7 +819,8 @@ public sealed class FileRepository
         LastIndexed = Db.ParseDateOrNull(r.Str(15)),
         PartialVer = (int)r.Long(16),
         PHashVer = (int)r.Long(17),
-        VerifiedFullHash = r.Blob(18)
+        VerifiedFullHash = r.Blob(18),
+        Sharpness = r.DblN(19)
     };
 }
 

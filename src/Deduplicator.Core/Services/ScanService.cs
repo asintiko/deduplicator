@@ -1056,6 +1056,10 @@ public sealed class ScanService : IScanService, IDisposable
                     throughput.GetOrAdd(vid, static _ => new ThroughputEwma()).Update(bytes, seconds)
             }, ct);
             // Пишем успешные расчёты и сбросы устаревших v1-хэшей (у них f.PHash обнулён расчётом).
+            // 3.7: вместе с pHash конвейер заполнил и f.Sharpness (тот же декод) — UpdateComputedBatch
+            // сохраняет её той же строкой. Пересчёт СТАРЫХ строк ради резкости НЕ форсируем:
+            // у них sharpness останется NULL (бейдж «Лучший кадр» просто не покажется до
+            // следующего пересчёта фото) — это подсказка UI, а не данные для группировки.
             var done = chunk.Where(f => f.PHash is not null || hadStalePHash.Contains(f.Id)).ToList();
             _files.UpdateComputedBatch(done);
             computed += done.Count(f => f.PHash is not null);

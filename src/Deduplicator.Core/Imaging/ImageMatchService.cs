@@ -9,6 +9,12 @@ using SixLabors.ImageSharp.Processing;
 
 namespace Deduplicator.Core.Imaging;
 
+/// <summary>
+/// Перцептивные признаки изображения, считаемые за ОДИН декод (3.7): pHash и резкость.
+/// Оба null — файл не изображение, битый, облачный плейсхолдер или иконка меньше префильтра.
+/// </summary>
+public readonly record struct ImageSignatures(byte[]? PHash, double? Sharpness);
+
 public interface IImageMatchService
 {
     /// <summary>Перцептивный хэш изображения (64-битный pHash). null — если файл не читается.</summary>
@@ -20,6 +26,16 @@ public interface IImageMatchService
     /// (проверка атрибутов по пути ДО чтения содержимого).
     /// </summary>
     byte[]? ComputePHash(ReadOnlyMemory<byte> content, CancellationToken ct = default);
+
+    /// <summary>
+    /// 3.7: pHash + резкость за ОДИН декод (второй проход по диску/декодеру недопустим —
+    /// резкость считается на той же ужатой копии, что и pHash). PHash байт в байт совпадает
+    /// с <see cref="ComputePHash(string,CancellationToken)"/> — тот же core.
+    /// </summary>
+    ImageSignatures ComputeSignatures(string fullPath, CancellationToken ct = default);
+
+    /// <summary>Признаки по содержимому в памяти (конвейер 2.4) — см. <see cref="ComputeSignatures(string,CancellationToken)"/>.</summary>
+    ImageSignatures ComputeSignatures(ReadOnlyMemory<byte> content, CancellationToken ct = default);
 
     /// <summary>Хэш декодированных пикселей (для одинаковых картинок с разными метаданными).</summary>
     byte[]? ComputePixelHash(string fullPath, CancellationToken ct = default);
@@ -66,43 +82,51 @@ public sealed class ImageMatchService : IImageMatchService
         Directory.CreateDirectory(_thumbDir);
     }
 
-    public byte[]? ComputePHash(string fullPath, CancellationToken ct = default)
+    // 3.7: старые перегрузки ComputePHash сохранены для сторонних вызовов и делегируют в
+    // ComputeSignatures (минимально-инвазивный вариант: сигнатуры существующих методов не меняются).
+    public byte[]? ComputePHash(string fullPath, CancellationToken ct = default) =>
+        ComputeSignatures(fullPath, ct).PHash;
+
+    public byte[]? ComputePHash(ReadOnlyMemory<byte> content, CancellationToken ct = default) =>
+        ComputeSignatures(content, ct).PHash;
+
+    public ImageSignatures ComputeSignatures(string fullPath, CancellationToken ct = default)
     {
-        if (CloudFiles.IsPlaceholderPath(fullPath)) return null; // не скачиваем из облака (B4)
+        if (CloudFiles.IsPlaceholderPath(fullPath)) return default; // не скачиваем из облака (B4)
         try
         {
             ct.ThrowIfCancellationRequested();
             using var fs = OpenRead(fullPath);
-            return ComputePHashCore(fs);
+            return ComputeSignaturesCore(fs);
         }
         catch (OperationCanceledException) { throw; }
-        catch { return null; } // битый/нечитаемый файл — пропускаем (NFR-1)
+        catch { return default; } // битый/нечитаемый файл — пропускаем (NFR-1)
     }
 
     /// <summary>
-    /// pHash из уже прочитанного содержимого (конвейер чтение→декод, этап 2.4). Облачный guard
+    /// Признаки из уже прочитанного содержимого (конвейер чтение→декод, этап 2.4). Облачный guard
     /// здесь не нужен: содержимое уже в памяти, атрибуты проверяет продюсер ДО чтения.
-    /// Тот же ComputePHashCore, что и по пути, — результат байт в байт совпадает.
+    /// Тот же ComputeSignaturesCore, что и по пути, — результат байт в байт совпадает.
     /// </summary>
-    public byte[]? ComputePHash(ReadOnlyMemory<byte> content, CancellationToken ct = default)
+    public ImageSignatures ComputeSignatures(ReadOnlyMemory<byte> content, CancellationToken ct = default)
     {
         try
         {
             ct.ThrowIfCancellationRequested();
             using var ms = AsStream(content);
-            return ComputePHashCore(ms);
+            return ComputeSignaturesCore(ms);
         }
         catch (OperationCanceledException) { throw; }
-        catch { return null; } // битое содержимое — пропускаем (NFR-1)
+        catch { return default; } // битое содержимое — пропускаем (NFR-1)
     }
 
-    private byte[]? ComputePHashCore(Stream stream)
+    private ImageSignatures ComputeSignaturesCore(Stream stream)
     {
         // Префильтр по метаданным (дёшево, пиксели не декодируются): битый файл здесь же
         // бросит исключение → null, а иконки меньше 64×64 по меньшей стороне перцептивно
         // не сравниваем — их pHash почти не различителен и только шумит в группировке.
         var info = Image.Identify(stream);
-        if (Math.Min(info.Width, info.Height) < MinPHashSide) return null;
+        if (Math.Min(info.Width, info.Height) < MinPHashSide) return default;
         stream.Position = 0;
 
         // Этап 2.2: декодируем сразу в маленький размер (scaled-IDCT для JPEG — в разы
@@ -115,8 +139,13 @@ public sealed class ImageMatchService : IImageMatchService
             : new DecoderOptions();
         using var img = Image.Load<Rgba32>(opts, stream);
 
+        // 3.7: резкость — на ТОЙ ЖЕ ужатой копии, что и pHash (отдельного декода нет; 256 px
+        // достаточно, потому что резкость сравнивается только МЕЖДУ кадрами одной серии, где
+        // все члены прошли тот же даунскейл). Резкость — не хэш: версия pHash её не касается.
+        double sharpness = ComputeSharpness(img);
+
         if (!_rotationInvariant)
-            return BitConverter.GetBytes(HashAlgo.Hash(img));
+            return new ImageSignatures(BitConverter.GetBytes(HashAlgo.Hash(img)), sharpness);
 
         // Канонический хэш = минимум по ориентациям (повороты + зеркало).
         // Тогда повёрнутые/отражённые копии дают одинаковое значение и группируются.
@@ -130,7 +159,55 @@ public sealed class ImageMatchService : IImageMatchService
         best = Math.Min(best, HashOriented(img, RotateMode.Rotate90, FlipMode.Horizontal));
         best = Math.Min(best, HashOriented(img, RotateMode.Rotate180, FlipMode.Horizontal));
         best = Math.Min(best, HashOriented(img, RotateMode.Rotate270, FlipMode.Horizontal));
-        return BitConverter.GetBytes(best);
+        return new ImageSignatures(BitConverter.GetBytes(best), sharpness);
+    }
+
+    /// <summary>
+    /// 3.7: резкость кадра — дисперсия отклика Лапласиана по яркости (стандартная метрика
+    /// «variance of Laplacian»). Яркость: 0.299R + 0.587G + 0.114B; свёртка 3×3 «крестом»
+    /// (центр ×4, соседи −1); чем больше дисперсия, тем резче кадр. Значение зависит от размера
+    /// декода, поэтому сравнивать резкость имеет смысл только между кадрами, декодированными
+    /// одинаково (у нас — та же 256px копия для всех). Чистая функция — тестируется синтетикой.
+    /// </summary>
+    public static double ComputeSharpness(Image<Rgba32> img)
+    {
+        int w = img.Width, h = img.Height;
+        if (w < 3 || h < 3) return 0; // для свёртки нужны внутренние пиксели
+
+        var lum = new float[w * h];
+        img.ProcessPixelRows(acc =>
+        {
+            for (int y = 0; y < acc.Height; y++)
+            {
+                var row = acc.GetRowSpan(y);
+                int off = y * w;
+                for (int x = 0; x < row.Length; x++)
+                {
+                    var p = row[x];
+                    lum[off + x] = 0.299f * p.R + 0.587f * p.G + 0.114f * p.B;
+                }
+            }
+        });
+
+        // Дисперсия отклика по внутренним пикселям (границы без полного креста не считаем).
+        double sum = 0, sumSq = 0;
+        long n = 0;
+        for (int y = 1; y < h - 1; y++)
+        {
+            int off = y * w;
+            for (int x = 1; x < w - 1; x++)
+            {
+                double v = 4f * lum[off + x]
+                           - lum[off + x - 1] - lum[off + x + 1]
+                           - lum[off + x - w] - lum[off + x + w];
+                sum += v;
+                sumSq += v * v;
+                n++;
+            }
+        }
+        if (n == 0) return 0;
+        double mean = sum / n;
+        return Math.Max(0, sumSq / n - mean * mean); // клэмп от отрицательного нуля float-погрешности
     }
 
     private static ulong HashOriented(Image<Rgba32> img, RotateMode rotate, FlipMode flip)
