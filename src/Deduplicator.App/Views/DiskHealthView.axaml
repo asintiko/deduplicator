@@ -50,8 +50,8 @@
                                     <StackPanel Grid.Column="1" Margin="16,0" Spacing="6">
                                         <StackPanel Orientation="Horizontal" Spacing="10">
                                             <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="SemiBold"/>
-                                            <Border CornerRadius="6" Padding="8,2" Background="{Binding HealthBrush}" VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding HealthText}" FontSize="11" Foreground="White"/>
+                                            <Border Classes="badge" Background="{Binding HealthBrush}" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding HealthText}" Foreground="White"/>
                                             </Border>
                                         </StackPanel>
                                         <TextBlock Classes="caption">
@@ -64,19 +64,24 @@
                                         </TextBlock>
 
                                         <WrapPanel>
-                                            <Border IsVisible="{Binding HasTemp}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                            <Border IsVisible="{Binding HasTemp}" Classes="badge" Margin="0,4,8,0" Padding="8,4" Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
                                                 <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthTemp}"/><Run Text=": "/><Run Text="{Binding TempText}"/></TextBlock>
                                             </Border>
-                                            <Border IsVisible="{Binding HasPowerOn}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                            <Border IsVisible="{Binding HasPowerOn}" Classes="badge" Margin="0,4,8,0" Padding="8,4" Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
                                                 <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthPowerOn}"/><Run Text=": "/><Run Text="{Binding PowerOnText}"/></TextBlock>
                                             </Border>
-                                            <Border IsVisible="{Binding HasWear}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                            <Border IsVisible="{Binding HasWear}" Classes="badge" Margin="0,4,8,0" Padding="8,4" Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
                                                 <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthWear}"/><Run Text=": "/><Run Text="{Binding WearText}"/></TextBlock>
                                             </Border>
-                                            <Border IsVisible="{Binding HasReadErrors}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                            <Border IsVisible="{Binding HasReadErrors}" Classes="badge" Margin="0,4,8,0" Padding="8,4" Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
                                                 <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthReadErrors}"/><Run Text=": "/><Run Text="{Binding ReadErrorsText}"/></TextBlock>
                                             </Border>
-                                            <Border IsVisible="{Binding HasRpm}" Margin="0,4,8,0" CornerRadius="6" Padding="8,4" Background="{DynamicResource SurfaceAlt}">
+                                            <Border IsVisible="{Binding HasRpm}" Classes="badge" Margin="0,4,8,0" Padding="8,4" Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
                                                 <TextBlock FontSize="12"><Run Text="{x:Static loc:Strings.HealthRpm}"/><Run Text=": "/><Run Text="{Binding RpmText}"/></TextBlock>
                                             </Border>
                                         </WrapPanel>

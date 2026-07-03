@@ -109,9 +109,10 @@
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
                                             <Grid ColumnDefinitions="Auto,*,*,90" Margin="10,5">
-                                                <Border Grid.Column="0" CornerRadius="4" Padding="6,1" VerticalAlignment="Center"
-                                                        Margin="0,0,10,0" Background="{DynamicResource SurfaceAlt}">
-                                                    <TextBlock Text="{Binding ActionText}" FontSize="11"/>
+                                                <Border Classes="badge" Grid.Column="0" VerticalAlignment="Center"
+                                                        Margin="0,0,10,0" Background="{DynamicResource SurfaceAlt}"
+                                                        BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
+                                                    <TextBlock Text="{Binding ActionText}"/>
                                                 </Border>
                                                 <TextBlock Grid.Column="1" Text="{Binding Name}" Margin="0,0,10,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                                 <TextBlock Grid.Column="2" Text="{Binding Source}" Margin="0,0,10,0" Classes="caption" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>

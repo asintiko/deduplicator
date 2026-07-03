@@ -16,21 +16,33 @@
 
         <Border Grid.Row="1" Classes="card" Padding="6">
             <Panel>
-                <TextBlock Text="{Binding Empty}" Classes="muted" Margin="14"
-                           IsVisible="{Binding Empty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                <!-- Ночь-4: пустое состояние — иконка + заголовок из VM + подсказка -->
+                <StackPanel Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsVisible="{Binding Empty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                    <PathIcon Data="{StaticResource IconHistory}" Width="48" Height="48"
+                              Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="{Binding Empty}" FontSize="15" FontWeight="Medium"
+                               HorizontalAlignment="Center" TextAlignment="Center"
+                               TextWrapping="Wrap" MaxWidth="420"/>
+                    <TextBlock Classes="muted" Text="Когда вы удалите или переименуете файлы, операции появятся здесь — их можно будет отменить."
+                               HorizontalAlignment="Center" TextAlignment="Center"
+                               TextWrapping="Wrap" MaxWidth="380"/>
+                </StackPanel>
                 <ScrollViewer>
                     <ItemsControl ItemsSource="{Binding Items}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border Margin="8,4" Padding="12" CornerRadius="8" Background="{DynamicResource SurfaceAlt}">
+                                <Border Classes="row" Margin="8,2" Padding="12,8">
                                     <Grid ColumnDefinitions="120,*,120,120,Auto">
-                                        <Border Grid.Column="0" CornerRadius="6" Padding="8,3" VerticalAlignment="Center"
-                                                Margin="0,0,12,0" HorizontalAlignment="Left" Background="{DynamicResource SurfaceBackground}">
-                                            <TextBlock Text="{Binding OpText}" FontSize="12"/>
+                                        <Border Classes="badge" Grid.Column="0" VerticalAlignment="Center"
+                                                Margin="0,0,12,0" HorizontalAlignment="Left"
+                                                Background="{DynamicResource SurfaceAlt}"
+                                                BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
+                                            <TextBlock Text="{Binding OpText}"/>
                                         </Border>
                                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                                             <TextBlock Text="{Binding FileName}" FontWeight="Medium" TextTrimming="CharacterEllipsis"/>
-                                            <TextBlock Text="{Binding SrcPath}" Classes="caption" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding SrcPath}" Classes="caption mono" TextTrimming="CharacterEllipsis"/>
                                         </StackPanel>
                                         <TextBlock Grid.Column="2" Text="{Binding SizeText}" Classes="caption" VerticalAlignment="Center" Margin="0,0,12,0"/>
                                         <TextBlock Grid.Column="3" Text="{Binding WhenText}" Classes="caption" VerticalAlignment="Center" Margin="0,0,12,0"/>

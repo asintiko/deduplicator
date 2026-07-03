@@ -18,14 +18,15 @@
             <!-- must №7: пока на странице открыт диалог, сайдбар выключен (IsEnabled глушит и
                  клавиатуру), а подложка ниже затемняет его и глотает клики. -->
             <DockPanel LastChildFill="True" IsEnabled="{Binding !IsDialogOpen}">
-                <!-- Логотип -->
-                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="20,22,20,18" Spacing="12">
-                    <Border Width="40" Height="40" CornerRadius="10" Background="{DynamicResource AccentBrush}">
-                        <PathIcon Data="{StaticResource IconLogo}" Foreground="White" Width="22" Height="22"/>
+                <!-- Логотип (ночь-4: компактнее, градиентная плашка) -->
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="20,18,20,12" Spacing="10">
+                    <Border Width="36" Height="36" CornerRadius="10" Background="{DynamicResource AccentGradient}">
+                        <PathIcon Data="{StaticResource IconLogo}" Foreground="White" Width="20" Height="20"/>
                     </Border>
-                    <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="{Binding AppName}" FontSize="17" FontWeight="SemiBold"/>
-                        <TextBlock Text="{Binding AppTagline}" Classes="caption" TextWrapping="Wrap" MaxWidth="150"/>
+                    <StackPanel VerticalAlignment="Center" Spacing="1">
+                        <TextBlock Text="{Binding AppName}" FontSize="15" FontWeight="SemiBold" LetterSpacing="-0.2"/>
+                        <TextBlock Text="{Binding AppTagline}" Classes="caption" FontSize="11"
+                                   Foreground="{DynamicResource TextTertiary}" TextWrapping="Wrap" MaxWidth="150"/>
                     </StackPanel>
                 </StackPanel>
 
@@ -103,7 +104,7 @@
                 <StackPanel Spacing="14">
                     <StackPanel Spacing="6">
                         <TextBlock Text="{Binding OnboardingProgressText}" Classes="caption"/>
-                        <TextBlock Text="{Binding OnboardingTitle}" FontSize="21" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock Text="{Binding OnboardingTitle}" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" TextWrapping="Wrap"/>
                     </StackPanel>
 
                     <Border CornerRadius="8" Padding="11,8" Background="{DynamicResource AccentSoft}"

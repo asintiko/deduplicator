@@ -23,9 +23,25 @@
                     <SolidColorBrush x:Key="AccentBrush" Color="#007AFF" />
                     <SolidColorBrush x:Key="AccentSoft" Color="#E8F0FE" />
                     <SolidColorBrush x:Key="AccentForeground" Color="#FFFFFF" />
-                    <SolidColorBrush x:Key="SidebarBackground" Color="#FBFBFD" />
+                    <!-- Ночь-4: стеклянность сайдбара (полупрозрачный поверх фона окна) -->
+                    <SolidColorBrush x:Key="SidebarBackground" Color="#F2FBFBFD" />
                     <SolidColorBrush x:Key="HoverBackground" Color="#ECECEF" />
                     <SolidColorBrush x:Key="SelectedBackground" Color="#E8F0FE" />
+                    <!-- Ночь-4 (модернизация): рамка карточек чуть мягче общей SurfaceBorder,
+                         двойная мягкая тень; в тёмной теме вместо тени — светлее фон + рамка. -->
+                    <SolidColorBrush x:Key="CardBorder" Color="#E9E9EE" />
+                    <BoxShadows x:Key="CardShadow">0 1 2 0 #14000000, 0 4 16 0 #0A000000</BoxShadows>
+                    <!-- Градиентный акцент для primary-кнопок и активных элементов -->
+                    <LinearGradientBrush x:Key="AccentGradient" StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Offset="0" Color="#007AFF" />
+                        <GradientStop Offset="1" Color="#0A5CFF" />
+                    </LinearGradientBrush>
+                    <LinearGradientBrush x:Key="AccentGradientHover" StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Offset="0" Color="#1A88FF" />
+                        <GradientStop Offset="1" Color="#2168FF" />
+                    </LinearGradientBrush>
+                    <!-- Фокус инпутов: 2px акцентная рамка (переопределение ресурсов Fluent) -->
+                    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#007AFF" />
                     <SolidColorBrush x:Key="DangerBrush" Color="#FF3B30" />
                     <SolidColorBrush x:Key="SuccessBrush" Color="#34C759" />
                     <SolidColorBrush x:Key="WarningBrush" Color="#FF9500" />
@@ -58,6 +74,18 @@
                     <SolidColorBrush x:Key="SidebarBackground" Color="#161618" />
                     <SolidColorBrush x:Key="HoverBackground" Color="#3A3A3C" />
                     <SolidColorBrush x:Key="SelectedBackground" Color="#0A2A4A" />
+                    <!-- Ночь-4: в тёмной теме карточка «светлее фона + рамка», тень отключена -->
+                    <SolidColorBrush x:Key="CardBorder" Color="#3A3A3C" />
+                    <BoxShadows x:Key="CardShadow">0 0 0 #00000000</BoxShadows>
+                    <LinearGradientBrush x:Key="AccentGradient" StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Offset="0" Color="#0A84FF" />
+                        <GradientStop Offset="1" Color="#3B9EFF" />
+                    </LinearGradientBrush>
+                    <LinearGradientBrush x:Key="AccentGradientHover" StartPoint="0%,0%" EndPoint="0%,100%">
+                        <GradientStop Offset="0" Color="#2B93FF" />
+                        <GradientStop Offset="1" Color="#55ACFF" />
+                    </LinearGradientBrush>
+                    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#0A84FF" />
                     <SolidColorBrush x:Key="DangerBrush" Color="#FF453A" />
                     <SolidColorBrush x:Key="SuccessBrush" Color="#30D158" />
                     <SolidColorBrush x:Key="WarningBrush" Color="#FF9F0A" />
@@ -119,8 +147,13 @@
             <StreamGeometry x:Key="IconList">M3,5H21V7H3V5M3,11H21V13H3V11M3,17H21V19H3V17Z</StreamGeometry>
             <StreamGeometry x:Key="IconUpdate">M21,10.12H14.22L16.96,7.3C14.23,4.6 9.81,4.5 7.08,7.2C4.35,9.91 4.35,14.28 7.08,17C9.81,19.7 14.23,19.7 16.96,17C18.32,15.65 19,14.08 19,12.1H21C21,14.08 20.12,16.65 18.36,18.39C14.85,21.87 9.15,21.87 5.64,18.39C2.14,14.92 2.11,9.28 5.62,5.81C9.13,2.34 14.76,2.34 18.27,5.81L21,3V10.12M12.5,8V12.25L16,14.33L15.28,15.54L11,13V8H12.5Z</StreamGeometry>
 
-            <CornerRadius x:Key="CardRadius">12</CornerRadius>
-            <CornerRadius x:Key="ButtonRadius">8</CornerRadius>
+            <!-- Ночь-4: единая шкала скруглений — карточки 14, кнопки/инпуты 10, бейджи 8 -->
+            <CornerRadius x:Key="CardRadius">14</CornerRadius>
+            <CornerRadius x:Key="ButtonRadius">10</CornerRadius>
+            <CornerRadius x:Key="InputRadius">10</CornerRadius>
+            <CornerRadius x:Key="BadgeRadius">8</CornerRadius>
+            <!-- Fluent: толщина рамки инпута в фокусе (цвет — в темах выше) -->
+            <Thickness x:Key="TextControlBorderThemeThicknessFocused">2</Thickness>
         </ResourceDictionary>
     </Application.Resources>
 
@@ -133,29 +166,59 @@
             <Setter Property="FontFamily" Value="{DynamicResource ContentControlThemeFontFamily}" />
         </Style>
         <Style Selector="TextBlock.h1">
-            <Setter Property="FontSize" Value="26" />
+            <Setter Property="FontSize" Value="25" />
             <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="LetterSpacing" Value="-0.5" />
         </Style>
         <Style Selector="TextBlock.h2">
-            <Setter Property="FontSize" Value="18" />
+            <Setter Property="FontSize" Value="17" />
             <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="LetterSpacing" Value="-0.2" />
         </Style>
         <Style Selector="TextBlock.muted">
             <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
         </Style>
         <Style Selector="TextBlock.caption">
-            <Setter Property="Foreground" Value="{DynamicResource TextTertiary}" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
             <Setter Property="FontSize" Value="12" />
+        </Style>
+        <!-- Ночь-4: моноширинный класс для путей файлов; :is() — чтобы ловить и SelectableTextBlock -->
+        <Style Selector=":is(TextBlock).mono">
+            <Setter Property="FontFamily" Value="Cascadia Mono,Consolas,Courier New,monospace" />
         </Style>
 
         <!-- ===== Карточка ===== -->
         <Style Selector="Border.card">
             <Setter Property="Background" Value="{DynamicResource SurfaceBackground}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource SurfaceBorder}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="{StaticResource CardRadius}" />
             <Setter Property="Padding" Value="18" />
-            <Setter Property="BoxShadow" Value="0 1 3 0 #14000000" />
+            <Setter Property="BoxShadow" Value="{DynamicResource CardShadow}" />
+        </Style>
+
+        <!-- ===== Бейдж/чип: единый радиус и внутренние отступы ===== -->
+        <Style Selector="Border.badge">
+            <Setter Property="CornerRadius" Value="{StaticResource BadgeRadius}" />
+            <Setter Property="Padding" Value="8,3" />
+        </Style>
+        <Style Selector="Border.badge TextBlock">
+            <Setter Property="FontSize" Value="11" />
+        </Style>
+
+        <!-- ===== Строка списка: прозрачная, ховер со скруглением 8 ===== -->
+        <Style Selector="Border.row">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="Transitions">
+                <Transitions>
+                    <BrushTransition Property="Background" Duration="0:0:0.12" />
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="Border.row:pointerover">
+            <Setter Property="Background" Value="{DynamicResource HoverBackground}" />
         </Style>
 
         <!-- ===== Кнопки ===== -->
@@ -185,12 +248,12 @@
             <Setter Property="RenderTransform" Value="scale(0.97)" />
         </Style>
         <Style Selector="Button.primary">
-            <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="Background" Value="{DynamicResource AccentGradient}" />
             <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
             <Setter Property="BorderThickness" Value="0" />
         </Style>
         <Style Selector="Button.primary:pointerover /template/ ContentPresenter">
-            <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="Background" Value="{DynamicResource AccentGradientHover}" />
             <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
         </Style>
         <!-- UI-аудит must №8: единый источник цвета контента цветных кнопок. Вложенные TextBlock/PathIcon
@@ -203,7 +266,7 @@
             <Setter Property="Foreground" Value="{DynamicResource AccentForeground}" />
         </Style>
         <Style Selector="Button.primary:pressed /template/ ContentPresenter">
-            <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="Background" Value="{DynamicResource AccentGradient}" />
         </Style>
         <Style Selector="Button.danger">
             <Setter Property="Background" Value="{DynamicResource DangerBrush}" />
@@ -235,25 +298,16 @@
             <Setter Property="Height" Value="18" />
         </Style>
 
-        <!-- ===== Навигация ===== -->
+        <!-- ===== Навигация: pill-подсветка выбранного пункта (как в macOS) ===== -->
         <Style Selector="ListBox.nav">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
         </Style>
         <Style Selector="ListBox.nav ListBoxItem">
-            <Setter Property="Padding" Value="12,10" />
+            <Setter Property="Padding" Value="12,9" />
             <Setter Property="Margin" Value="8,2" />
-            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="CornerRadius" Value="10" />
             <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
-            <Setter Property="RenderTransformOrigin" Value="50%,50%" />
-            <Setter Property="Transitions">
-                <Transitions>
-                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.10" />
-                </Transitions>
-            </Setter>
-        </Style>
-        <Style Selector="ListBox.nav ListBoxItem:pointerover">
-            <Setter Property="RenderTransform" Value="scale(1.01)" />
         </Style>
         <Style Selector="ListBox.nav ListBoxItem:pointerover /template/ ContentPresenter">
             <Setter Property="Background" Value="{DynamicResource HoverBackground}" />
@@ -261,10 +315,38 @@
         <Style Selector="ListBox.nav ListBoxItem:selected /template/ ContentPresenter">
             <Setter Property="Background" Value="{DynamicResource SelectedBackground}" />
         </Style>
+        <Style Selector="ListBox.nav ListBoxItem:selected PathIcon">
+            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+        </Style>
+        <Style Selector="ListBox.nav ListBoxItem:selected TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="FontWeight" Value="Medium" />
+        </Style>
+
+        <!-- ===== Инпуты: радиус 10, комфортная высота; фокус — 2px акцентная рамка
+             (через переопределение Fluent-ресурсов TextControlBorder* выше) ===== -->
+        <Style Selector="TextBox">
+            <Setter Property="CornerRadius" Value="{StaticResource InputRadius}" />
+            <Setter Property="MinHeight" Value="34" />
+        </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="CornerRadius" Value="{StaticResource InputRadius}" />
+            <Setter Property="MinHeight" Value="34" />
+        </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="CornerRadius" Value="{StaticResource InputRadius}" />
+            <Setter Property="MinHeight" Value="34" />
+        </Style>
+
+        <!-- ===== Вкладки: компактнее гигантского pivot-заголовка Fluent ===== -->
+        <Style Selector="TabItem">
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
 
         <!-- ===== Прогресс ===== -->
         <Style Selector="ProgressBar">
-            <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource AccentGradient}" />
             <Setter Property="MinHeight" Value="6" />
             <Setter Property="CornerRadius" Value="3" />
         </Style>

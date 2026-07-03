@@ -230,7 +230,7 @@
                 <StackPanel Spacing="12">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.SetDiagnostics}"/>
                     <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10">
-                        <SelectableTextBlock Text="{Binding DiagnosticsText}" FontFamily="Consolas,monospace" FontSize="12"/>
+                        <SelectableTextBlock Text="{Binding DiagnosticsText}" Classes="mono" FontSize="12"/>
                     </Border>
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <Button Command="{Binding CopyDiagnosticsCommand}"

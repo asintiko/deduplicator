@@ -28,6 +28,7 @@
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Padding" Value="4,2"/>
             <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
         </Style>
@@ -37,17 +38,17 @@
             <Setter Property="CornerRadius" Value="10"/>
             <Setter Property="Margin" Value="2"/>
         </Style>
-        <!-- Строки вида «список». -->
+        <!-- Строки вида «список» (ночь-4: строки выше, скругление 8). -->
         <Style Selector="ListBox.rows ListBoxItem">
-            <Setter Property="Padding" Value="10,2"/>
-            <Setter Property="MinHeight" Value="0"/>
-            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="CornerRadius" Value="8"/>
         </Style>
         <!-- Строки колонок вида «столбцы». -->
         <Style Selector="ListBox.millercol ListBoxItem">
-            <Setter Property="Padding" Value="8,3"/>
-            <Setter Property="MinHeight" Value="0"/>
-            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="CornerRadius" Value="8"/>
         </Style>
     </UserControl.Styles>
 
@@ -75,7 +76,7 @@
                     </ComboBox.ItemTemplate>
                 </ComboBox>
                 <ProgressBar IsIndeterminate="True" Width="120" IsVisible="{Binding IsBusy}" VerticalAlignment="Center"/>
-                <Border CornerRadius="6" Padding="8,3" VerticalAlignment="Center" Background="{DynamicResource AccentSoft}"
+                <Border Classes="badge" VerticalAlignment="Center" Background="{DynamicResource AccentSoft}"
                         IsVisible="{Binding SourceHint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
                     <TextBlock Text="{Binding SourceHint}" FontSize="12" Foreground="{DynamicResource AccentBrush}"/>
                 </Border>
@@ -239,7 +240,7 @@
                                     <Button Grid.Column="1" Classes="colhdr" Content="{Binding NameHeader}"
                                             Command="{Binding SortByCommand}" CommandParameter="name"/>
                                     <TextBlock Grid.Column="2" Text="{x:Static loc:Strings.ColumnCategory}"
-                                               Classes="caption" VerticalAlignment="Center"/>
+                                               Classes="caption" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                     <Button Grid.Column="3" Classes="colhdr" Content="{Binding SizeHeader}"
                                             Command="{Binding SortByCommand}" CommandParameter="size"/>
                                     <Button Grid.Column="4" Classes="colhdr" Content="{Binding DateHeader}"

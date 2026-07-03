@@ -238,10 +238,17 @@ public partial class MainWindow : Window
         {
             if (DataContext is MainWindowViewModel vm)
             {
-                foreach (var item in vm.NavItems)
+                // Ночь-4: прогон в обеих темах — тема меняет словари ресурсов (тени, градиенты),
+                // критерий «0 binding-ошибок» должен выполняться и в Light, и в Dark.
+                foreach (var variant in new[] { Avalonia.Styling.ThemeVariant.Light, Avalonia.Styling.ThemeVariant.Dark })
                 {
-                    vm.SelectedNav = item;
-                    await Task.Delay(300);
+                    if (Application.Current is not null)
+                        Application.Current.RequestedThemeVariant = variant;
+                    foreach (var item in vm.NavItems)
+                    {
+                        vm.SelectedNav = item;
+                        await Task.Delay(300);
+                    }
                 }
             }
         }

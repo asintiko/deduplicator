@@ -30,8 +30,18 @@
 
         <Border Grid.Row="1" Classes="card" Padding="6">
             <Panel>
-                <TextBlock Text="{Binding Empty}" Classes="muted" Margin="14" TextWrapping="Wrap"
-                           IsVisible="{Binding Empty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                <!-- Ночь-4: пустое состояние — иконка + текст из VM + подсказка -->
+                <StackPanel Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsVisible="{Binding Empty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                    <PathIcon Data="{StaticResource IconDatabase}" Width="48" Height="48"
+                              Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center"/>
+                    <TextBlock Text="{Binding Empty}" FontSize="15" FontWeight="Medium"
+                               HorizontalAlignment="Center" TextAlignment="Center"
+                               TextWrapping="Wrap" MaxWidth="420"/>
+                    <TextBlock Classes="muted" Text="Проверьте несколько дисков — совпадения файлов между ними появятся здесь, даже если диски уже отключены."
+                               HorizontalAlignment="Center" TextAlignment="Center"
+                               TextWrapping="Wrap" MaxWidth="400"/>
+                </StackPanel>
                 <ScrollViewer>
                     <ItemsControl ItemsSource="{Binding Groups}">
                         <ItemsControl.ItemTemplate>
@@ -57,7 +67,7 @@
                                                             <TextBlock Text="{Binding VolumeName}" VerticalAlignment="Center"
                                                                        TextTrimming="CharacterEllipsis"/>
                                                         </StackPanel>
-                                                        <TextBlock Grid.Column="1" Text="{Binding RelPath}" Classes="caption"
+                                                        <TextBlock Grid.Column="1" Text="{Binding RelPath}" Classes="caption mono"
                                                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                                                         <TextBlock Grid.Column="2" Text="{Binding SizeText}" Classes="caption" VerticalAlignment="Center"/>
                                                     </Grid>

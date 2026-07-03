@@ -23,21 +23,21 @@
                              показываться одновременно (эталон похожей группы обычно и есть самый резкий). -->
                         <StackPanel VerticalAlignment="Top" HorizontalAlignment="Left" Margin="8" Spacing="4">
                             <!-- 2.10: тултип — причина «почему выбран эталоном» (вычисляется при построении карточки) -->
-                            <Border IsVisible="{Binding IsRepresentative}" HorizontalAlignment="Left"
-                                    CornerRadius="6" Padding="6,3" Background="{DynamicResource AccentBrush}"
+                            <Border Classes="badge" IsVisible="{Binding IsRepresentative}" HorizontalAlignment="Left"
+                                    Background="{DynamicResource AccentBrush}"
                                     ToolTip.Tip="{Binding RepresentativeReason}">
                                 <StackPanel Orientation="Horizontal" Spacing="4">
                                     <PathIcon Data="{StaticResource IconStar}" Width="12" Height="12" Foreground="White"/>
-                                    <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                    <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White"/>
                                 </StackPanel>
                             </Border>
                             <!-- 3.7: «Лучший кадр» — самый резкий в группе похожих фото (только подсказка, не автоудаление) -->
-                            <Border IsVisible="{Binding IsSharpest}" HorizontalAlignment="Left"
-                                    CornerRadius="6" Padding="6,3" Background="{DynamicResource SuccessBrush}"
+                            <Border Classes="badge" IsVisible="{Binding IsSharpest}" HorizontalAlignment="Left"
+                                    Background="{DynamicResource SuccessBrush}"
                                     ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
                                 <StackPanel Orientation="Horizontal" Spacing="4">
                                     <PathIcon Data="{StaticResource IconImage}" Width="12" Height="12" Foreground="White"/>
-                                    <TextBlock Text="{Binding SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                    <TextBlock Text="{Binding SharpnessBadgeText}" Foreground="White"/>
                                 </StackPanel>
                             </Border>
                         </StackPanel>
@@ -52,9 +52,9 @@
                         <TextBlock Text="{Binding RelPath}" Classes="caption" TextTrimming="CharacterEllipsis"/>
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <TextBlock Text="{Binding SizeText}" Classes="caption"/>
-                            <Border IsVisible="{Binding ShowSimilarity}" CornerRadius="5" Padding="6,1"
+                            <Border Classes="badge" IsVisible="{Binding ShowSimilarity}"
                                     Background="{DynamicResource AccentSoft}">
-                                <TextBlock Text="{Binding SimilarityText}" FontSize="11"
+                                <TextBlock Text="{Binding SimilarityText}"
                                            Foreground="{DynamicResource AccentBrush}"/>
                             </Border>
                         </StackPanel>
@@ -72,9 +72,9 @@
                                     CommandParameter="{Binding}" ToolTip.Tip="{x:Static loc:Strings.OpenFolder}">
                                 <PathIcon Data="{StaticResource IconFolder}" Width="13" Height="13"/>
                             </Button>
-                            <Border IsVisible="{Binding IsProtected}" CornerRadius="5" Padding="6,1" VerticalAlignment="Center"
+                            <Border Classes="badge" IsVisible="{Binding IsProtected}" VerticalAlignment="Center"
                                     Background="{DynamicResource SuccessBrush}">
-                                <TextBlock Text="{x:Static loc:Strings.Protected}" FontSize="10" Foreground="White"/>
+                                <TextBlock Text="{x:Static loc:Strings.Protected}" Foreground="White"/>
                             </Border>
                         </StackPanel>
                     </StackPanel>
@@ -90,9 +90,9 @@
                         <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                             <TextBlock Text="{Binding CountText}" FontWeight="SemiBold"/>
                             <TextBlock Text="{Binding ReclaimText}" Classes="muted" VerticalAlignment="Center"/>
-                            <Border IsVisible="{Binding ShowConfidence}" CornerRadius="6" Padding="8,2"
+                            <Border Classes="badge" IsVisible="{Binding ShowConfidence}"
                                     Background="{DynamicResource AccentSoft}" VerticalAlignment="Center">
-                                <TextBlock VerticalAlignment="Center" Foreground="{DynamicResource AccentBrush}" FontSize="12">
+                                <TextBlock VerticalAlignment="Center" Foreground="{DynamicResource AccentBrush}">
                                     <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ConfidenceText}"/>
                                 </TextBlock>
                             </Border>
@@ -248,8 +248,18 @@
                         </StackPanel>
                         <ScrollViewer Grid.Row="1">
                             <StackPanel>
-                                <TextBlock Text="{Binding ExactEmpty}" Classes="muted" Margin="2,20"
-                                           IsVisible="{Binding ExactEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <!-- Ночь-4: пустое состояние — иконка + заголовок из VM + подсказка -->
+                                <StackPanel Margin="0,56" Spacing="10" HorizontalAlignment="Center"
+                                            IsVisible="{Binding ExactEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                    <PathIcon Data="{StaticResource IconLayers}" Width="48" Height="48"
+                                              Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="{Binding ExactEmpty}" FontSize="15" FontWeight="Medium"
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="420"/>
+                                    <TextBlock Classes="muted" Text="Запустите проверку на экране «Найти дубликаты» — группы одинаковых файлов появятся здесь."
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="380"/>
+                                </StackPanel>
                                 <ItemsControl ItemsSource="{Binding ExactGroups}" ItemTemplate="{StaticResource GroupCard}"/>
                                 <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
                                         Command="{Binding ShowMoreExactCommand}" IsVisible="{Binding CanShowMoreExact}"
@@ -287,8 +297,17 @@
                         </Border>
                         <ScrollViewer Grid.Row="2">
                             <StackPanel>
-                                <TextBlock Text="{Binding ImageEmpty}" Classes="muted" Margin="2,20"
-                                           IsVisible="{Binding ImageEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <StackPanel Margin="0,56" Spacing="10" HorizontalAlignment="Center"
+                                            IsVisible="{Binding ImageEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                    <PathIcon Data="{StaticResource IconImage}" Width="48" Height="48"
+                                              Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="{Binding ImageEmpty}" FontSize="15" FontWeight="Medium"
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="420"/>
+                                    <TextBlock Classes="muted" Text="Похожие фото ищутся в режимах проверки с анализом снимков — их можно выбрать перед запуском."
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="380"/>
+                                </StackPanel>
                                 <ItemsControl ItemsSource="{Binding SimilarImageGroups}" ItemTemplate="{StaticResource GroupCard}"/>
                                 <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
                                         Command="{Binding ShowMoreSimilarImagesCommand}" IsVisible="{Binding CanShowMoreSimilarImages}"
@@ -326,8 +345,17 @@
                         </Border>
                         <ScrollViewer Grid.Row="1">
                             <StackPanel>
-                                <TextBlock Text="{Binding AudioEmpty}" Classes="muted" Margin="2,20"
-                                           IsVisible="{Binding AudioEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                                <StackPanel Margin="0,56" Spacing="10" HorizontalAlignment="Center"
+                                            IsVisible="{Binding AudioEmpty, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                    <PathIcon Data="{StaticResource IconMusic}" Width="48" Height="48"
+                                              Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center"/>
+                                    <TextBlock Text="{Binding AudioEmpty}" FontSize="15" FontWeight="Medium"
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="420"/>
+                                    <TextBlock Classes="muted" Text="Похожая музыка ищется в глубоком режиме проверки — по звучанию, а не только по имени файла."
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="380"/>
+                                </StackPanel>
                                 <ItemsControl ItemsSource="{Binding SimilarAudioGroups}" ItemTemplate="{StaticResource GroupCard}"/>
                                 <Button Classes="ghost" HorizontalAlignment="Center" Margin="0,8,0,16"
                                         Command="{Binding ShowMoreSimilarAudioCommand}" IsVisible="{Binding CanShowMoreSimilarAudio}"
@@ -375,7 +403,7 @@
                         <TextBlock Text="{x:Static loc:Strings.RenamePreviewLabel}" Classes="muted"/>
                         <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10" MaxHeight="220">
                             <ScrollViewer>
-                                <TextBlock Text="{Binding RenamePreviewText}" FontFamily="Consolas,monospace" FontSize="12" TextWrapping="NoWrap"/>
+                                <TextBlock Text="{Binding RenamePreviewText}" Classes="mono" FontSize="12" TextWrapping="NoWrap"/>
                             </ScrollViewer>
                         </Border>
                         <TextBlock Text="{Binding RenameConflictText}" Foreground="{DynamicResource DangerBrush}" FontSize="12"
@@ -408,7 +436,7 @@
                     </StackPanel>
                     <Border Background="{DynamicResource AccentSoft}" CornerRadius="6" Padding="10" MaxHeight="200">
                         <ScrollViewer>
-                            <TextBlock Text="{Binding DistributePreviewText}" FontFamily="Consolas,monospace" FontSize="12"/>
+                            <TextBlock Text="{Binding DistributePreviewText}" Classes="mono" FontSize="12"/>
                         </ScrollViewer>
                     </Border>
                     <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right">
@@ -479,26 +507,26 @@
                                 <TextBlock Text="{Binding ViewerLeft.Name}" Foreground="White" FontWeight="SemiBold"
                                            FontSize="15" TextTrimming="CharacterEllipsis"/>
                                 <Border IsVisible="{Binding ViewerLeft.IsRepresentative, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentBrush}"
+                                        Classes="badge" Background="{DynamicResource AccentBrush}"
                                         VerticalAlignment="Center">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <PathIcon Data="{StaticResource IconStar}" Width="11" Height="11" Foreground="White"/>
-                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White"/>
                                     </StackPanel>
                                 </Border>
                                 <!-- 3.7: тот же бейдж «Лучший кадр», что на плитке -->
                                 <Border IsVisible="{Binding ViewerLeft.IsSharpest, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource SuccessBrush}"
+                                        Classes="badge" Background="{DynamicResource SuccessBrush}"
                                         VerticalAlignment="Center" ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <PathIcon Data="{StaticResource IconImage}" Width="11" Height="11" Foreground="White"/>
-                                        <TextBlock Text="{Binding ViewerLeft.SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                        <TextBlock Text="{Binding ViewerLeft.SharpnessBadgeText}" Foreground="White"/>
                                     </StackPanel>
                                 </Border>
                                 <Border IsVisible="{Binding ViewerLeft.ShowSimilarity, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
+                                        Classes="badge" Background="{DynamicResource AccentSoft}"
                                         VerticalAlignment="Center">
-                                    <TextBlock FontSize="11" Foreground="{DynamicResource AccentBrush}">
+                                    <TextBlock Foreground="{DynamicResource AccentBrush}">
                                         <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ViewerLeft.SimilarityText}"/>
                                     </TextBlock>
                                 </Border>
@@ -538,26 +566,26 @@
                                 <TextBlock Text="{Binding ViewerRight.Name}" Foreground="White" FontWeight="SemiBold"
                                            FontSize="15" TextTrimming="CharacterEllipsis"/>
                                 <Border IsVisible="{Binding ViewerRight.IsRepresentative, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentBrush}"
+                                        Classes="badge" Background="{DynamicResource AccentBrush}"
                                         VerticalAlignment="Center" ToolTip.Tip="{Binding ViewerRight.RepresentativeReason}">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <PathIcon Data="{StaticResource IconStar}" Width="11" Height="11" Foreground="White"/>
-                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White" FontSize="10"/>
+                                        <TextBlock Text="{x:Static loc:Strings.Representative}" Foreground="White"/>
                                     </StackPanel>
                                 </Border>
                                 <!-- 3.7: тот же бейдж «Лучший кадр», что на плитке -->
                                 <Border IsVisible="{Binding ViewerRight.IsSharpest, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource SuccessBrush}"
+                                        Classes="badge" Background="{DynamicResource SuccessBrush}"
                                         VerticalAlignment="Center" ToolTip.Tip="{x:Static loc:Strings.SharpestTooltip}">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <PathIcon Data="{StaticResource IconImage}" Width="11" Height="11" Foreground="White"/>
-                                        <TextBlock Text="{Binding ViewerRight.SharpnessBadgeText}" Foreground="White" FontSize="10"/>
+                                        <TextBlock Text="{Binding ViewerRight.SharpnessBadgeText}" Foreground="White"/>
                                     </StackPanel>
                                 </Border>
                                 <Border IsVisible="{Binding ViewerRight.ShowSimilarity, FallbackValue=False}"
-                                        CornerRadius="6" Padding="6,2" Background="{DynamicResource AccentSoft}"
+                                        Classes="badge" Background="{DynamicResource AccentSoft}"
                                         VerticalAlignment="Center">
-                                    <TextBlock FontSize="11" Foreground="{DynamicResource AccentBrush}">
+                                    <TextBlock Foreground="{DynamicResource AccentBrush}">
                                         <Run Text="{x:Static loc:Strings.Similarity}"/><Run Text=" "/><Run Text="{Binding ViewerRight.SimilarityText}"/>
                                     </TextBlock>
                                 </Border>

@@ -11,12 +11,19 @@
             <Setter Property="VerticalContentAlignment" Value="Stretch"/>
             <Setter Property="Padding" Value="18"/>
             <Setter Property="Background" Value="{DynamicResource SurfaceBackground}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource SurfaceBorder}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="CornerRadius" Value="{StaticResource CardRadius}"/>
         </Style>
         <Style Selector="Button.homeAction:pointerover /template/ ContentPresenter">
             <Setter Property="Background" Value="{DynamicResource SurfaceAlt}"/>
+        </Style>
+        <!-- Ночь-4: лёгкий lift карточки-кнопки вместо scale (переопределяет глобальный ховер) -->
+        <Style Selector="Button.homeAction:pointerover">
+            <Setter Property="RenderTransform" Value="translateY(-1px)"/>
+        </Style>
+        <Style Selector="Button.homeAction:pressed">
+            <Setter Property="RenderTransform" Value="translateY(0px) scale(0.99)"/>
         </Style>
         <Style Selector="Button.homeSmall">
             <Setter Property="MinHeight" Value="44"/>
@@ -24,10 +31,11 @@
         </Style>
         <Style Selector="Border.metric">
             <Setter Property="Background" Value="{DynamicResource SurfaceBackground}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource SurfaceBorder}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource CardBorder}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="CornerRadius" Value="{StaticResource CardRadius}"/>
             <Setter Property="Padding" Value="16"/>
+            <Setter Property="BoxShadow" Value="{DynamicResource CardShadow}"/>
         </Style>
     </UserControl.Styles>
 
@@ -84,7 +92,7 @@
                                       Foreground="{DynamicResource AccentBrush}"/>
                         </Border>
                         <StackPanel Grid.Column="1" Margin="16,0" Spacing="6">
-                            <TextBlock Text="{Binding StatusTitle}" FontSize="21" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding StatusTitle}" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3"/>
                             <TextBlock Text="{Binding StatusText}" Classes="muted" TextWrapping="Wrap"/>
                             <TextBlock Text="{Binding SafetyText}" FontSize="13"
                                        Foreground="{DynamicResource SuccessBrush}" TextWrapping="Wrap"/>
@@ -137,7 +145,7 @@
                                     <PathIcon Data="{StaticResource IconSearch}" Width="24" Height="24"
                                               Foreground="{DynamicResource AccentBrush}"/>
                                 </Border>
-                                <TextBlock Text="Найти дубликаты" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Text="Найти дубликаты" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
                             <TextBlock Grid.Row="1" Text="Фото, музыка, видео, документы"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
@@ -154,7 +162,7 @@
                                     <PathIcon Data="{StaticResource IconBroom}" Width="24" Height="24"
                                               Foreground="{DynamicResource SuccessBrush}"/>
                                 </Border>
-                                <TextBlock Text="Очистить мусор" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Text="Очистить мусор" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
                             <TextBlock Grid.Row="1" Text="Пустые папки, временные файлы, битые ярлыки"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
@@ -171,7 +179,7 @@
                                     <PathIcon Data="{StaticResource IconHealth}" Width="24" Height="24"
                                               Foreground="{DynamicResource WarningBrush}"/>
                                 </Border>
-                                <TextBlock Text="Проверить диски" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Text="Проверить диски" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
                             <TextBlock Grid.Row="1" Text="Состояние накопителей и предупреждения"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
@@ -188,7 +196,7 @@
                                     <PathIcon Data="{StaticResource IconDatabase}" Width="24" Height="24"
                                               Foreground="{DynamicResource IndigoBrush}"/>
                                 </Border>
-                                <TextBlock Text="Архив дисков" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <TextBlock Text="Архив дисков" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
                             <TextBlock Grid.Row="1" Text="Каталог файлов остаётся доступен после отключения"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
@@ -203,7 +211,7 @@
                         <Grid RowDefinitions="Auto,*">
                             <Grid ColumnDefinitions="*,Auto">
                                 <StackPanel>
-                                    <TextBlock Text="Последние диски" FontSize="19" FontWeight="SemiBold"/>
+                                    <TextBlock Text="Последние диски" Classes="h2"/>
                                     <TextBlock Text="{Binding LastSnapshotText}" Classes="caption" Margin="0,3,0,0"/>
                                     <!-- Этап 1.10: «вы освободили N ГБ» — накопленный результат работы программы -->
                                     <TextBlock Text="{Binding FreedTotalText}" Classes="caption" Margin="0,3,0,0"
@@ -253,7 +261,7 @@
                     </Border>
 
                     <StackPanel Grid.Column="1" Width="230" Spacing="10" Margin="14,0,0,0">
-                        <TextBlock Text="Дополнительно" FontSize="17" FontWeight="SemiBold" Margin="2,0,0,2"/>
+                        <TextBlock Text="Дополнительно" Classes="h2" Margin="2,0,0,2"/>
                         <Button Classes="ghost homeSmall" Command="{Binding OpenDuplicateResultsCommand}"
                                 ToolTip.Tip="Открыть уже найденные дубликаты">
                             <StackPanel Orientation="Horizontal" Spacing="8">

@@ -55,9 +55,10 @@
                                     <StackPanel Grid.Column="1" Margin="16,0" Spacing="4">
                                         <StackPanel Orientation="Horizontal" Spacing="10">
                                             <TextBlock Text="{Binding DisplayName}" FontSize="16" FontWeight="SemiBold"/>
-                                            <Border CornerRadius="6" Padding="8,2" VerticalAlignment="Center"
-                                                    Background="{DynamicResource SurfaceAlt}">
-                                                <TextBlock Text="{Binding StatusText}" FontSize="11"
+                                            <Border Classes="badge" VerticalAlignment="Center"
+                                                    Background="{DynamicResource SurfaceAlt}"
+                                                    BorderBrush="{DynamicResource SurfaceBorder}" BorderThickness="1">
+                                                <TextBlock Text="{Binding StatusText}"
                                                            Foreground="{DynamicResource TextSecondary}"/>
                                             </Border>
                                         </StackPanel>
