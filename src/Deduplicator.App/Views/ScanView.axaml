@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             xmlns:controls="clr-namespace:Deduplicator.App.Controls"
              x:Class="Deduplicator.App.Views.ScanView">
 
     <Grid RowDefinitions="Auto,*" Margin="28,24">
@@ -157,7 +158,11 @@
                 <Border Classes="card" IsVisible="{Binding IsRunning}" Width="560" HorizontalAlignment="Left">
                     <StackPanel Spacing="14">
                         <StackPanel Orientation="Horizontal" Spacing="10">
-                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanRunning}"/>
+                            <!-- Ночь-6: фирменное анимированное лого для живости; детальные счётчики ниже не трогаем.
+                                 IsVisible к IsRunning — чтобы анимация не крутилась в скрытой карточке. -->
+                            <controls:AnimatedLogo Size="48" VerticalAlignment="Center" Margin="0,0,2,0"
+                                                   IsVisible="{Binding IsRunning}"/>
+                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanRunning}" VerticalAlignment="Center"/>
                             <TextBlock Text="·" Classes="muted" VerticalAlignment="Center"/>
                             <TextBlock Text="{Binding StageTitle}" VerticalAlignment="Center"
                                        Foreground="{DynamicResource AccentBrush}" FontWeight="Medium"/>

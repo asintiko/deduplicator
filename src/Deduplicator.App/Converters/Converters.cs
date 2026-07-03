@@ -39,6 +39,10 @@ public static class Converters
     public static readonly FuncValueConverter<string?, bool> IsNotEmpty =
         new(s => !string.IsNullOrWhiteSpace(s));
 
+    /// <summary>Ночь-6: true→1.0, false→0.0 — плавное появление оверлеев: Opacity привязывают
+    /// к тому же флагу, что и IsVisible, и добавляют DoubleTransition (150 мс).</summary>
+    public static readonly FuncValueConverter<bool, double> ToOpacity = new(b => b ? 1.0 : 0.0);
+
     private static Geometry? ResourceGeometry(string key)
     {
         if (Application.Current is { } app &&

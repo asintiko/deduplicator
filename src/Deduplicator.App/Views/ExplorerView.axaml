@@ -1,6 +1,8 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             xmlns:conv="clr-namespace:Deduplicator.App.Converters"
+             xmlns:controls="clr-namespace:Deduplicator.App.Controls"
              x:Class="Deduplicator.App.Views.ExplorerView">
 
     <UserControl.Styles>
@@ -369,18 +371,29 @@
             </Border>
         </Border>
 
-        <!-- ===== Прогресс операции ===== -->
-        <Border IsVisible="{Binding IsTransferring}" Background="{DynamicResource OverlayDim}">
-            <Border Classes="card" Width="480" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
-                <StackPanel Spacing="14">
-                    <TextBlock Classes="h2" Text="{Binding TransferConfirmTitle}"/>
-                    <ProgressBar Minimum="0" Maximum="100" Value="{Binding TransferPercent}"/>
-                    <TextBlock Text="{Binding TransferStatus}" Classes="muted" TextTrimming="CharacterEllipsis"/>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Command="{Binding CancelTransferCommand}" IsEnabled="{Binding !CancelRequested}"
-                                Content="{x:Static loc:Strings.Cancel}"/>
+        <!-- ===== Прогресс операции (ночь-6: анимированное лого РЯДОМ с определённым прогрессом —
+             проценты и текущий файл важнее красоты, поэтому остаются) ===== -->
+        <Border IsVisible="{Binding IsTransferring}" Background="{DynamicResource OverlayDim}"
+                Opacity="{Binding IsTransferring, Converter={x:Static conv:Converters.ToOpacity}}">
+            <Border.Transitions>
+                <Transitions>
+                    <DoubleTransition Property="Opacity" Duration="0:0:0.15"/>
+                </Transitions>
+            </Border.Transitions>
+            <Border Classes="card" Width="520" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:AnimatedLogo Grid.Column="0" Size="64" VerticalAlignment="Center" Margin="0,0,20,0"
+                                           IsVisible="{Binding IsTransferring}"/>
+                    <StackPanel Grid.Column="1" Spacing="14">
+                        <TextBlock Classes="h2" Text="{Binding TransferConfirmTitle}"/>
+                        <ProgressBar Minimum="0" Maximum="100" Value="{Binding TransferPercent}"/>
+                        <TextBlock Text="{Binding TransferStatus}" Classes="muted" TextTrimming="CharacterEllipsis"/>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Command="{Binding CancelTransferCommand}" IsEnabled="{Binding !CancelRequested}"
+                                    Content="{x:Static loc:Strings.Cancel}"/>
+                        </StackPanel>
                     </StackPanel>
-                </StackPanel>
+                </Grid>
             </Border>
         </Border>
     </Panel>

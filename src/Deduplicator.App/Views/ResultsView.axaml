@@ -2,6 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:loc="clr-namespace:Deduplicator.App.Localization"
              xmlns:conv="clr-namespace:Deduplicator.App.Converters"
+             xmlns:controls="clr-namespace:Deduplicator.App.Controls"
              x:Class="Deduplicator.App.Views.ResultsView">
 
     <UserControl.Resources>
@@ -367,8 +368,14 @@
             </TabControl>
         </Grid>
 
-        <!-- ===== Подтверждение удаления ===== -->
-        <Border IsVisible="{Binding ShowDeleteConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
+        <!-- ===== Подтверждение удаления (ночь-6: плавное появление — Opacity к тому же флагу + переход) ===== -->
+        <Border IsVisible="{Binding ShowDeleteConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24"
+                Opacity="{Binding ShowDeleteConfirm, Converter={x:Static conv:Converters.ToOpacity}}">
+            <Border.Transitions>
+                <Transitions>
+                    <DoubleTransition Property="Opacity" Duration="0:0:0.15"/>
+                </Transitions>
+            </Border.Transitions>
             <Border Classes="card" Width="440" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
                 <StackPanel Spacing="16">
                     <TextBlock Classes="h2" Text="{x:Static loc:Strings.ConfirmDeleteTitle}"/>
@@ -448,15 +455,8 @@
             </Border>
         </Border>
 
-        <!-- ===== Индикатор загрузки результатов ===== -->
-        <Border IsVisible="{Binding IsBusy}" Background="{DynamicResource OverlayDimLight}" Margin="-28,-24">
-            <Border Classes="card" Width="240" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="22">
-                <StackPanel Spacing="12" HorizontalAlignment="Center">
-                    <ProgressBar IsIndeterminate="True" Width="180"/>
-                    <TextBlock Text="{Binding BusyStatus}" HorizontalAlignment="Center" Classes="muted" TextWrapping="Wrap"/>
-                </StackPanel>
-            </Border>
-        </Border>
+        <!-- ===== Индикатор загрузки результатов (ночь-6: фирменный BusyOverlay с анимированным лого) ===== -->
+        <controls:BusyOverlay IsVisible="{Binding IsBusy}" Text="{Binding BusyStatus}" Margin="-28,-24"/>
 
         <!-- ===== Подтверждение замены жёсткими ссылками ===== -->
         <Border IsVisible="{Binding ShowHardlinkConfirm}" Background="{DynamicResource OverlayDim}" Margin="-28,-24">
@@ -476,7 +476,14 @@
              Управление: ←/→ листают не-эталонные файлы, Esc закрывает (KeyDown в code-behind,
              фокус переносится на оверлей при открытии). Фон всегда тёмный, поэтому цвета текста
              здесь заданы явно, а не через тему. -->
-        <Border x:Name="ViewerOverlay" IsVisible="{Binding ShowViewer}" Background="{DynamicResource OverlayDimStrong}" Focusable="True" Margin="-28,-24">
+        <Border x:Name="ViewerOverlay" IsVisible="{Binding ShowViewer}" Background="{DynamicResource OverlayDimStrong}" Focusable="True" Margin="-28,-24"
+                Opacity="{Binding ShowViewer, Converter={x:Static conv:Converters.ToOpacity}}">
+            <!-- Ночь-6: плавное появление просмотрщика (150 мс) -->
+            <Border.Transitions>
+                <Transitions>
+                    <DoubleTransition Property="Opacity" Duration="0:0:0.15"/>
+                </Transitions>
+            </Border.Transitions>
             <Grid RowDefinitions="Auto,*,Auto" Margin="28,16,28,20">
                 <!-- Шапка: счётчик по центру, закрытие справа -->
                 <Grid Grid.Row="0" ColumnDefinitions="*,Auto,*">
