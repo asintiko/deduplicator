@@ -83,7 +83,7 @@ public partial class FileItemViewModel : ObservableObject
     public string Name => Model.Name;
     public string RelPath => Model.RelPath;
     public string SizeText => Format.Bytes(Model.Size);
-    public string VolumeText => VolumeLabel ?? $"Том #{Model.VolumeId}";
+    public string VolumeText => VolumeLabel ?? $"Диск №{Model.VolumeId}";
     public string SimilarityText => Format.Percent(Similarity);
     public bool ShowSimilarity => !IsRepresentative && Similarity < 1.0;
     public string ModifiedText => Format.DateShort(Model.Mtime);

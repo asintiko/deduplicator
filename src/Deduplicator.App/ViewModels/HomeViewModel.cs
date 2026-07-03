@@ -57,7 +57,7 @@ public partial class HomeViewModel : PageViewModel
     [ObservableProperty] private string _indexedFilesText = "0";
     [ObservableProperty] private string _duplicateGroupsText = "0";
     [ObservableProperty] private string _reclaimableText = "0 Б";
-    [ObservableProperty] private string _lastSnapshotText = "Снимков пока нет";
+    [ObservableProperty] private string _lastSnapshotText = "Проверок пока не было";
     [ObservableProperty] private string _freedTotalText = "";
     [ObservableProperty] private string _noDisksText = "";
 
@@ -126,7 +126,7 @@ public partial class HomeViewModel : PageViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                         _photoHintVolumeId = volumeId;
-                        PhotoDeviceHintText = $"Подключён носитель с фотографиями ({label}). Проверить на дубликаты?";
+                        PhotoDeviceHintText = $"Подключён диск с фотографиями ({label}). Проверить на дубликаты?";
                         try { PhotoDeviceDetected?.Invoke(label); } catch { }
                     });
                     break; // одной подсказки за раз достаточно
@@ -193,8 +193,8 @@ public partial class HomeViewModel : PageViewModel
             DuplicateGroupsText = $"{summary.Stats.TotalGroups:N0}";
             ReclaimableText = Format.Bytes(summary.Stats.TotalReclaimableBytes);
             LastSnapshotText = summary.LastScan == default
-                ? "Снимков пока нет"
-                : $"Последний снимок: {Format.DateShort(summary.LastScan)}";
+                ? "Проверок пока не было"
+                : $"Последняя проверка: {Format.DateShort(summary.LastScan)}";
             // 1.10: «до/после» — сколько места программа реально освободила за всё время.
             FreedTotalText = summary.Freed > 0
                 ? $"Освобождено с помощью программы: {Format.Bytes(summary.Freed)}"
@@ -213,7 +213,7 @@ public partial class HomeViewModel : PageViewModel
                     disk.DisplayName,
                     disk.IsConnected ? "Подключён" : "Сохранён в архиве",
                     Format.Count(disk.IndexedFileCount, "файл", "файла", "файлов"),
-                    disk.LastScanned is null ? "Не сканировался" : Format.DateShort(disk.LastScanned.Value),
+                    disk.LastScanned is null ? "Ещё не проверялся" : Format.DateShort(disk.LastScanned.Value),
                     Format.Bytes(disk.TotalBytes),
                     disk.IsConnected));
             }
@@ -269,13 +269,13 @@ public partial class HomeViewModel : PageViewModel
     private static string BuildStatusText(int connected, DuplicateStatistics stats)
     {
         if (connected == 0)
-            return "Подключите внешний диск или хранилище. Старые снимки файлов останутся доступны в архиве.";
+            return "Подключите внешний диск или флешку. Списки файлов с прошлых проверок остаются в архиве.";
 
         if (stats.TotalGroups > 0)
             return $"Найдено групп дублей: {stats.TotalGroups:N0}. Можно открыть результаты и выбрать, что убрать.";
 
         if (stats.TotalIndexedFiles > 0)
-            return "Файлы сохранены в каталоге. Можно искать дубликаты между подключёнными и уже знакомыми дисками.";
+            return "Списки файлов сохранены. Можно искать дубликаты даже с дисками, которые сейчас отключены.";
 
         return "Выберите поиск дубликатов. Программа запомнит файлы, чтобы диск было видно даже после отключения.";
     }

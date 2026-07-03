@@ -44,22 +44,22 @@
                     <!-- 2.9: тихий фоновый режим — для слабых ноутбуков и работы «между делом» -->
                     <CheckBox IsChecked="{Binding EcoMode, Mode=TwoWay}"
                               Content="Режим «Эко»: не мешать другой работе"
-                              ToolTip.Tip="Проверка идёт медленнее, но компьютер остаётся отзывчивым: пониженный приоритет и чтение в один поток"/>
+                              ToolTip.Tip="Проверка идёт медленнее, зато компьютер не тормозит и можно спокойно заниматься другими делами"/>
                     <!-- 3.4: переносимый кэш проверки на съёмных носителях (.dedupindex) -->
                     <CheckBox IsChecked="{Binding PortableIndexEnabled, Mode=TwoWay}"
-                              Content="Сохранять кэш проверки на съёмных носителях (ускоряет проверку на других компьютерах)"
-                              ToolTip.Tip="После проверки флешки или внешнего диска в его корне остаётся скрытый файл .dedupindex: другой компьютер с этим приложением не пересчитывает хэши заново. Перед удалением файлы всё равно перепроверяются побайтово"/>
+                              Content="Запоминать проверку на флешках и внешних дисках (на другом компьютере будет быстрее)"
+                              ToolTip.Tip="После проверки на флешке остаётся небольшой скрытый служебный файл. С ним другой компьютер с этой программой проверит её заметно быстрее. Перед удалением файлы всё равно проверяются заново"/>
                     <CheckBox IsChecked="{Binding ComputePixelHash, Mode=TwoWay}"
                               Content="{x:Static loc:Strings.SetPixelHash}"
                               ToolTip.Tip="Включайте, если важнее точность, чем скорость"/>
                     <CheckBox IsChecked="{Binding RotationInvariant, Mode=TwoWay}"
                               Content="{x:Static loc:Strings.SetRotation}"
-                              ToolTip.Tip="Помогает находить повернутые копии фото"/>
+                              ToolTip.Tip="Помогает находить повёрнутые копии фото"/>
                     <Grid ColumnDefinitions="*,160">
                         <TextBlock Text="{x:Static loc:Strings.SetParallelism}" VerticalAlignment="Center"/>
                         <NumericUpDown Grid.Column="1" Minimum="1" Maximum="16" Increment="1"
                                        Value="{Binding MaxParallelism, Mode=TwoWay}" ValueChanged="OnNumericChanged"
-                                       ToolTip.Tip="Больше число быстрее для SSD, но может сильнее нагружать компьютер"/>
+                                       ToolTip.Tip="Чем больше число, тем быстрее проверка, но компьютер может работать медленнее"/>
                     </Grid>
                     <Grid ColumnDefinitions="*,260">
                         <TextBlock Text="{x:Static loc:Strings.SetRule}" VerticalAlignment="Center"/>

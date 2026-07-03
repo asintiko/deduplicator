@@ -199,7 +199,7 @@
                         <!-- UI-аудит must №1: видимый путь к отмене — сразу из баннера успеха -->
                         <Button Grid.Column="1" Classes="ghost" VerticalAlignment="Top" Margin="8,0,0,0"
                                 Command="{Binding OpenJournalCommand}" Content="Открыть историю"
-                                ToolTip.Tip="Журнал операций: восстановление из карантина"/>
+                                ToolTip.Tip="Здесь видно, что было убрано, и можно вернуть файлы"/>
                         <Button Grid.Column="2" Classes="ghost" VerticalAlignment="Top"
                                 Command="{Binding DismissOperationBannerCommand}" Content="✕"/>
                     </Grid>
@@ -304,7 +304,7 @@
                                     <TextBlock Text="{Binding ImageEmpty}" FontSize="15" FontWeight="Medium"
                                                HorizontalAlignment="Center" TextAlignment="Center"
                                                TextWrapping="Wrap" MaxWidth="420"/>
-                                    <TextBlock Classes="muted" Text="Похожие фото ищутся в режимах проверки с анализом снимков — их можно выбрать перед запуском."
+                                    <TextBlock Classes="muted" Text="Чтобы находить похожие фото, перед запуском поиска выберите «Одинаковые файлы и похожие фото»."
                                                HorizontalAlignment="Center" TextAlignment="Center"
                                                TextWrapping="Wrap" MaxWidth="380"/>
                                 </StackPanel>
@@ -352,7 +352,7 @@
                                     <TextBlock Text="{Binding AudioEmpty}" FontSize="15" FontWeight="Medium"
                                                HorizontalAlignment="Center" TextAlignment="Center"
                                                TextWrapping="Wrap" MaxWidth="420"/>
-                                    <TextBlock Classes="muted" Text="Похожая музыка ищется в глубоком режиме проверки — по звучанию, а не только по имени файла."
+                                    <TextBlock Classes="muted" Text="Чтобы находить похожую музыку, перед запуском выберите самый полный режим поиска. Сравнивается звучание, а не имя файла."
                                                HorizontalAlignment="Center" TextAlignment="Center"
                                                TextWrapping="Wrap" MaxWidth="380"/>
                                 </StackPanel>

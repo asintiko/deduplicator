@@ -26,7 +26,7 @@ public sealed class VolumeItemViewModel : ObservableObject
 
     /// <summary>Сводка по индексации: количество файлов показываем только после сканирования.</summary>
     public string SummaryLine => Model.IndexedFileCount > 0
-        ? $"{Format.Count(Model.IndexedFileCount, "файл", "файла", "файлов")} в индексе   ·   {LastScanText}"
+        ? $"{Format.Count(Model.IndexedFileCount, "файл", "файла", "файлов")} запомнено   ·   {LastScanText}"
         : LastScanText;
 
     public string StatusText => IsConnected ? Strings.Connected : Strings.Disconnected;

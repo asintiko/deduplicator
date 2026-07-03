@@ -193,7 +193,7 @@ public sealed class ConsolidationPreviewItem
     public ConsolidationPreviewItem(ConsolidationItem item, bool willCopy)
     {
         Name = item.File.Name;
-        Source = item.File.VolumeLabel ?? $"Том #{item.File.VolumeId}";
+        Source = item.File.VolumeLabel ?? $"Диск №{item.File.VolumeId}";
         // 3.5: у схлопнутого похожего кадра показываем, какой файл поехал вместо него.
         if (item.CollapsedInto is not null)
         {

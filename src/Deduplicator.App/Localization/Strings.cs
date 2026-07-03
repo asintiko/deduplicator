@@ -11,12 +11,12 @@ public static class Strings
 
     // Экран загрузки
     public const string SplashStarting = "Запуск…";
-    public const string SplashDb = "Инициализация базы данных…";
-    public const string SplashVolumes = "Поиск носителей…";
+    public const string SplashDb = "Подготовка сохранённых данных…";
+    public const string SplashVolumes = "Ищем подключённые диски…";
     public const string SplashAlmost = "Почти готово…";
 
     // Навигация
-    public const string NavVolumes = "Диски";
+    public const string NavVolumes = "Мои диски";
     public const string NavExplorer = "Проводник";
     public const string NavScan = "Найти дубликаты";
     public const string NavResults = "Найденные дубли";
@@ -42,21 +42,21 @@ public static class Strings
     public const string Disconnected = "Не подключён";
     public const string Loading = "Загрузка…";
     public const string Nothing = "Нет данных";
-    public const string NeverScanned = "Не сканировался";
-    public const string LastScan = "Последняя сверка";
+    public const string NeverScanned = "Ещё не проверялся";
+    public const string LastScan = "Последняя проверка";
     public const string Files = "файлов";
     public const string Of = "из";
 
     // Носители
     public const string VolumesTitle = "Архив дисков";
     public const string VolumesSubtitle = "Запомненные диски и файлы остаются видны даже после отключения";
-    public const string ScanThisVolume = "Сканировать";
+    public const string ScanThisVolume = "Проверить";
     public const string OpenInExplorer = "Открыть в проводнике";
     public const string VolumeSerial = "Серийный номер";
     public const string VolumeFs = "Файловая система";
     public const string VolumeCapacity = "Объём";
-    public const string IndexedFiles = "Проиндексировано";
-    public const string SummaryTitle = "Сводка по базе";
+    public const string IndexedFiles = "Запомнено файлов";
+    public const string SummaryTitle = "Общая сводка";
     public const string TotalVolumes = "Дисков";
     public const string TotalFiles = "Всего файлов";
 
@@ -65,7 +65,7 @@ public static class Strings
     public const string ExplorerHint = "Для подключённых дисков показаны реальные файлы, для отключённых — сохранённый список";
     public const string ExplorerLive = "Сейчас с диска";
     public const string ExplorerIndexed = "Сохранённый список файлов (диск отключён)";
-    public const string ExplorerNeedScan = "Носитель отключён и ещё не сканировался — сохранённых данных нет.";
+    public const string ExplorerNeedScan = "Диск отключён и ещё не проверялся — сохранённого списка файлов нет.";
     public const string SelectVolume = "Выберите диск";
 
     // Проводник: панель содержимого, виды и операции (ночь-2)
@@ -87,7 +87,7 @@ public static class Strings
     public const string ColumnCreated = "Создан";
     public const string ColumnCategory = "Тип";
     public const string ColumnPath = "Путь";
-    public const string ColumnVolume = "Носитель";
+    public const string ColumnVolume = "Диск";
 
     // Сверка
     public const string ScanTitle = "Найти дубликаты";
@@ -125,7 +125,7 @@ public static class Strings
     public const string ScanSkipped = "Пропущено";
     public const string ScanGroups = "Найдено групп";
     public const string ScanDone = "Поиск завершён";
-    public const string ScanResume = "Возобновить прерванную сверку";
+    public const string ScanResume = "Продолжить прерванную проверку";
     public const string ScanNoVolumes = "Нет подключённых дисков. Подключите диск и обновите список.";
     public const string ViewResults = "Показать найденные дубли";
 
@@ -155,15 +155,15 @@ public static class Strings
     public const string SimilarManualHint = "Похожие файлы удаляются только вручную: 95% может быть нужной версией.";
     public const string NoGroups = "Дубликаты не найдены. Запустите поиск.";
     public const string ConfirmDeleteTitle = "Подтверждение удаления";
-    public const string ConfirmDeleteBody = "Отмеченные файлы будут перемещены в корзину/карантин. В каждой группе останется минимум одна копия. Продолжить?";
+    public const string ConfirmDeleteBody = "Файлы не удаляются насовсем: их можно будет вернуть. В каждой группе останется хотя бы одна копия. Продолжить?";
     public const string KeepAtLeastOne = "В группе должна остаться хотя бы одна копия.";
     public const string AutoSelect = "Отметить лишнее автоматически";
     public const string Export = "Экспорт CSV";
     public const string OpenFolder = "Показать в папке";
     public const string Protected = "Защищён";
     public const string HardlinkAction = "Заменить ссылками";
-    public const string HardlinkTitle = "Замена жёсткими ссылками";
-    public const string HardlinkWarning = "Дубликаты будут заменены жёсткими ссылками NTFS на эталон (в пределах одного тома). Содержимое не теряется, место освобождается. Внимание: все ссылки указывают на один и тот же файл — правка одной копии затронет остальные. Продолжить?";
+    public const string HardlinkTitle = "Замена копий ссылками";
+    public const string HardlinkWarning = "Лишние копии станут ссылками на эталон — место освободится, а файлы продолжат открываться как раньше. Важно: содержимое станет общим, изменение файла в одном месте изменит его и в остальных. Работает только для копий на одном диске. Продолжить?";
 
     // Статистика
     public const string StatisticsTitle = "Итоги проверок";
@@ -211,7 +211,7 @@ public static class Strings
     public const string OpDeleteRecycle = "В корзину";
     public const string OpQuarantine = "В карантин";
     public const string OpRestore = "Восстановление";
-    public const string OpHardlink = "Жёсткая ссылка";
+    public const string OpHardlink = "Замена ссылкой";
     public const string When = "Когда";
     public const string OpRestored = "Восстановлен";
     public const string RestoreFailed = "Не удалось восстановить: исходный путь занят или файл в карантине недоступен.";
@@ -221,7 +221,7 @@ public static class Strings
     public const string SetImageThreshold = "Насколько строго сравнивать фото";
     public const string SetAudioThreshold = "Насколько строго сравнивать музыку";
     public const string SetQuarantine = "Папка для безопасного хранения удалённых файлов";
-    public const string SetUseRecycle = "Удалять в Корзину Windows (иначе в карантин)";
+    public const string SetUseRecycle = "Убирать файлы в Корзину Windows (если выключено — в папку карантина)";
     public const string SetParallelism = "Скорость проверки";
     public const string SetPixelHash = "Проверять фото точнее, но медленнее";
     public const string SetRule = "Какую копию оставлять главной";
@@ -231,7 +231,7 @@ public static class Strings
     public const string ThemeDark = "Тёмная";
     public const string ThemeSystem = "Системная";
     public const string FpcalcAvailable = "Музыку можно сравнивать по звучанию";
-    public const string FpcalcMissing = "Похожая музыка недоступна: нужен fpcalc.exe";
+    public const string FpcalcMissing = "Поиск похожей музыки выключен: не найден файл fpcalc.exe";
     public const string SetRotation = "Учитывать повороты и отражения фото";
     public const string SetMinSize = "Не искать файлы меньше, МБ";
     public const string SetSkipHidden = "Не трогать скрытые и системные файлы";
@@ -242,7 +242,7 @@ public static class Strings
     public const string SetScanFilters = "Что пропускать при поиске";
     public const string SetUpdates = "Обновления программы";
     public const string SetCheckUpdates = "Проверять обновления на GitHub (требует интернет)";
-    public const string SetUpdateRepo = "Репозиторий обновлений (owner/name)";
+    public const string SetUpdateRepo = "Адрес обновлений на GitHub";
     public const string CheckNow = "Проверить сейчас";
     public const string UpdateUpToDate = "Установлена последняя версия";
     public const string UpdateAvailable = "Доступна новая версия";
@@ -280,7 +280,7 @@ public static class Strings
     public const string NavCrossDisk = "Между дисками";
     public const string CrossDiskTitle = "Дубли между дисками";
     public const string CrossDiskSubtitle = "Одинаковые файлы на разных дисках";
-    public const string CrossDiskNothing = "Совпадений между дисками не найдено. Просканируйте несколько дисков.";
+    public const string CrossDiskNothing = "Совпадений между дисками не найдено. Проверьте несколько дисков.";
     public const string CrossDiskAcross = "дисков";
     public const string RemoveFromCatalog = "Убрать из архива";
     public const string ConfirmRemoveVolume = "Убрать диск из архива вместе с сохранённым списком файлов?";
@@ -336,9 +336,9 @@ public static class Strings
     public const string Ok = "ОК";
 
     // Здоровье дисков (SMART)
-    public const string NavHealth = "Проверить диски";
-    public const string HealthTitle = "Проверить диски";
-    public const string HealthSubtitle = "Состояние накопителей и предупреждения";
+    public const string NavHealth = "Здоровье дисков";
+    public const string HealthTitle = "Здоровье дисков";
+    public const string HealthSubtitle = "Состояние дисков и предупреждения";
     public const string HealthHealthy = "Исправен";
     public const string HealthWarning = "Предупреждение";
     public const string HealthUnhealthy = "Неисправен";
@@ -353,9 +353,9 @@ public static class Strings
     public const string HealthSize = "Объём";
     public const string HealthRpm = "Обороты";
     public const string HealthHours = "ч";
-    public const string HealthNoData = "Не удалось получить данные о дисках. Некоторые показатели SMART доступны только при запуске от имени администратора.";
-    public const string HealthPredict = "SMART предсказывает возможный отказ — сделайте резервную копию.";
-    public const string HealthUnsupported = "Мониторинг здоровья доступен только на Windows.";
+    public const string HealthNoData = "Не удалось получить данные о дисках. Часть показателей видна только при запуске от имени администратора.";
+    public const string HealthPredict = "Диск может скоро выйти из строя — сделайте резервную копию важных файлов.";
+    public const string HealthUnsupported = "Проверка здоровья дисков доступна только на Windows.";
 
     // Категории
     public static string Category(Core.Models.FileCategory c) => c switch

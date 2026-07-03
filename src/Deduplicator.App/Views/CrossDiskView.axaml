@@ -13,10 +13,10 @@
                 <TextBlock Text="{Binding Summary}" Classes="muted" VerticalAlignment="Center"/>
                 <ProgressBar IsIndeterminate="True" Width="110" IsVisible="{Binding IsBusy}" VerticalAlignment="Center"/>
                 <Button Classes="primary" Command="{Binding OpenScanCommand}"
-                        ToolTip.Tip="Перейти к поиску дублей и просканировать несколько дисков">
+                        ToolTip.Tip="Перейти к поиску дубликатов и проверить несколько дисков">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <PathIcon Data="{StaticResource IconSearch}" Foreground="White"/>
-                        <TextBlock Text="Просканировать диски" Foreground="White"/>
+                        <TextBlock Text="Проверить диски" Foreground="White"/>
                     </StackPanel>
                 </Button>
                 <Button Classes="ghost" Command="{Binding LoadCommand}" ToolTip.Tip="Обновить список совпадений между дисками">

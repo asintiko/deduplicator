@@ -39,7 +39,7 @@
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="Проверка остановлена" FontWeight="SemiBold"/>
                                 <TextBlock Classes="caption" TextWrapping="Wrap"
-                                           Text="Просмотренные файлы сохранены в каталоге — повторный запуск пройдёт быстрее. Прежние результаты не тронуты."/>
+                                           Text="Просмотренные файлы уже запомнены — повторный запуск пройдёт быстрее. Прежние результаты не тронуты."/>
                             </StackPanel>
                         </StackPanel>
                     </Border>

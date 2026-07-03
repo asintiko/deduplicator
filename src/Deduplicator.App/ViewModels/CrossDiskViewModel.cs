@@ -97,7 +97,7 @@ public partial class CrossDiskViewModel : PageViewModel
                         {
                             Name = f.Name,
                             RelPath = f.RelPath,
-                            VolumeName = v?.DisplayName ?? $"Том #{f.VolumeId}",
+                            VolumeName = v?.DisplayName ?? $"Диск №{f.VolumeId}",
                             VolumeConnected = v?.IsConnected ?? false,
                             Size = f.Size
                         };

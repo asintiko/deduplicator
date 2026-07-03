@@ -73,7 +73,7 @@
                                    Text="{Binding PhotoDeviceHintText}"/>
                         <Button Grid.Column="2" Classes="primary homeSmall" VerticalAlignment="Center"
                                 Command="{Binding CheckPhotoDeviceCommand}"
-                                ToolTip.Tip="Найти дубликаты и похожие фото на подключённом носителе">
+                                ToolTip.Tip="Найти дубликаты и похожие фото на подключённом диске">
                             <TextBlock Text="Проверить" Foreground="White"/>
                         </Button>
                         <Button Grid.Column="3" Classes="ghost homeSmall" Margin="8,0,0,0" VerticalAlignment="Center"
@@ -172,18 +172,18 @@
                     </Button>
 
                     <Button Grid.Row="1" Grid.Column="0" Classes="homeAction" Command="{Binding OpenDiskHealthCommand}" Margin="0,14,0,0"
-                            ToolTip.Tip="Проверить состояние подключённых накопителей">
+                            ToolTip.Tip="Посмотреть состояние подключённых дисков">
                         <Grid RowDefinitions="Auto,*,Auto">
                             <StackPanel Orientation="Horizontal" Spacing="12">
                                 <Border Width="44" Height="44" CornerRadius="12" Background="{DynamicResource WarningSoft}">
                                     <PathIcon Data="{StaticResource IconHealth}" Width="24" Height="24"
                                               Foreground="{DynamicResource WarningBrush}"/>
                                 </Border>
-                                <TextBlock Text="Проверить диски" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
+                                <TextBlock Text="Здоровье дисков" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <TextBlock Grid.Row="1" Text="Состояние накопителей и предупреждения"
+                            <TextBlock Grid.Row="1" Text="Состояние дисков и предупреждения"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
-                            <TextBlock Grid.Row="2" Text="Открыть проверку" FontWeight="SemiBold"
+                            <TextBlock Grid.Row="2" Text="Посмотреть состояние" FontWeight="SemiBold"
                                        Foreground="{DynamicResource WarningBrush}"/>
                         </Grid>
                     </Button>
@@ -198,7 +198,7 @@
                                 </Border>
                                 <TextBlock Text="Архив дисков" FontSize="20" FontWeight="SemiBold" LetterSpacing="-0.3" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <TextBlock Grid.Row="1" Text="Каталог файлов остаётся доступен после отключения"
+                            <TextBlock Grid.Row="1" Text="Списки файлов видны даже после отключения диска"
                                        Classes="muted" FontSize="15" TextWrapping="Wrap" Margin="0,14,0,8"/>
                             <TextBlock Grid.Row="2" Text="Посмотреть диски" FontWeight="SemiBold"
                                        Foreground="{DynamicResource IndigoBrush}"/>

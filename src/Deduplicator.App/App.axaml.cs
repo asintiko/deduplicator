@@ -103,8 +103,8 @@ public partial class App : Application
         var home = Services.GetRequiredService<HomeViewModel>();
         home.PhotoDeviceDetected += label => // событие приходит уже на UI-потоке
             main.ShowToast(
-                "Носитель с фотографиями",
-                $"Подключён носитель с фотографиями ({label}). Нажмите, чтобы проверить на дубликаты.",
+                "Диск с фотографиями",
+                $"Подключён диск с фотографиями ({label}). Нажмите, чтобы проверить на дубликаты.",
                 onClick: () => home.CheckPhotoDeviceCommand.Execute(null));
 
         // В. Диск выдернули: успокаивающий тост — ничего не потеряно (ночь-1). Метку исчезнувшего

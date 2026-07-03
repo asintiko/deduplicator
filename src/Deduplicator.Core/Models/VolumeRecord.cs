@@ -69,7 +69,7 @@ public sealed class VolumeRecord
     {
         get
         {
-            var name = string.IsNullOrWhiteSpace(Label) ? (MountPath ?? Serial ?? $"Том #{Id}") : Label!;
+            var name = string.IsNullOrWhiteSpace(Label) ? (MountPath ?? Serial ?? $"Диск №{Id}") : Label!;
             return IsNetwork ? name + " (сетевой)" : name;
         }
     }

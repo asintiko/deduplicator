@@ -64,9 +64,9 @@ public partial class ScanViewModel : PageViewModel
 
     public string ScanModeHint => SelectedDepth?.Value switch
     {
-        ScanDepth.WithSimilarImagesAndAudio => "Медленнее: ищет точные дубли, похожие фото и похожую музыку.",
-        ScanDepth.WithSimilarImages => "Дольше: ищет точные дубли и похожие фотографии.",
-        _ => "Быстро: ищет одинаковые файлы по размеру и надежному хэшу. Лучше для первого запуска."
+        ScanDepth.WithSimilarImagesAndAudio => "Медленнее: ищет одинаковые файлы, похожие фото и похожую музыку.",
+        ScanDepth.WithSimilarImages => "Дольше: ищет одинаковые файлы и похожие фото.",
+        _ => "Быстро: находит полностью одинаковые файлы. Лучше для первого запуска."
     };
 
     [ObservableProperty] private string _stageTitle = "";
@@ -273,7 +273,7 @@ public partial class ScanViewModel : PageViewModel
         var missing = selected.Where(v => !connectedById.ContainsKey(v.Id)).ToList();
         if (missing.Count > 0)
         {
-            EmptyHint = "Недоступны выбранные носители: " +
+            EmptyHint = "Эти диски сейчас недоступны: " +
                         string.Join(", ", missing.Select(m => m.DisplayName)) +
                         ". Подключите их или снимите отметку — иначе результаты будут неполными.";
             _ = LoadVolumesAsync();

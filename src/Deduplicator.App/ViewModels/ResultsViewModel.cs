@@ -1025,11 +1025,11 @@ public partial class ResultsViewModel : PageViewModel
         // P0.1: файлы переименованы физически → обновляем строки в БД, иначе UI ссылается на старые пути.
         int dbFailed = await Task.Run(() => UpdateIndexAfterRename(result.RenamedPairs));
         if (dbFailed > 0)
-            OperationErrorText = $"Переименовано: {result.Renamed}, но индекс обновлён не полностью " +
+            OperationErrorText = $"Переименовано: {result.Renamed}, но сохранённый список файлов обновлён не полностью " +
                                  $"({dbFailed}). Запустите проверку этой папки заново. " +
                                  $"Детали сохранены в папке: {Path.Combine(_paths.RootDir, "recovery")}.";
         else
-            OperationSuccessText = $"Переименовано: {result.Renamed}. Индекс обновлён.";
+            OperationSuccessText = $"Переименовано: {result.Renamed}. Список файлов обновлён.";
 
         await LoadAsync(); // перечитать (пути изменились)
     }
@@ -1127,7 +1127,7 @@ public partial class ResultsViewModel : PageViewModel
         if (string.IsNullOrEmpty(path)) return;
 
         var sb = new StringBuilder();
-        sb.AppendLine("Тип;Группа;Эталон;Схожесть;Носитель;Путь;Размер(байт)");
+        sb.AppendLine("Тип;Группа;Эталон;Схожесть;Диск;Путь;Размер(байт)");
         // Экспорт полный: достраиваем ВСЕ страницы точных и похожих групп, если их ещё не открывали.
         EnsureAllExactBuilt();
         EnsureAllSimilarImagesBuilt();
@@ -1246,7 +1246,7 @@ public partial class ResultsViewModel : PageViewModel
         });
         if (notLinked > 0)
             OperationErrorText = $"Заменено ссылками: {linked}. Пропущено: {notLinked} " +
-                                 "(файл недоступен — возможно, диск отключён, содержимое не совпало или другой том). Эти файлы не тронуты.";
+                                 "(файл недоступен — возможно, диск отключён, содержимое изменилось или файл лежит на другом диске). Эти файлы не тронуты.";
         else if (linked > 0)
             OperationSuccessText = $"Заменено ссылками: {linked}. Место освобождено, содержимое файлов сохранено.";
         await LoadAsync();
