@@ -344,7 +344,7 @@
         "type": "Project",
         "dependencies": {
           "CoenM.ImageSharp.ImageHash": "[1.3.6, )",
-          "FastDedup.Engine": "[1.0.0, )",
+          "FastDedup.Engine": "[1.0.1, )",
           "Microsoft.Data.Sqlite": "[8.0.28, )",
           "Microsoft.Extensions.DependencyInjection.Abstractions": "[8.0.2, )",
           "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.3, )",
