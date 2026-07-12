@@ -18,6 +18,21 @@ public sealed class AppSettings
     /// <summary>Степень параллелизма для SSD (для HDD принудительно 1).</summary>
     public int MaxParallelism { get; set; } = 4;
 
+    /// <summary>
+    /// Пользовательский профиль нагрузки: Automatic, Gentle или Maximum.
+    /// Null означает старый settings.json: в этом случае продолжают действовать EcoMode и MaxParallelism.
+    /// </summary>
+    public string? PerformanceMode { get; set; } = PerformanceProfiles.Automatic;
+
+    /// <summary>Экспертное переопределение профиля числом воркеров из MaxParallelism.</summary>
+    public bool UseExpertParallelism { get; set; } = false;
+
+    /// <summary>
+    /// Явный opt-in: после нажатия «Начать проверку» разрешить одно UAC-подтверждение для отдельного
+    /// подписанного MFT-helper. Основной UI-процесс остаётся без повышения. По умолчанию выключено.
+    /// </summary>
+    public bool UseElevatedMftHelper { get; set; } = false;
+
     /// <summary>Считать pixel-hash для изображений (дороже, но точнее).</summary>
     public bool ComputePixelHash { get; set; } = false;
 
@@ -26,6 +41,12 @@ public sealed class AppSettings
 
     /// <summary>Тема оформления: "Light", "Dark" или "Default" (системная).</summary>
     public string Theme { get; set; } = "Default";
+
+    /// <summary>Масштаб типографики и основных элементов интерфейса (1.0–1.5).</summary>
+    public double UiScale { get; set; } = 1.0;
+
+    /// <summary>Отключить необязательные движения и бесконечные декоративные анимации.</summary>
+    public bool ReduceMotion { get; set; } = false;
 
     /// <summary>Путь к fpcalc.exe (если пусто — ищется рядом с приложением).</summary>
     public string? FpcalcPath { get; set; }
@@ -49,11 +70,24 @@ public sealed class AppSettings
     /// <summary>Расширения, исключаемые из сканирования (через запятую).</summary>
     public string ExcludedExtensions { get; set; } = "";
 
-    /// <summary>Проверять обновления на GitHub (по умолчанию выключено — приложение офлайн).</summary>
-    public bool CheckUpdatesEnabled { get; set; } = false;
+    /// <summary>Официальный репозиторий обновлений (GitHub Releases). Используется, если в настройках
+    /// не задан свой репозиторий — так авто-обновления работают «из коробки», без ручной настройки.</summary>
+    public const string DefaultUpdateRepository = "asintiko/deduplicator";
 
-    /// <summary>Репозиторий обновлений в формате owner/name.</summary>
+    /// <summary>Автоматически проверять обновления на GitHub при запуске. Включено по умолчанию:
+    /// проверка идёт в фоне и лишь показывает уведомление — ничего не скачивается и не ставится молча.</summary>
+    public bool CheckUpdatesEnabled { get; set; } = true;
+
+    /// <summary>Репозиторий обновлений в формате owner/name. Пусто → берётся <see cref="DefaultUpdateRepository"/>.</summary>
     public string UpdateRepository { get; set; } = "";
+
+    /// <summary>Фактический репозиторий обновлений: заданный пользователем или официальный по умолчанию.</summary>
+    public string EffectiveUpdateRepository =>
+        string.IsNullOrWhiteSpace(UpdateRepository) ? DefaultUpdateRepository : UpdateRepository.Trim();
+
+    /// <summary>Маркер одноразовой миграции авто-обновлений: у старых настроек его нет (false) —
+    /// тогда включаем авто-проверку один раз. После этого уважаем ручной выбор пользователя.</summary>
+    public bool UpdatesConfigured { get; set; } = false;
 
     /// <summary>Показывать ли обучение при первом запуске.</summary>
     public bool OnboardingCompleted { get; set; } = false;

@@ -55,6 +55,18 @@ public sealed class VolumeRecord
     /// </summary>
     public bool? HasSeekPenalty { get; set; }
 
+    /// <summary>
+    /// Номер физического диска Windows (MSFT_Partition.DiskNumber). Runtime-only: нужен планировщику
+    /// одного скана, в каталог БД не сохраняется и между перезагрузками не считается идентичностью тома.
+    /// </summary>
+    public uint? PhysicalDiskNumber { get; set; }
+
+    /// <summary>
+    /// Стабильный в пределах текущего запуска ключ физического устройства. Разделы одного диска
+    /// получают один ключ; при недоступной топологии используется консервативный volume/network key.
+    /// </summary>
+    public string? PhysicalDeviceKey { get; set; }
+
     public bool IsHdd => MediaType == 3;
     public bool IsSsd => MediaType == 4;
 

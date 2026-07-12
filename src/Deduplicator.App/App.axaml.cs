@@ -41,8 +41,10 @@ public partial class App : Application
                 splash.SetStatus(Strings.SplashDb);
                 Services = await Task.Run(Composition.Build);
 
-                // Тему применяем на UI-потоке.
-                ApplyTheme(Services.GetRequiredService<ISettingsService>().Current.Theme);
+                // Визуальные предпочтения применяем на UI-потоке до создания главного окна.
+                var appSettings = Services.GetRequiredService<ISettingsService>().Current;
+                ApplyTheme(appSettings.Theme);
+                ApplyUiPreferences(appSettings.UiScale, appSettings.ReduceMotion);
 
                 splash.SetStatus(Strings.SplashVolumes);
                 var volumes = Services.GetRequiredService<IVolumeService>();
@@ -98,6 +100,12 @@ public partial class App : Application
         if (s.SentinelEnabled && s.SentinelFolders.Count > 0)
             sentinel.Start(s.SentinelFolders);
 
+        // Авто-проверка обновлений на GitHub (официальный репозиторий по умолчанию) в фоне —
+        // не задерживает открытие окна. Обновление не устанавливается молча: показываем уведомление
+        // и открываем официальный release только по клику пользователя. Выключается в настройках.
+        if (s.CheckUpdatesEnabled)
+            _ = CheckUpdatesOnStartupAsync(main, s.EffectiveUpdateRepository);
+
         // Б. Подключён носитель с папкой DCIM: тост-приглашение (клик — сразу к проверке);
         // надёжный основной путь — баннер с кнопкой на Главной (HomeViewModel).
         var home = Services.GetRequiredService<HomeViewModel>();
@@ -136,6 +144,26 @@ public partial class App : Application
             }
             catch (Exception ex) { AppLog.Error("DriveRemovedToast", ex); }
         };
+    }
+
+    private async Task CheckUpdatesOnStartupAsync(MainWindow main, string repository)
+    {
+        try
+        {
+            var update = await Services.GetRequiredService<IUpdateService>().CheckAsync(repository);
+            if (update is not { IsNewer: true } ||
+                !Uri.TryCreate(update.Url, UriKind.Absolute, out var releaseUri) ||
+                releaseUri.Scheme != Uri.UriSchemeHttps)
+                return;
+
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+                main.ShowToast(
+                    "Доступно обновление " + update.LatestVersion,
+                    "Нажмите, чтобы открыть описание версии. Установка начнётся только после вашего подтверждения.",
+                    onClick: () => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(releaseUri.AbsoluteUri)
+                    { UseShellExecute = true })));
+        }
+        catch (Exception ex) { AppLog.Error("UpdateCheck.Startup", ex); }
     }
 
     /// <summary>Снапшот подключённых локальных/съёмных дисков: корень → человекочитаемая метка.
@@ -202,4 +230,24 @@ public partial class App : Application
         "Dark" => ThemeVariant.Dark,
         _ => ThemeVariant.Default
     };
+
+    public void ApplyUiPreferences(double scale, bool reduceMotion)
+    {
+        scale = Math.Clamp(scale, 1.0, 1.5);
+        Resources["UiBodyFontSize"] = 15d * scale;
+        Resources["UiH1FontSize"] = 30d * scale;
+        Resources["UiH2FontSize"] = 20d * scale;
+        Resources["UiDisplayFontSize"] = 34d * scale;
+        Resources["UiDisplayLineHeight"] = 40d * scale;
+        Resources["UiSectionFontSize"] = 18d * scale;
+        Resources["UiEyebrowFontSize"] = 11d * scale;
+        Resources["UiBodyLargeFontSize"] = 16d * scale;
+        Resources["UiBodyLineHeight"] = 24d * scale;
+        Resources["UiCaptionFontSize"] = 13.5d * scale;
+        Resources["UiControlMinHeight"] = 44d * scale;
+        Resources["UiCheckMinHeight"] = 40d * scale;
+        Resources["UiInputFontSize"] = 15d * scale;
+        Resources["UiButtonPadding"] = new Thickness(16d * scale, 9d * scale);
+        Infrastructure.MotionPreferences.ApplyUserPreference(reduceMotion);
+    }
 }

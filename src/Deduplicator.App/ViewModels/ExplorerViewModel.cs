@@ -26,6 +26,9 @@ namespace Deduplicator.App.ViewModels;
 /// </summary>
 public partial class ExplorerViewModel : PageViewModel
 {
+    private const int IndexedPageSize = 500;
+    private const int IndexedTreeChildrenLimit = 500;
+
     private readonly IVolumeService _volumes;
     private readonly FileRepository _files;
     private readonly ISettingsService _settings;
@@ -43,6 +46,12 @@ public partial class ExplorerViewModel : PageViewModel
 
     private long? _pendingSelectId;
     private int _treeLoadVersion;
+    private int _indexedPageOffset;
+
+    [ObservableProperty] private bool _isOfflinePaged;
+    [ObservableProperty] private bool _hasPreviousIndexedPage;
+    [ObservableProperty] private bool _hasNextIndexedPage;
+    [ObservableProperty] private string? _indexedPageText;
 
     public ExplorerViewModel(IVolumeService volumes, FileRepository files,
         ISettingsService settings, IFileTransferService transfer)
@@ -69,21 +78,45 @@ public partial class ExplorerViewModel : PageViewModel
     {
         // Запомнить текущий выбор, чтобы не сбрасывать его на первый диск при перезаходе на экран.
         long? keepId = _pendingSelectId ?? SelectedVolume?.Id;
+        try
+        {
+            var catalog = await Task.Run(() => _volumes.SyncAndGetCatalog());
+            Volumes.Clear();
+            foreach (var v in catalog) Volumes.Add(new VolumeItemViewModel(v));
+            _pendingSelectId = null;
 
-        var catalog = await Task.Run(() => _volumes.SyncAndGetCatalog());
-        Volumes.Clear();
-        foreach (var v in catalog) Volumes.Add(new VolumeItemViewModel(v));
-        _pendingSelectId = null;
+            var target = keepId is long id ? Volumes.FirstOrDefault(v => v.Id == id) : null;
+            target ??= Volumes.FirstOrDefault(v => v.IsConnected) ?? Volumes.FirstOrDefault();
 
-        var target = keepId is long id ? Volumes.FirstOrDefault(v => v.Id == id) : null;
-        target ??= Volumes.FirstOrDefault(v => v.IsConnected) ?? Volumes.FirstOrDefault();
+            // Всегда переустанавливаем (после Clear ссылка на прежний экземпляр уже не та) —
+            // это перерисует дерево ровно один раз через OnSelectedVolumeChanged.
+            if (ReferenceEquals(SelectedVolume, target))
+                await LoadTreeAsync(target);
+            else
+                SelectedVolume = target;
+        }
+        catch (Exception ex)
+        {
+            // Publish the completion state before the observable error marker so
+            // UI and callers never observe an error alongside a stale spinner.
+            IsBusy = false;
+            IsRightBusy = false;
+            ReportLoadError("Explorer.LoadVolumes", ex,
+                "Не удалось обновить список дисков. Проверьте подключение носителей и повторите.",
+                rightPanel: false);
+        }
+    }
 
-        // Всегда переустанавливаем (после Clear ссылка на прежний экземпляр уже не та) —
-        // это перерисует дерево ровно один раз через OnSelectedVolumeChanged.
-        if (ReferenceEquals(SelectedVolume, target))
-            await LoadTreeAsync(target);
-        else
-            SelectedVolume = target;
+    private void ReportLoadError(string context, Exception ex, string fallback, bool rightPanel)
+    {
+        string message = UserFacingError.Describe(ex, fallback);
+        AppLog.Error(context, ex);
+        SuccessText = null;
+        if (rightPanel) RightStatus = message;
+        else Status = message;
+        // Set the observable error marker last. Consumers awaiting OperationError
+        // can then safely read the matching status and completed busy state.
+        OperationError = message;
     }
 
     partial void OnSelectedVolumeChanged(VolumeItemViewModel? value)
@@ -98,53 +131,68 @@ public partial class ExplorerViewModel : PageViewModel
         // Версия загрузки: при быстром переключении дисков «опоздавший» результат
         // не должен смешивать узлы и не должен гасить индикатор актуальной загрузки.
         int version = ++_treeLoadVersion;
-
-        Root.Clear();
-        ResetRightPanel(volume);
-        if (volume is null) { Status = Strings.SelectVolume; SourceHint = null; IsBusy = false; return; }
-
-        IsBusy = true;
-        Status = Strings.Loading;
-
-        if (volume.IsConnected && volume.MountPath is not null)
+        try
         {
-            // Живое содержимое диска — доступно всегда, даже без сканирования.
-            SourceHint = Strings.ExplorerLive;
-            var mount = volume.MountPath;
-            // IsConnected — снапшот на момент загрузки каталога: диск могли выдернуть только что.
-            // Тогда честно говорим «отключён», а не показываем загадочно пустой список (ночь-1).
-            var (rootNodes, mountGone) = await Task.Run(() =>
-            {
-                var nodes = EnumerateChildren(mount);
-                bool gone = false;
-                if (nodes.Count == 0)
-                    try { gone = !Directory.Exists(LongPath.Fix(mount)); } catch { gone = true; }
-                return (nodes, gone);
-            });
-            if (version != _treeLoadVersion) return; // нас обогнала более новая загрузка
             Root.Clear();
-            foreach (var node in rootNodes) Root.Add(node);
-            Status = mountGone
-                ? "Диск отключён. Всё в порядке: сохранённый список файлов появится после обновления списка дисков."
-                : rootNodes.Count == 0 ? Strings.Nothing : null;
-        }
-        else
-        {
-            // Отключённый носитель — из сохранённых слепков.
-            SourceHint = Strings.ExplorerIndexed;
-            var tree = await Task.Run(() =>
-            {
-                var files = _files.GetByVolume(volume.Id);
-                return BuildTreeFromIndex(files);
-            });
-            if (version != _treeLoadVersion) return;
-            Root.Clear();
-            foreach (var node in tree) Root.Add(node);
-            Status = tree.Count == 0 ? Strings.ExplorerNeedScan : null;
-        }
+            ResetRightPanel(volume);
+            if (volume is null) { Status = Strings.SelectVolume; SourceHint = null; return; }
 
-        IsBusy = false;
-        await RefreshRightPanelAsync();
+            IsBusy = true;
+            Status = Strings.Loading;
+
+            if (volume.IsConnected && volume.MountPath is not null)
+            {
+                // Живое содержимое диска — доступно всегда, даже без сканирования.
+                SourceHint = Strings.ExplorerLive;
+                var mount = volume.MountPath;
+                // IsConnected — снапшот на момент загрузки каталога: диск могли выдернуть только что.
+                // Тогда честно говорим «отключён», а не показываем загадочно пустой список (ночь-1).
+                var (rootNodes, mountGone) = await Task.Run(() =>
+                {
+                    var nodes = EnumerateChildren(mount);
+                    bool gone = false;
+                    if (nodes.Count == 0)
+                        try { gone = !Directory.Exists(LongPath.Fix(mount)); } catch { gone = true; }
+                    return (nodes, gone);
+                });
+                if (version != _treeLoadVersion) return; // нас обогнала более новая загрузка
+                Root.Clear();
+                foreach (var node in rootNodes) Root.Add(node);
+                Status = mountGone
+                    ? "Диск отключён. Всё в порядке: сохранённый список файлов появится после обновления списка дисков."
+                    : rootNodes.Count == 0 ? Strings.Nothing : null;
+            }
+            else
+            {
+                // Отключённый носитель — только первый уровень сохранённого слепка. Прежняя версия
+                // загружала весь том и строила миллионное дерево; теперь каждый уровень читается
+                // отдельно и ограниченно, а правая панель даёт перейти на следующие страницы.
+                SourceHint = Strings.ExplorerIndexed;
+                var treePage = await Task.Run(() =>
+                    _files.GetDirectChildrenPage(volume.Id, null, 0, IndexedTreeChildrenLimit));
+                if (version != _treeLoadVersion) return;
+                Root.Clear();
+                foreach (var entry in treePage.Items) Root.Add(CreateIndexedNode(entry));
+                Status = volume.Model.IndexedFileCount == 0
+                    ? Strings.ExplorerNeedScan
+                    : treePage.HasMore
+                        ? $"В дереве показаны первые {IndexedTreeChildrenLimit} объектов. Остальные доступны справа по страницам."
+                        : null;
+            }
+
+            await RefreshRightPanelAsync();
+        }
+        catch (Exception ex)
+        {
+            if (version == _treeLoadVersion)
+                ReportLoadError("Explorer.LoadTree", ex,
+                    "Не удалось открыть содержимое диска. Переподключите носитель и повторите.",
+                    rightPanel: false);
+        }
+        finally
+        {
+            if (version == _treeLoadVersion) IsBusy = false;
+        }
     }
 
     // ---- Живой обход диска (ленивый) ----
@@ -155,6 +203,17 @@ public partial class ExplorerViewModel : PageViewModel
         var dir = node.AbsolutePath;
         var children = await Task.Run(() => EnumerateChildren(dir));
         foreach (var c in children) node.Children.Add(c);
+    }
+
+    private async Task LoadIndexedChildrenAsync(ExplorerNode node)
+    {
+        var volume = SelectedVolume;
+        if (volume is null || volume.IsConnected) return;
+        long volumeId = volume.Id;
+        var page = await Task.Run(() => _files.GetDirectChildrenPage(
+            volumeId, node.RelPath, 0, IndexedTreeChildrenLimit));
+        if (SelectedVolume?.Id != volumeId) return;
+        foreach (var entry in page.Items) node.Children.Add(CreateIndexedNode(entry));
     }
 
     private List<ExplorerNode> EnumerateChildren(string dir)
@@ -204,60 +263,23 @@ public partial class ExplorerViewModel : PageViewModel
         return result;
     }
 
-    // ---- Дерево из сохранённых слепков ----
+    // ---- Ленивые узлы сохранённого слепка ----
 
-    private static List<ExplorerNode> BuildTreeFromIndex(List<FileRecord> files)
+    private ExplorerNode CreateIndexedNode(IndexedExplorerEntry entry)
     {
-        var root = new ExplorerNode { IsFolder = true };
-        var folderIndex = new Dictionary<string, ExplorerNode> { [""] = root };
-
-        foreach (var f in files)
+        var node = new ExplorerNode
         {
-            var parts = f.RelPath.Split('\\', '/').Where(p => p.Length > 0).ToArray();
-            if (parts.Length == 0) continue;
-
-            var parent = root;
-            var pathAcc = "";
-            for (int i = 0; i < parts.Length - 1; i++)
-            {
-                pathAcc = pathAcc.Length == 0 ? parts[i] : pathAcc + "/" + parts[i];
-                if (!folderIndex.TryGetValue(pathAcc, out var folder))
-                {
-                    folder = new ExplorerNode { Name = parts[i], IsFolder = true, RelPath = pathAcc };
-                    folderIndex[pathAcc] = folder;
-                    parent.Children.Add(folder);
-                }
-                parent = folder;
-            }
-
-            parent.Children.Add(new ExplorerNode
-            {
-                Name = parts[^1],
-                IsFolder = false,
-                Category = f.Category,
-                Size = f.Size,
-                Modified = f.Mtime,
-                Created = f.Created,
-                RelPath = f.RelPath
-            });
-        }
-
-        SortRecursive(root);
-        return root.Children.ToList();
-    }
-
-    private static void SortRecursive(ExplorerNode node)
-    {
-        var ordered = node.Children
-            .OrderByDescending(c => c.IsFolder)
-            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        node.Children.Clear();
-        foreach (var c in ordered)
-        {
-            node.Children.Add(c);
-            if (c.IsFolder) SortRecursive(c);
-        }
+            Name = entry.Name,
+            IsFolder = entry.IsFolder,
+            Category = entry.Category,
+            Size = entry.Size,
+            Modified = entry.Modified,
+            Created = entry.Created,
+            RelPath = entry.RelPath
+        };
+        if (node.IsFolder)
+            node.EnableLazyLoading(LoadIndexedChildrenAsync, hasChildren: true);
+        return node;
     }
 
     // ==================================================================================
@@ -325,7 +347,15 @@ public partial class ExplorerViewModel : PageViewModel
         OnPropertyChanged(nameof(NameHeader));
         OnPropertyChanged(nameof(SizeHeader));
         OnPropertyChanged(nameof(DateHeader));
-        ResortEntries();
+        if (SelectedVolume is { IsConnected: false })
+        {
+            ResetIndexedPaging();
+            _ = RefreshRightPanelAsync();
+        }
+        else
+        {
+            ResortEntries();
+        }
     }
 
     /// <summary>Полный сброс правой панели на корень тома (вызывается при смене/перезагрузке тома).</summary>
@@ -342,6 +372,7 @@ public partial class ExplorerViewModel : PageViewModel
         ClearSelection();
         _columnsDirty = true;
         _entriesDirty = true;
+        ResetIndexedPaging();
         if (volume is null) return;
 
         Crumbs.Add(volume.IsConnected && volume.MountPath is not null
@@ -364,33 +395,102 @@ public partial class ExplorerViewModel : PageViewModel
         }
     }
 
-    /// <summary>Дети папки-крошки: с диска для живого тома, из памяти для слепка.</summary>
-    private async Task<List<ExplorerNode>> ChildrenOfAsync(ExplorerCrumb crumb)
+    /// <summary>Дети папки-крошки: с диска для живого тома, одной SQL-страницей для слепка.</summary>
+    private async Task<(List<ExplorerNode> Items, bool HasMore)> ChildrenPageOfAsync(
+        ExplorerCrumb crumb, int indexedOffset)
     {
         if (crumb.LivePath is { } path)
-            return await Task.Run(() => EnumerateChildren(path));
-        var source = crumb.SnapNode?.Children ?? Root;
-        // Слепок уже отсортирован «папки, затем имя»; пересортировка — по текущему полю.
-        return source.Where(n => n.Name != "…").ToList();
+            return (await Task.Run(() => EnumerateChildren(path)), false);
+
+        var volume = SelectedVolume;
+        if (volume is null || volume.IsConnected) return (new List<ExplorerNode>(), false);
+        string parent = crumb.SnapNode?.RelPath ?? string.Empty;
+        var page = await Task.Run(() => _files.GetDirectChildrenPage(
+            volume.Id, parent, indexedOffset, IndexedPageSize, SortField, SortAsc));
+        return (page.Items.Select(CreateIndexedNode).ToList(), page.HasMore);
     }
 
     private async Task LoadRightAsync()
     {
         _entriesDirty = false;
         int v = ++_rightVersion;
-        var crumb = Crumbs.LastOrDefault();
-        if (crumb is null) { Entries.Clear(); RightStatus = null; return; }
+        try
+        {
+            var crumb = Crumbs.LastOrDefault();
+            if (crumb is null) { Entries.Clear(); RightStatus = null; return; }
 
-        IsRightBusy = true;
-        var children = await ChildrenOfAsync(crumb);
-        if (v != _rightVersion) return;
+            IsRightBusy = true;
+            OperationError = null;
+            var page = await ChildrenPageOfAsync(crumb, _indexedPageOffset);
+            if (v != _rightVersion) return;
 
-        SortEntries(children);
-        Entries.Clear();
-        foreach (var c in children) Entries.Add(c);
-        RightStatus = Entries.Count == 0 ? Strings.ExplorerEmptyFolder : null;
-        ClearSelection();
-        IsRightBusy = false;
+            var children = page.Items;
+            // Для живого тома сортирует клиент. Офлайн-страница уже глобально отсортирована SQL-запросом:
+            // повторная сортировка не нужна, но безвредна для текущей страницы и сохраняет единый UX.
+            SortEntries(children);
+            Entries.Clear();
+            foreach (var c in children) Entries.Add(c);
+            UpdateIndexedPaging(children.Count, page.HasMore);
+            RightStatus = Entries.Count == 0 ? Strings.ExplorerEmptyFolder : null;
+            ClearSelection();
+        }
+        catch (Exception ex)
+        {
+            if (v == _rightVersion)
+                ReportLoadError("Explorer.LoadRight", ex,
+                    "Не удалось открыть эту папку. Проверьте доступ к диску и повторите.",
+                    rightPanel: true);
+        }
+        finally
+        {
+            if (v == _rightVersion) IsRightBusy = false;
+        }
+    }
+
+    private void ResetIndexedPaging()
+    {
+        _indexedPageOffset = 0;
+        IsOfflinePaged = SelectedVolume is { IsConnected: false };
+        HasPreviousIndexedPage = false;
+        HasNextIndexedPage = false;
+        IndexedPageText = IsOfflinePaged ? "Страница 1" : null;
+    }
+
+    private void UpdateIndexedPaging(int shown, bool hasMore)
+    {
+        IsOfflinePaged = SelectedVolume is { IsConnected: false };
+        if (!IsOfflinePaged)
+        {
+            HasPreviousIndexedPage = false;
+            HasNextIndexedPage = false;
+            IndexedPageText = null;
+            return;
+        }
+
+        HasPreviousIndexedPage = _indexedPageOffset > 0;
+        HasNextIndexedPage = hasMore;
+        int page = _indexedPageOffset / IndexedPageSize + 1;
+        int first = shown == 0 ? 0 : _indexedPageOffset + 1;
+        int last = _indexedPageOffset + shown;
+        IndexedPageText = shown == 0
+            ? $"Страница {page} · нет файлов"
+            : $"Страница {page} · объекты {first}–{last}";
+    }
+
+    [RelayCommand]
+    private async Task PreviousIndexedPageAsync()
+    {
+        if (_indexedPageOffset <= 0 || SelectedVolume is not { IsConnected: false }) return;
+        _indexedPageOffset = Math.Max(0, _indexedPageOffset - IndexedPageSize);
+        await RefreshRightPanelAsync();
+    }
+
+    [RelayCommand]
+    private async Task NextIndexedPageAsync()
+    {
+        if (!HasNextIndexedPage || SelectedVolume is not { IsConnected: false }) return;
+        _indexedPageOffset += IndexedPageSize;
+        await RefreshRightPanelAsync();
     }
 
     private void ResortEntries()
@@ -432,6 +532,7 @@ public partial class ExplorerViewModel : PageViewModel
     {
         var parent = Crumbs.LastOrDefault();
         if (parent is null) return;
+        ResetIndexedPaging();
         Crumbs.Add(MakeChildCrumb(parent, folder));
         PreviewFile = null;
         if (IsColumnsMode) { _entriesDirty = true; _ = AppendColumnAsync(Crumbs[^1]); }
@@ -448,6 +549,7 @@ public partial class ExplorerViewModel : PageViewModel
     {
         int idx = Crumbs.IndexOf(crumb);
         if (idx < 0) return;
+        ResetIndexedPaging();
         while (Crumbs.Count > idx + 1) Crumbs.RemoveAt(Crumbs.Count - 1);
         PreviewFile = null;
         if (IsColumnsMode)
@@ -488,21 +590,22 @@ public partial class ExplorerViewModel : PageViewModel
         }
         else if (root.LivePath is null)
         {
-            // Слепок: идём по сегментам RelPath от корня.
-            IEnumerable<ExplorerNode> pool = Root;
+            // Слепок ленивый: строим крошки прямо из нормализованного RelPath. Искать каждый сегмент
+            // в уже загруженной части дерева нельзя — нужный сосед мог оказаться на другой странице.
+            string acc = string.Empty;
             foreach (var seg in node.RelPath.Split('/', '\\').Where(s => s.Length > 0))
             {
-                var cur = pool.FirstOrDefault(c => c.IsFolder &&
-                    c.Name.Equals(seg, StringComparison.OrdinalIgnoreCase));
-                if (cur is null) return;
+                acc = acc.Length == 0 ? seg : acc + "/" + seg;
+                var cur = new ExplorerNode { Name = seg, IsFolder = true, RelPath = acc };
+                cur.EnableLazyLoading(LoadIndexedChildrenAsync, hasChildren: true);
                 chain.Add(new ExplorerCrumb(cur.Name, null, cur));
-                pool = cur.Children;
             }
         }
         else return;
 
         Crumbs.Clear();
         foreach (var c in chain) Crumbs.Add(c);
+        ResetIndexedPaging();
         PreviewFile = null;
         _ = RefreshRightPanelAsync();
     }
@@ -520,7 +623,9 @@ public partial class ExplorerViewModel : PageViewModel
         }
         catch (Exception ex)
         {
-            ToastRequested?.Invoke("Не удалось открыть файл", ex.Message);
+            ToastRequested?.Invoke("Не удалось открыть файл",
+                UserFacingError.Describe(ex, "Файл не удалось открыть. Он мог быть перемещён или занят другой программой."));
+            Deduplicator.Core.Util.AppLog.Error("Explorer.OpenFile", ex);
         }
     }
 
@@ -537,37 +642,69 @@ public partial class ExplorerViewModel : PageViewModel
         _columnsDirty = false;
         int v = ++_rightVersion;
         IsRightBusy = true;
-        _suppressColumnEvents = true;
-        Columns.Clear();
-
-        var crumbs = Crumbs.ToList();
-        var built = new List<ExplorerColumnViewModel>();
-        foreach (var crumb in crumbs)
+        OperationError = null;
+        try
         {
-            var col = new ExplorerColumnViewModel(crumb) { SelectionCallback = OnColumnSelected };
-            var children = await ChildrenOfAsync(crumb);
-            if (v != _rightVersion) { _suppressColumnEvents = false; return; }
-            SortEntries(children);
-            foreach (var c in children) col.Items.Add(c);
-            built.Add(col);
+            // Не держим suppression через await: устаревшая загрузка иначе могла навсегда
+            // заблокировать выбор после быстрого переключения вида.
+            _suppressColumnEvents = true;
+            try { Columns.Clear(); }
+            finally { _suppressColumnEvents = false; }
+
+            var crumbs = Crumbs.ToList();
+            var built = new List<ExplorerColumnViewModel>();
+            (List<ExplorerNode> Items, bool HasMore) currentPage = (new List<ExplorerNode>(), false);
+            for (int i = 0; i < crumbs.Count; i++)
+            {
+                var crumb = crumbs[i];
+                var col = new ExplorerColumnViewModel(crumb) { SelectionCallback = OnColumnSelected };
+                int offset = i == crumbs.Count - 1 ? _indexedPageOffset : 0;
+                var page = await ChildrenPageOfAsync(crumb, offset);
+                if (v != _rightVersion) return;
+                var children = page.Items;
+                SortEntries(children);
+                foreach (var c in children) col.Items.Add(c);
+                built.Add(col);
+                if (i == crumbs.Count - 1) currentPage = page;
+            }
+
+            _suppressColumnEvents = true;
+            try
+            {
+                foreach (var col in built) Columns.Add(col);
+
+                // Отразить текущий путь: в колонке i выбрана папка, соответствующая крошке i+1.
+                for (int i = 0; i + 1 < Columns.Count && i + 1 < crumbs.Count; i++)
+                {
+                    var next = crumbs[i + 1];
+                    Columns[i].Selected = Columns[i].Items.FirstOrDefault(n => n.IsFolder && NodeMatchesCrumb(n, next));
+                }
+            }
+            finally { _suppressColumnEvents = false; }
+
+            UpdateIndexedPaging(currentPage.Items.Count, currentPage.HasMore);
+            RightStatus = Columns.Count == 1 && Columns[0].Items.Count == 0 ? Strings.ExplorerEmptyFolder : null;
         }
-
-        foreach (var col in built) Columns.Add(col);
-
-        // Отразить текущий путь: в колонке i выбрана папка, соответствующая крошке i+1.
-        for (int i = 0; i + 1 < Columns.Count && i + 1 < crumbs.Count; i++)
+        catch (Exception ex)
         {
-            var next = crumbs[i + 1];
-            Columns[i].Selected = Columns[i].Items.FirstOrDefault(n => n.IsFolder && NodeMatchesCrumb(n, next));
+            if (v == _rightVersion)
+                ReportLoadError("Explorer.RebuildColumns", ex,
+                    "Не удалось построить список папок. Проверьте доступ к диску и повторите.",
+                    rightPanel: true);
         }
-        _suppressColumnEvents = false;
-        RightStatus = Columns.Count == 1 && Columns[0].Items.Count == 0 ? Strings.ExplorerEmptyFolder : null;
-        IsRightBusy = false;
+        finally
+        {
+            if (v == _rightVersion)
+            {
+                _suppressColumnEvents = false;
+                IsRightBusy = false;
+            }
+        }
     }
 
     private static bool NodeMatchesCrumb(ExplorerNode node, ExplorerCrumb crumb) =>
         crumb.SnapNode is not null
-            ? ReferenceEquals(node, crumb.SnapNode)
+            ? string.Equals(node.RelPath, crumb.SnapNode.RelPath, StringComparison.OrdinalIgnoreCase)
             : node.AbsolutePath is not null &&
               string.Equals(node.AbsolutePath, crumb.LivePath, StringComparison.OrdinalIgnoreCase);
 
@@ -575,13 +712,29 @@ public partial class ExplorerViewModel : PageViewModel
     {
         int v = ++_rightVersion;
         IsRightBusy = true;
-        var col = new ExplorerColumnViewModel(crumb) { SelectionCallback = OnColumnSelected };
-        var children = await ChildrenOfAsync(crumb);
-        if (v != _rightVersion) return;
-        SortEntries(children);
-        foreach (var c in children) col.Items.Add(c);
-        Columns.Add(col);
-        IsRightBusy = false;
+        OperationError = null;
+        try
+        {
+            var col = new ExplorerColumnViewModel(crumb) { SelectionCallback = OnColumnSelected };
+            var page = await ChildrenPageOfAsync(crumb, _indexedPageOffset);
+            if (v != _rightVersion) return;
+            var children = page.Items;
+            SortEntries(children);
+            foreach (var c in children) col.Items.Add(c);
+            Columns.Add(col);
+            UpdateIndexedPaging(children.Count, page.HasMore);
+        }
+        catch (Exception ex)
+        {
+            if (v == _rightVersion)
+                ReportLoadError("Explorer.AppendColumn", ex,
+                    "Не удалось открыть следующую папку. Проверьте доступ к диску и повторите.",
+                    rightPanel: true);
+        }
+        finally
+        {
+            if (v == _rightVersion) IsRightBusy = false;
+        }
     }
 
     private void OnColumnSelected(ExplorerColumnViewModel col, ExplorerNode? node)
@@ -598,6 +751,7 @@ public partial class ExplorerViewModel : PageViewModel
 
         if (node.IsFolder)
         {
+            ResetIndexedPaging();
             PreviewFile = null;
             var crumb = MakeChildCrumb(Crumbs[^1], node);
             Crumbs.Add(crumb);
@@ -742,8 +896,14 @@ public partial class ExplorerViewModel : PageViewModel
     // во время переноса разрешён по дизайну (см. OnNavigatedFrom), а Esc не должен молча
     // останавливать идущую операцию (для этого есть явная кнопка «Отмена»).
     public override bool HasOpenDialog => ShowTransferConfirm;
+    public bool IsInteractionEnabled => !ShowTransferConfirm && !IsTransferring;
     public override void CloseDialog() { if (ShowTransferConfirm) CancelTransferDialog(); }
-    partial void OnShowTransferConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnShowTransferConfirmChanged(bool value)
+    {
+        OnPropertyChanged(nameof(HasOpenDialog));
+        OnPropertyChanged(nameof(IsInteractionEnabled));
+    }
+    partial void OnIsTransferringChanged(bool value) => OnPropertyChanged(nameof(IsInteractionEnabled));
 
     [RelayCommand]
     private async Task ConfirmTransferAsync()
@@ -778,8 +938,10 @@ public partial class ExplorerViewModel : PageViewModel
         catch (Exception ex)
         {
             // Сервис ошибки по элементам не бросает; сюда попадает только неожиданное.
+            Core.Util.AppLog.Error("ExplorerViewModel.Transfer", ex);
             result = new TransferResult();
-            result.Failed.Add(new TransferError("", ex.Message));
+            result.Failed.Add(new TransferError("", UserFacingError.Describe(ex,
+                "Операцию не удалось завершить. Проверьте доступ к папкам и свободное место.")));
         }
         finally
         {

@@ -70,6 +70,15 @@ public sealed class HashService : IHashService
     /// <summary>До ~1 МБ выгоднее прочитать файл целиком одним чтением, чем двумя сиками (HDD).</summary>
     private const long SingleReadCap = 1L << 20;
 
+    /// <summary>Сколько байтов успешный partial-проход реально читает с носителя.</summary>
+    public static long EstimatePartialBytes(long size, bool preferWholeRead)
+    {
+        if (size <= 0) return 0;
+        if (size <= EdgeBytes * 2L) return size;
+        if (preferWholeRead && size <= SingleReadCap) return size;
+        return EdgeBytes * 2L + (size > MiddleBlockThreshold ? EdgeBytes : 0);
+    }
+
     public byte[] ComputePartialHash(string fullPath, long size, CancellationToken ct = default, bool preferWholeRead = false)
     {
         // P1.3: голову/хвост читаем по СМЕЩЕНИЮ через RandomAccess (без перемотки позиции потока) —

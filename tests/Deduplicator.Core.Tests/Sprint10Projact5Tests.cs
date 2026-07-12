@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Deduplicator.Core.Data;
 using Deduplicator.Core.Hashing;
+using Deduplicator.Core.Matching;
 using Deduplicator.Core.Models;
 
 namespace Deduplicator.Core.Tests;
@@ -165,14 +166,101 @@ public class Sprint10Projact5Tests : IDisposable
     }
 
     [Fact]
-    public void Empty_scope_falls_back_to_global_not_empty()
+    public void Missing_scope_marker_falls_back_to_global_for_legacy_calls()
     {
-        // КРИТИЧНО для безопасности: сессия без области → глобальная выборка, а НЕ пустой результат
-        // (иначе скан тома «не нашёл бы» дубликаты).
+        // Обратная совместимость: произвольный sessionId без BeginScope означает старый глобальный вызов.
+        // Явная пустая область проверяется отдельным тестом ниже.
         IndexFile("a.bin", 50); IndexFile("b.bin", 50);
         Assert.Equal(2, _files.CountFilesWithDuplicateSizes(99));
         Assert.Contains(50L, _files.GetDuplicateSizeCandidates(99));
         Assert.Equal(2, _files.GetBySizesOrdered(new[] { 50L }, 99).Count);
+    }
+
+    [Fact]
+    public void Explicit_empty_scope_stays_empty_and_never_leaks_global_rows()
+    {
+        var a = IndexFile("a.bin", 50); var b = IndexFile("b.bin", 50);
+        a.FullHash = b.FullHash = new byte[] { 1, 2, 3, 4 };
+        _files.UpdateComputedBatch(new[] { a, b });
+
+        const long sid = 100;
+        _files.BeginScope(sid);
+
+        Assert.Empty(_files.GetDuplicateSizeCandidates(sid));
+        Assert.Equal(0, _files.CountFilesWithDuplicateSizes(sid));
+        Assert.Empty(_files.GetBySizesOrdered(new[] { 50L }, sid));
+        Assert.Empty(_files.GetSharedFullHashes(sid));
+        Assert.Empty(_files.GetByFullHashes(new[] { a.FullHash! }, sid));
+    }
+
+    [Fact]
+    public void Scoped_full_hash_queries_do_not_read_files_outside_session()
+    {
+        var a = IndexFile("a.bin", 50); var b = IndexFile("b.bin", 50);
+        var x = IndexFile("x.bin", 50); var y = IndexFile("y.bin", 50);
+        var hash = new byte[] { 9, 8, 7, 6 };
+        foreach (var file in new[] { a, b, x, y }) file.FullHash = hash;
+        _files.UpdateComputedBatch(new[] { a, b, x, y });
+
+        const long sid = 101;
+        _files.AddScope(sid, new[] { a.Id, b.Id });
+
+        Assert.Single(_files.GetSharedFullHashes(sid));
+        var rows = _files.GetByFullHashes(new[] { hash }, sid);
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, f => f.Id == a.Id);
+        Assert.Contains(rows, f => f.Id == b.Id);
+        Assert.DoesNotContain(rows, f => f.Id == x.Id || f.Id == y.Id);
+    }
+
+    [Fact]
+    public void Volume_scope_is_built_in_sql_and_filters_categories()
+    {
+        var image = IndexFile("photo.jpg", 100);
+        image.Category = FileCategory.Image;
+        var document = IndexFile("note.pdf", 100);
+        document.Category = FileCategory.Document;
+        var other = IndexFile("blob.bin", 100);
+        other.Category = FileCategory.Other;
+        _files.UpsertMetaBatch(new[] { image, document, other });
+
+        const long sid = 102;
+        _files.AddVolumeToScope(sid, image.VolumeId,
+            new[] { FileCategory.Image, FileCategory.Document });
+
+        var rows = _files.GetBySizesOrdered(new[] { 100L }, sid);
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, f => f.Category == FileCategory.Image);
+        Assert.Contains(rows, f => f.Category == FileCategory.Document);
+        Assert.DoesNotContain(rows, f => f.Category == FileCategory.Other);
+    }
+
+    [Fact]
+    public void Exact_grouper_uses_session_scope_even_when_predicate_is_broad()
+    {
+        var a = IndexFile("a.bin", 50); var b = IndexFile("b.bin", 50);
+        var x = IndexFile("x.bin", 50); var y = IndexFile("y.bin", 50);
+        var hash = new byte[] { 7, 7, 7, 7 };
+        foreach (var file in new[] { a, b, x, y })
+            file.FullHash = hash;
+        _files.UpdateComputedBatch(new[] { a, b, x, y });
+
+        const long sid = 102;
+        _files.AddScope(sid, new[] { a.Id, b.Id });
+        var grouper = new DuplicateGrouper(_files, _groups, new LshRepository(_db), new HashService());
+        var volumes = new Dictionary<long, VolumeRecord>
+        {
+            [_volId] = new() { Id = _volId, IsConnected = false }
+        };
+
+        Assert.Equal(1, grouper.BuildExactGroups(
+            volumes, _ => true, RepresentativeRule.Oldest, null, default, sessionId: sid));
+        var members = _groups.GetGroups(MatchType.Exact, sid).Single().Members.Select(m => m.FileId).ToList();
+        Assert.Equal(2, members.Count);
+        Assert.Contains(a.Id, members);
+        Assert.Contains(b.Id, members);
+        Assert.DoesNotContain(x.Id, members);
+        Assert.DoesNotContain(y.Id, members);
     }
 
     [Fact]

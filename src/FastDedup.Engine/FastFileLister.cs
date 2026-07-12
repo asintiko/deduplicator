@@ -15,6 +15,12 @@ public sealed class FastListerOptions
     /// <summary>Параллелизм стадии stat (только MFT-путь). null — авто.</summary>
     public int? StatParallelism { get; init; }
 
+    /// <summary>
+    /// Опциональный клиент отдельного подписанного MFT-helper. Он используется только для целого
+    /// локального NTFS-тома без повышения основного процесса и только если корень заранее разрешён.
+    /// </summary>
+    public IElevatedMftBroker? ElevatedMftBroker { get; init; }
+
     /// <summary>Пропускать скрытые/системные файлы И каталоги.</summary>
     public bool SkipHiddenSystem { get; init; } = false;
 
@@ -59,6 +65,13 @@ public sealed class FastFileLister
                 foreach (var ef in EnumerateViaMftOrFallback(root, engineOpts, options, errors, ct, decision))
                     yield return ef;
             }
+            else if (decision.Reason == BackendFallbackReason.NotElevated &&
+                     options.ElevatedMftBroker?.CanEnumerate(root) == true)
+            {
+                foreach (var ef in EnumerateViaElevatedMftOrFallback(
+                             root, engineOpts, options, errors, ct, decision, options.ElevatedMftBroker))
+                    yield return ef;
+            }
             else
             {
                 options.OnBackend?.Invoke(decision);
@@ -75,6 +88,92 @@ public sealed class FastFileLister
             if (options.OnError != null)
                 foreach (var e in errors) options.OnError(e);
         }
+    }
+
+    /// <summary>
+    /// Отдельный helper передаёт сырые MFT-записи; клиент не отдаёт ни одного пути до Complete.
+    /// Любой отказ UAC, trust-gate, EOF, timeout или несовпадение count приводит к ПОЛНОМУ
+    /// Win32Find-обходу того же корня. QueryJournal/ReadDelta сюда не относятся и не повышаются.
+    /// </summary>
+    private static IEnumerable<EnumeratedFile> EnumerateViaElevatedMftOrFallback(
+        string root, ScanOptions engineOpts, FastListerOptions options,
+        ConcurrentBag<ScanError> errors, CancellationToken ct, BackendDecision originalDecision,
+        IElevatedMftBroker broker)
+    {
+        MftEnumerationUnavailableException? memoryFailure = PlanMftMemory(root);
+        if (memoryFailure is not null)
+        {
+            var lowMemory = originalDecision with
+            {
+                Backend = EnumerationBackend.Win32Find,
+                Reason = memoryFailure.Reason,
+                TechnicalDetails = memoryFailure.Message
+            };
+            options.OnBackend?.Invoke(lowMemory);
+            foreach (var ef in new Win32FindMetadataEnumerator().EnumerateMetadata(
+                         root, engineOpts, errors, ct, Win32FindDop(lowMemory, options)))
+                yield return ef;
+            yield break;
+        }
+
+        IEnumerable<EnumeratedFile> source = StatPaths(
+            broker.Enumerate(root, options.IncludeReparsePoints, options.SkipHiddenSystem,
+                options.OnReparseSkipped, ct), options, ct);
+        using IEnumerator<EnumeratedFile> iterator = source.GetEnumerator();
+        ElevatedMftBrokerUnavailableException? helperFailure = null;
+        while (true)
+        {
+            bool moved;
+            try { moved = iterator.MoveNext(); }
+            catch (Exception ex) when (TryFindHelperFailure(ex, out helperFailure))
+            {
+                break;
+            }
+
+            if (!moved)
+            {
+                options.OnBackend?.Invoke(originalDecision with
+                {
+                    Backend = EnumerationBackend.NtfsMftHelper,
+                    Reason = BackendFallbackReason.None,
+                    TechnicalDetails = "Полный MFT-обход выполнен отдельным подписанным helper-процессом."
+                });
+                yield break;
+            }
+            yield return iterator.Current;
+        }
+
+        var fallback = originalDecision with
+        {
+            Backend = EnumerationBackend.Win32Find,
+            Reason = helperFailure!.Reason,
+            TechnicalDetails = helperFailure.Message
+        };
+        options.OnBackend?.Invoke(fallback);
+        foreach (var ef in new Win32FindMetadataEnumerator().EnumerateMetadata(
+                     root, engineOpts, errors, ct, Win32FindDop(fallback, options)))
+            yield return ef;
+    }
+
+    private static bool TryFindHelperFailure(
+        Exception error, out ElevatedMftBrokerUnavailableException? helperFailure)
+    {
+        if (error is ElevatedMftBrokerUnavailableException direct)
+        {
+            helperFailure = direct;
+            return true;
+        }
+        if (error is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.Flatten().InnerExceptions)
+                if (TryFindHelperFailure(inner, out helperFailure)) return true;
+        }
+        else if (error.InnerException is not null &&
+                 TryFindHelperFailure(error.InnerException, out helperFailure))
+            return true;
+
+        helperFailure = null;
+        return false;
     }
 
     /// <summary>
@@ -107,7 +206,9 @@ public sealed class FastFileLister
                 TechnicalDetails = failure.Message
             };
             options.OnBackend?.Invoke(fb);
-            errors.Add(new ScanError(root, "MFT недоступен, используется совместимый быстрый режим: " + failure.Message));
+            // Это не ошибка полноты: Win32Find ниже заново и полностью обходит тот же корень.
+            // Причина fallback уже передана через OnBackend/TechnicalDetails; добавление в OnError
+            // ошибочно помечало успешный совместимый обход как неполный и запрещало checkpoint.
             source = new Win32FindMetadataEnumerator().EnumerateMetadata(root, engineOpts, errors, ct,
                 Win32FindDop(fb, options));
         }

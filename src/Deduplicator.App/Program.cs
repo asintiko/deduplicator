@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Avalonia;
+using Deduplicator.Core.Util;
 
 namespace Deduplicator.App;
 
@@ -12,10 +13,23 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            if (e.ExceptionObject is Exception ex) AppLog.Error("AppDomain.UnhandledException", ex);
+            else AppLog.Write($"FATAL AppDomain.UnhandledException: {e.ExceptionObject}");
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Error("TaskScheduler.UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
+
         // Один экземпляр на машину: стартовая чистка второго экземпляра (MarkUnfinishedAsFailed +
         // ClearGroupsNotInCompletedSessions) помечала АКТИВНУЮ сессию первого как Failed и удаляла
         // группы идущего скана — тот завершался «успехом» с неполными результатами (аудит 2026-07-02).
-        _singleInstanceMutex = new Mutex(initiallyOwned: true, @"Global\Deduplicator.SingleInstance", out bool createdNew);
+        // Local\ не требует SeCreateGlobalPrivilege: обычный пользователь после перехода на
+        // asInvoker всегда может запустить приложение. Одного экземпляра на интерактивный сеанс достаточно.
+        _singleInstanceMutex = new Mutex(initiallyOwned: true, @"Local\Deduplicator.SingleInstance", out bool createdNew);
         if (!createdNew)
         {
             MessageBoxW(IntPtr.Zero,
@@ -36,6 +50,7 @@ internal static class Program
         }
         finally
         {
+            AppLog.MarkCleanShutdown();
             try { _singleInstanceMutex.ReleaseMutex(); } catch { }
             _singleInstanceMutex.Dispose();
         }

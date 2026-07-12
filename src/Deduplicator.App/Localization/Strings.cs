@@ -18,7 +18,7 @@ public static class Strings
     // Навигация
     public const string NavVolumes = "Мои диски";
     public const string NavExplorer = "Проводник";
-    public const string NavScan = "Найти дубликаты";
+    public const string NavScan = "Найти копии";
     public const string NavResults = "Найденные дубли";
     public const string NavStatistics = "Итоги";
     public const string NavConsolidation = "Чистый архив";
@@ -90,7 +90,7 @@ public static class Strings
     public const string ColumnVolume = "Диск";
 
     // Сверка
-    public const string ScanTitle = "Найти дубликаты";
+    public const string ScanTitle = "Найти копии";
     public const string ScanSelectVolumes = "Выберите диски для проверки";
     public const string ScanSelectAll = "Выбрать все";
     public const string ScanMultiHint = "Можно выбрать несколько дисков сразу. Программа найдёт копии внутри дисков и между ними.";
@@ -153,7 +153,7 @@ public static class Strings
     public const string Similarity = "Схожесть";
     public const string Threshold = "Порог схожести";
     public const string SimilarManualHint = "Похожие файлы удаляются только вручную: 95% может быть нужной версией.";
-    public const string NoGroups = "Дубликаты не найдены. Запустите поиск.";
+    public const string NoGroups = "Копии не найдены. Запустите поиск.";
     public const string ConfirmDeleteTitle = "Подтверждение удаления";
     public const string ConfirmDeleteBody = "Файлы не удаляются насовсем: их можно будет вернуть. В каждой группе останется хотя бы одна копия. Продолжить?";
     public const string KeepAtLeastOne = "В группе должна остаться хотя бы одна копия.";
@@ -287,7 +287,7 @@ public static class Strings
 
     // Очистка диска (мусор)
     public const string NavCleanup = "Очистка";
-    public const string CleanupTitle = "Найти мусор";
+    public const string CleanupTitle = "Ненужные файлы";
     public const string CleanupSubtitle = "Пустые папки, временные файлы и битые ярлыки";
     public const string CleanupEmptyFolders = "Пустые папки";
     public const string CleanupZeroByte = "Файлы 0 байт";
@@ -295,11 +295,11 @@ public static class Strings
     public const string CleanupBroken = "Битые ярлыки";
     public const string CleanupLarge = "Большие файлы";
     public const string CleanupLargeThreshold = "Порог большого файла, МБ";
-    public const string CleanupScan = "Начать поиск мусора";
+    public const string CleanupScan = "Найти ненужные файлы";
     public const string CleanupFound = "Найдено";
     public const string CleanupDeleteSelected = "Удалить отмеченное в корзину";
-    public const string CleanupNothing = "Мусор не найден.";
-    public const string CleanupError = "Ошибка при поиске мусора";
+    public const string CleanupNothing = "Ненужные файлы не найдены.";
+    public const string CleanupError = "Не удалось проверить ненужные файлы";
     public const string CleanupConfirmBody = "Отмеченные элементы будут перемещены в Корзину Windows. Продолжить?";
     public const string CleanupDeleteFailed = "Не удалось удалить часть элементов";
     public const string CleanupWhat = "Что искать";
@@ -353,7 +353,7 @@ public static class Strings
     public const string HealthSize = "Объём";
     public const string HealthRpm = "Обороты";
     public const string HealthHours = "ч";
-    public const string HealthNoData = "Не удалось получить данные о дисках. Часть показателей видна только при запуске от имени администратора.";
+    public const string HealthNoData = "Windows не предоставила часть показателей диска. Основные сведения и проверка файлов по-прежнему доступны.";
     public const string HealthPredict = "Диск может скоро выйти из строя — сделайте резервную копию важных файлов.";
     public const string HealthUnsupported = "Проверка здоровья дисков доступна только на Windows.";
 

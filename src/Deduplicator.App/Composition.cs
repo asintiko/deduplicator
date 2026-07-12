@@ -81,6 +81,9 @@ public static class Composition
         services.AddSingleton<IAudioMatchService>(sp =>
             new AudioMatchService(sp.GetRequiredService<ISettingsService>().Current.FpcalcPath));
         services.AddSingleton<IDuplicateGrouper, DuplicateGrouper>();
+        // Отдельный helper создаётся лениво на один явно запущенный скан; регистрация сама UAC не показывает.
+        services.AddSingleton<FastDedup.Engine.IElevatedMftBrokerFactory,
+            FastDedup.Engine.ElevatedMftBrokerFactory>();
         // Быстрый энумератор файлов (USN/MFT) — источник файлов для ScanService.
         services.AddSingleton<FastDedup.Engine.FastFileLister>();
         services.AddSingleton<IScanService, ScanService>();
@@ -110,6 +113,8 @@ public static class Composition
 
         // Навигация и вью-модели (страницы — синглтоны, чтобы хранить состояние)
         services.AddSingleton<NavigationService>();
+        services.AddSingleton<IUiFeedbackDraftStore, UiFeedbackDraftStore>();
+        services.AddSingleton<FeedbackPickerViewModel>();
         services.AddSingleton<HomeViewModel>();
         services.AddSingleton<VolumesViewModel>();
         services.AddSingleton<ExplorerViewModel>();

@@ -232,6 +232,34 @@ public class Sprint23ConsolidationTests : IDisposable
         Assert.Equal("big.png", collapsed.CollapsedInto!.Name);
     }
 
+    [Fact]
+    public void Collapse_scales_past_twenty_thousand_candidates_without_changing_semantics()
+    {
+        var (files, cons, vol, _) = MakeConsolidationEnv("largecollapse");
+        const int count = 20_001;
+        var records = new List<FileRecord>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var record = PhotoRec(vol.Id, $"photo-{i:D5}.png", BaseHash, sharpness: i,
+                fullHashSeed: 1, size: 1_000 + i);
+            // Все содержательно уникальны (exact-групп нет), но имеют одинаковый pHash.
+            record.FullHash = BitConverter.GetBytes(i + 1L);
+            records.Add(record);
+        }
+        files.UpsertMetaBatch(records);
+
+        var plan = cons.BuildPlan(new ConsolidationOptions
+        {
+            SourceVolumeIds = { vol.Id },
+            TargetPath = Path.Combine(_dir, "largecollapse_target"),
+            CollapseSimilarPhotos = true
+        });
+
+        var kept = Assert.Single(plan.ToCopy);
+        Assert.Equal("photo-20000.png", kept.File.Name); // максимальная Sharpness
+        Assert.Equal(count - 1, plan.CollapsedSimilar.Count);
+    }
+
     // ---------------- 3.6: слим-выборка и дотяжка ----------------
 
     private (FileRepository Files, long Vid, Database Db) MakeRepoEnv(string name)

@@ -7,6 +7,8 @@ public enum EnumerationBackend
 {
     /// <summary>Турбо-режим: прямое чтение MFT/USN (только NTFS под админом, целый том).</summary>
     NtfsMft,
+    /// <summary>Полный MFT-обход выполнил отдельный подписанный helper; основной процесс не повышен.</summary>
+    NtfsMftHelper,
     /// <summary>Совместимый быстрый режим: FindFirstFileExW. Работает на любой локальной ФС.</summary>
     Win32Find,
     /// <summary>Совместимый режим для сетевых/UNC путей (скорость зависит от сети).</summary>
@@ -26,6 +28,8 @@ public enum BackendFallbackReason
     AccessDenied,
     UnsupportedUsnRecord,
     ApiError,
+    /// <summary>Отдельный подписанный MFT-helper недоступен, отклонён пользователем или оборвал IPC.</summary>
+    ElevatedHelperUnavailable,
     /// <summary>Прогноз: карта MFT не влезет в доступную память (миллионы записей при малом RAM).</summary>
     LowMemory
 }
@@ -101,13 +105,16 @@ public static class BackendMessages
         BackendFallbackReason.None when d.Backend == EnumerationBackend.NtfsMft =>
             $"{Vol(d)} — турбо-режим NTFS/MFT включён.",
 
+        BackendFallbackReason.None when d.Backend == EnumerationBackend.NtfsMftHelper =>
+            $"{Vol(d)} — полный обход NTFS ускорен одноразовым MFT-помощником; основное приложение работает с обычными правами.",
+
         BackendFallbackReason.NonNtfs =>
             $"{Vol(d)} — файловая система {d.FileSystem ?? "неизвестна"}. " +
             "MFT-режим доступен только для NTFS. Используется совместимый быстрый режим.",
 
         BackendFallbackReason.NotElevated =>
             $"{Vol(d)} — NTFS. Используется совместимый быстрый режим. " +
-            "Для турбо-режима (MFT) запустите программу от имени администратора.",
+            "Для ускорения полного обхода можно включить одноразовый MFT-помощник в экспертных настройках; повышать права всего приложения не нужно.",
 
         BackendFallbackReason.NotWholeVolume =>
             $"{d.Root} — выбрана папка, используется быстрый обход выбранной папки.",
@@ -120,6 +127,10 @@ public static class BackendMessages
 
         BackendFallbackReason.LowMemory =>
             $"{Vol(d)} — мало свободной памяти для турбо-режима (MFT): используется совместимый быстрый режим.",
+
+        BackendFallbackReason.ElevatedHelperUnavailable =>
+            $"{Vol(d)} — MFT-помощник не использован (подтверждение отменено, файл недоступен или не прошёл проверку доверия). " +
+            "Проверка продолжается в совместимом режиме.",
 
         _ => $"{Vol(d)} — используется совместимый быстрый режим."
     };

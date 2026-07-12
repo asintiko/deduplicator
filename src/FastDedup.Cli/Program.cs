@@ -23,7 +23,7 @@ Console.WriteLine("FastDedup — поиск дубликатов файлов");
 Console.WriteLine("Сканирую: " + string.Join(", ", roots));
 
 if (OperatingSystem.IsWindows() && !EngineEnvironment.IsElevated())
-    Console.WriteLine("Совет: запусти от имени администратора — тогда включится быстрый MFT/USN-режим.");
+    Console.WriteLine("MFT/USN недоступен: используется совместимый режим без повышенных прав.");
 Console.WriteLine();
 
 var progress = new Progress<ScanProgress>(p =>

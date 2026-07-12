@@ -14,9 +14,11 @@ public sealed class UsnDeltaApplyHooks
     /// <summary>
     /// Проиндексировать файл ТЕМ ЖЕ путём, что при обычном перечислении (фильтры атрибутов/
     /// системных папок/категорий + строгое переиспользование метаданных 2.7 + UpsertMetaBatch).
+    /// Второй аргумент — объединённая USN Reason-маска этого пути; индексатор использует её,
+    /// чтобы изменения содержимого не прошли как «неизменённые» только по size/mtime/created.
     /// false — файл отфильтрован и в индексе ему не место.
     /// </summary>
-    public required Func<Fde.EnumeratedFile, bool> TryIndexFile { get; init; }
+    public required Func<Fde.EnumeratedFile, uint, bool> TryIndexFile { get; init; }
 
     /// <summary>Удалить строку files по rel_path (том фиксирован вызывающим). Ноль строк — норма.</summary>
     public required Action<string> DeleteByRelPath { get; init; }
@@ -49,16 +51,17 @@ public static class UsnDeltaExecutor
 
         // Фаза 0: валидация ВСЕХ путей до каких-либо изменений БД.
         var deleteRel = new List<string>(plan.Deletes.Count);
-        var restatRel = new List<(string Full, string Rel)>(plan.Restats.Count);
+        var restatRel = new List<(string Full, string Rel, uint Reason)>(plan.Restats.Count);
         foreach (var full in plan.Deletes)
         {
             if (!TryRel(mountRoot, full, out var rel)) return new($"путь дельты вне тома: {full}", 0, 0);
             deleteRel.Add(rel);
         }
-        foreach (var full in plan.Restats)
+        foreach (var restat in plan.Restats)
         {
-            if (!TryRel(mountRoot, full, out var rel)) return new($"путь дельты вне тома: {full}", 0, 0);
-            restatRel.Add((full, rel));
+            if (!TryRel(mountRoot, restat.FullPath, out var rel))
+                return new($"путь дельты вне тома: {restat.FullPath}", 0, 0);
+            restatRel.Add((restat.FullPath, rel, restat.Reason));
         }
         if (!hooks.VolumeAlive())
             return new("носитель недоступен — дельта не применяется", 0, 0);
@@ -72,7 +75,7 @@ public static class UsnDeltaExecutor
                 deleted++;
             }
 
-            foreach (var (full, rel) in restatRel)
+            foreach (var (full, rel, reason) in restatRel)
             {
                 var ef = hooks.Stat(full);
                 if (ef is null)
@@ -86,7 +89,7 @@ public static class UsnDeltaExecutor
                     continue;
                 }
 
-                if (hooks.TryIndexFile(ef.Value))
+                if (hooks.TryIndexFile(ef.Value, reason))
                 {
                     reindexed++;
                 }
@@ -104,6 +107,12 @@ public static class UsnDeltaExecutor
         catch (OperationCanceledException)
         {
             throw; // отмена/пауза скана — не аномалия дельты
+        }
+        catch (VolumeIdentityChangedException)
+        {
+            // Это не повод пробовать full-rescan по той же букве: там уже другой физический том.
+            // Ошибка обязана дойти до ScanService и завершить всю сессию без публикации/checkpoint.
+            throw;
         }
         catch (Exception ex)
         {

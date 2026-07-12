@@ -1,4 +1,4 @@
-// Грубый перф-харнесс движка точных дубликатов v2 (Task 10 аудита). НЕ входит в основной solution —
+// Воспроизводимый перф-харнесс движка точных дубликатов v2 (входит в основной solution) —
 // запуск: dotnet run -c Release --project tools/DedupBench -- [enumN] [funnelN] [hashPairs] [hashKB]
 //
 // Сценарии:
@@ -42,10 +42,11 @@ void ScenarioEnumerate(int n)
     var dir = Path.Combine(root, "enum");
     // Раскладываем по подпапкам, чтобы дерево было реалистичным.
     int perDir = 2000;
+    byte[] marker = [0]; // Пустые файлы штатно отфильтровываются: они не экономят место.
     for (int i = 0; i < n; i++)
     {
         if (i % perDir == 0) Directory.CreateDirectory(Path.Combine(dir, "d" + (i / perDir)));
-        File.WriteAllBytes(Path.Combine(dir, "d" + (i / perDir), $"f{i}.bin"), Array.Empty<byte>());
+        File.WriteAllBytes(Path.Combine(dir, "d" + (i / perDir), $"f{i}.bin"), marker);
     }
     var lister = new FastFileLister();
     var sw = Stopwatch.StartNew();

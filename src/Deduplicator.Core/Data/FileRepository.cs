@@ -5,6 +5,16 @@ namespace Deduplicator.Core.Data;
 
 /// <summary>Доступ к слепкам файлов и выборкам для воронки дедупликации.</summary>
 public readonly record struct ExistingFileMeta(long Id, long Size, DateTimeOffset Mtime, DateTimeOffset Created);
+public sealed record CrossVolumeDuplicatePage(IReadOnlyList<List<FileRecord>> Groups, long TotalGroups);
+public sealed record IndexedExplorerEntry(
+    string Name,
+    string RelPath,
+    bool IsFolder,
+    long Size,
+    DateTimeOffset Modified,
+    DateTimeOffset Created,
+    FileCategory Category);
+public sealed record IndexedExplorerPage(IReadOnlyList<IndexedExplorerEntry> Items, bool HasMore);
 
 public sealed class FileRepository
 {
@@ -204,17 +214,40 @@ public sealed class FileRepository
     public void ClearAllScopes()
     {
         using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM scan_scope_files";
+        cmd.Transaction = tx;
+        cmd.CommandText = "DELETE FROM scan_scope_files; DELETE FROM scan_scope_volumes; " +
+                          "DELETE FROM scan_scope_sessions; " +
+                          "DELETE FROM scan_pending_file_deletes";
         cmd.ExecuteNonQuery();
+        tx.Commit();
     }
 
     /// <summary>Очистить область текущей сессии (перед заполнением).</summary>
     public void ClearScope(long sessionId)
     {
         using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM scan_scope_files WHERE scan_session_id=$sid";
+        cmd.Transaction = tx;
+        cmd.CommandText = "DELETE FROM scan_scope_files WHERE scan_session_id=$sid; " +
+                          "DELETE FROM scan_scope_volumes WHERE scan_session_id=$sid; " +
+                          "DELETE FROM scan_scope_sessions WHERE scan_session_id=$sid";
+        cmd.Add("$sid", sessionId);
+        cmd.ExecuteNonQuery();
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Объявить явную область сессии. В отличие от наличия строк в <c>scan_scope_files</c>, маркер
+    /// сохраняет смысл пустой папки: запросы возвращают пустой набор и не подмешивают старую базу.
+    /// </summary>
+    public void BeginScope(long sessionId)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO scan_scope_sessions(scan_session_id) VALUES($sid)";
         cmd.Add("$sid", sessionId);
         cmd.ExecuteNonQuery();
     }
@@ -222,9 +255,15 @@ public sealed class FileRepository
     /// <summary>Добавить файлы в область сессии (size/category берём из самих files). Идемпотентно.</summary>
     public void AddScope(long sessionId, IReadOnlyCollection<long> fileIds)
     {
-        if (fileIds.Count == 0) return;
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
+        using (var begin = conn.CreateCommand())
+        {
+            begin.Transaction = tx;
+            begin.CommandText = "INSERT OR IGNORE INTO scan_scope_sessions(scan_session_id) VALUES($sid)";
+            begin.Add("$sid", sessionId);
+            begin.ExecuteNonQuery();
+        }
         foreach (var chunk in fileIds.Chunk(400))
         {
             using var cmd = conn.CreateCommand();
@@ -234,7 +273,50 @@ public sealed class FileRepository
             cmd.Add("$sid", sessionId);
             cmd.CommandText =
                 "INSERT OR IGNORE INTO scan_scope_files (scan_session_id, file_id, size, category) " +
-                $"SELECT $sid, id, size, category FROM files WHERE id IN ({string.Join(",", names)})";
+                $"SELECT $sid, id, size, category FROM files WHERE id IN ({string.Join(",", names)}) " +
+                "AND NOT EXISTS (SELECT 1 FROM scan_pending_file_deletes p " +
+                "WHERE p.scan_session_id=$sid AND p.file_id=files.id)";
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Добавить компактные дескрипторы уже проиндексированного тома. Раньше INSERT ... SELECT
+    /// копировал в scan_scope_files строку на каждый файл даже при no-op USN-скане; теперь число
+    /// записей равно числу выбранных категорий, а scan_scope_effective разворачивает их при чтении.
+    /// </summary>
+    public void AddVolumeToScope(long sessionId, long volumeId,
+        IReadOnlyCollection<FileCategory> categories)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        using (var begin = conn.CreateCommand())
+        {
+            begin.Transaction = tx;
+            begin.CommandText = "INSERT OR IGNORE INTO scan_scope_sessions(scan_session_id) VALUES($sid)";
+            begin.Add("$sid", sessionId);
+            begin.ExecuteNonQuery();
+        }
+
+        if (categories.Count > 0)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            var names = new List<string>(categories.Count);
+            int i = 0;
+            foreach (var category in categories.Distinct())
+            {
+                var name = "$c" + i++;
+                names.Add(name);
+                cmd.Add(name, Mappers.CategoryToDb(category));
+            }
+            cmd.Add("$sid", sessionId);
+            cmd.Add("$vid", volumeId);
+            cmd.CommandText =
+                "INSERT OR IGNORE INTO scan_scope_volumes (scan_session_id, volume_id, category) " +
+                $"SELECT $sid, $vid, category FROM files WHERE volume_id=$vid " +
+                $"AND category IN ({string.Join(",", names)}) GROUP BY category";
             cmd.ExecuteNonQuery();
         }
         tx.Commit();
@@ -243,7 +325,7 @@ public sealed class FileRepository
     private static bool HasScope(Microsoft.Data.Sqlite.SqliteConnection conn, long sessionId)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT EXISTS(SELECT 1 FROM scan_scope_files WHERE scan_session_id=$sid)";
+        cmd.CommandText = "SELECT EXISTS(SELECT 1 FROM scan_scope_sessions WHERE scan_session_id=$sid)";
         cmd.Add("$sid", sessionId);
         return Convert.ToInt64(cmd.ExecuteScalar()) != 0;
     }
@@ -255,13 +337,229 @@ public sealed class FileRepository
         bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = scoped
-            ? "SELECT size FROM scan_scope_files WHERE scan_session_id=$sid AND size>0 GROUP BY size HAVING COUNT(*)>1"
+            ? "SELECT size FROM scan_scope_effective WHERE scan_session_id=$sid AND size>0 GROUP BY size HAVING COUNT(*)>1"
             : "SELECT size FROM files WHERE size > 0 GROUP BY size HAVING COUNT(*) > 1";
         if (scoped) cmd.Add("$sid", sessionId);
         using var r = cmd.ExecuteReader();
         var list = new List<long>();
         while (r.Read()) list.Add(r.Long(0));
         return list;
+    }
+
+    /// <summary>
+    /// Keyset-страница тома. В отличие от <see cref="GetByVolume"/> не материализует весь каталог:
+    /// потребители с последовательной обработкой держат в памяти только одну ограниченную пачку.
+    /// </summary>
+    public List<FileRecord> GetByVolumePage(long volumeId, long afterId, int limit)
+    {
+        if (limit <= 0) return new List<FileRecord>();
+        limit = Math.Min(limit, 10_000);
+
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {Cols} FROM files f " +
+                          "WHERE f.volume_id=$v AND f.id>$after ORDER BY f.id LIMIT $limit";
+        cmd.Add("$v", volumeId);
+        cmd.Add("$after", afterId);
+        cmd.Add("$limit", limit);
+        using var r = cmd.ExecuteReader();
+        var list = new List<FileRecord>();
+        while (r.Read()) list.Add(Map(r));
+        return list;
+    }
+
+    /// <summary>
+    /// Потоковая страница для плана консолидации нескольких томов. Бесхэшевые строки идут keyset
+    /// по id; хэшированные — по (full_hash, id), поэтому exact-группа не разрывается логически между
+    /// страницами и потребитель может завершать её сразу, не удерживая весь каталог в словаре.
+    /// </summary>
+    public List<FileRecord> GetConsolidationPage(
+        IReadOnlyCollection<long> volumeIds,
+        bool withFullHash,
+        long afterId,
+        byte[]? afterFullHash,
+        int limit)
+    {
+        if (volumeIds.Count == 0 || limit <= 0) return new List<FileRecord>();
+        limit = Math.Min(limit, 10_000);
+
+        using var conn = _db.Open();
+        using (var prepare = conn.CreateCommand())
+        {
+            prepare.CommandText = "DROP TABLE IF EXISTS temp._consolidation_volumes; " +
+                                  "CREATE TEMP TABLE _consolidation_volumes(id INTEGER PRIMARY KEY) WITHOUT ROWID";
+            prepare.ExecuteNonQuery();
+        }
+        foreach (var chunk in volumeIds.Where(id => id > 0).Distinct().Chunk(400))
+        {
+            using var insert = conn.CreateCommand();
+            var values = new List<string>(chunk.Length);
+            for (int i = 0; i < chunk.Length; i++)
+            {
+                string name = "$v" + i;
+                values.Add("(" + name + ")");
+                insert.Add(name, chunk[i]);
+            }
+            insert.CommandText = "INSERT OR IGNORE INTO _consolidation_volumes(id) VALUES " + string.Join(',', values);
+            insert.ExecuteNonQuery();
+        }
+
+        using var cmd = conn.CreateCommand();
+        if (withFullHash)
+        {
+            cmd.CommandText = $"SELECT {Cols} FROM files f " +
+                              "JOIN _consolidation_volumes selected ON selected.id=f.volume_id " +
+                              "WHERE f.full_hash IS NOT NULL " +
+                              "AND ($first=1 OR f.full_hash>$hash OR (f.full_hash=$hash AND f.id>$after)) " +
+                              "ORDER BY f.full_hash, f.id LIMIT $limit";
+            cmd.Add("$first", afterFullHash is null ? 1 : 0);
+            cmd.Add("$hash", afterFullHash);
+        }
+        else
+        {
+            cmd.CommandText = $"SELECT {Cols} FROM files f " +
+                              "JOIN _consolidation_volumes selected ON selected.id=f.volume_id " +
+                              "WHERE f.full_hash IS NULL AND f.id>$after ORDER BY f.id LIMIT $limit";
+        }
+        cmd.Add("$after", afterId);
+        cmd.Add("$limit", limit);
+        using var r = cmd.ExecuteReader();
+        var list = new List<FileRecord>();
+        while (r.Read()) list.Add(Map(r));
+        return list;
+    }
+
+    /// <summary>
+    /// Одна ограниченная страница НЕПОСРЕДСТВЕННЫХ детей сохранённой папки. Пути в старых/переносимых
+    /// индексах могут содержать оба разделителя, поэтому запрос нормализует их к '/'. Составной
+    /// expression-index в схеме ограничивает чтение поддеревом указанного префикса; в память не
+    /// строится дерево из всех строк тома. Папки всегда идут перед файлами, как в проводнике.
+    /// </summary>
+    public IndexedExplorerPage GetDirectChildrenPage(
+        long volumeId,
+        string? parentRelPath,
+        int offset,
+        int limit,
+        string sortField = "name",
+        bool sortAscending = true,
+        bool foldersOnly = false)
+    {
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
+        if (limit <= 0) return new IndexedExplorerPage(Array.Empty<IndexedExplorerEntry>(), false);
+        limit = Math.Min(limit, 5_000);
+
+        string parent = NormalizeIndexedPath(parentRelPath);
+        string prefix = parent.Length == 0 ? string.Empty : parent + "/";
+        // Любая строка, начинающаяся с prefix (оканчивается '/'), лежит в диапазоне [prefix, parent+'0').
+        string upperBound = parent.Length == 0 ? string.Empty : parent + "0";
+        string direction = sortAscending ? "ASC" : "DESC";
+        string itemOrder = sortField switch
+        {
+            "size" => $"size {direction}, name COLLATE NOCASE {direction}, name {direction}",
+            "date" => $"modified {direction}, name COLLATE NOCASE {direction}, name {direction}",
+            _ => $"name COLLATE NOCASE {direction}, name {direction}"
+        };
+        string subtreeRange = parent.Length == 0
+            ? string.Empty
+            : "AND replace(f.rel_path, char(92), '/') COLLATE NOCASE >= $prefix " +
+              "AND replace(f.rel_path, char(92), '/') COLLATE NOCASE < $upper";
+        string prefixGuard = parent.Length == 0
+            ? string.Empty
+            : "AND substr(norm_path, 1, length($prefix)) COLLATE NOCASE = $prefix";
+
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $$"""
+            WITH descendants AS (
+                SELECT replace(f.rel_path, char(92), '/') AS norm_path,
+                       f.size, f.mtime, f.created, f.category
+                FROM files f
+                WHERE f.volume_id=$v
+                  {{subtreeRange}}
+            ),
+            relative_rows AS (
+                SELECT CASE WHEN $root=1 THEN norm_path ELSE substr(norm_path, length($prefix)+1) END AS rest,
+                       norm_path, size, mtime, created, category
+                FROM descendants
+                WHERE norm_path COLLATE NOCASE <> $parent
+                  {{prefixGuard}}
+            ),
+            folder_rows AS (
+                SELECT substr(rest, 1, instr(rest, '/')-1) AS name
+                FROM relative_rows
+                WHERE instr(rest, '/')>0
+            ),
+            children AS (
+                SELECT 0 AS kind, name,
+                       CASE WHEN $root=1 THEN name ELSE $parent || '/' || name END AS rel_path,
+                       0 AS size, '' AS modified, '' AS created, 'other' AS category
+                FROM folder_rows
+                WHERE name<>''
+                GROUP BY name COLLATE NOCASE
+                UNION ALL
+                SELECT 1 AS kind, rest AS name, norm_path AS rel_path,
+                       size, mtime AS modified, coalesce(created, '') AS created, coalesce(category, 'other') AS category
+                FROM relative_rows
+                WHERE instr(rest, '/')=0 AND rest<>''
+            )
+            SELECT kind, name, rel_path, size, modified, created, category
+            FROM children
+            WHERE $foldersOnly=0 OR kind=0
+            ORDER BY kind ASC,
+                     CASE WHEN kind=0 THEN name END COLLATE NOCASE ASC,
+                     CASE WHEN kind=0 THEN name END ASC,
+                     {{itemOrder}}
+            LIMIT $take OFFSET $offset
+            """;
+        cmd.Add("$v", volumeId);
+        cmd.Add("$root", parent.Length == 0 ? 1 : 0);
+        cmd.Add("$parent", parent);
+        cmd.Add("$prefix", prefix);
+        cmd.Add("$upper", upperBound);
+        cmd.Add("$foldersOnly", foldersOnly ? 1 : 0);
+        cmd.Add("$take", limit + 1);
+        cmd.Add("$offset", offset);
+
+        using var r = cmd.ExecuteReader();
+        var items = new List<IndexedExplorerEntry>(limit + 1);
+        while (r.Read())
+        {
+            bool isFolder = r.GetInt32(0) == 0;
+            items.Add(new IndexedExplorerEntry(
+                r.Str(1) ?? string.Empty,
+                r.Str(2) ?? string.Empty,
+                isFolder,
+                r.Long(3),
+                isFolder ? default : Db.ParseDate(r.Str(4)),
+                isFolder ? default : Db.ParseDate(r.Str(5)),
+                isFolder ? FileCategory.Other : Mappers.ParseCategory(r.Str(6))));
+        }
+
+        bool hasMore = items.Count > limit;
+        if (hasMore) items.RemoveAt(items.Count - 1);
+        return new IndexedExplorerPage(items, hasMore);
+    }
+
+    private static string NormalizeIndexedPath(string? path) =>
+        string.IsNullOrWhiteSpace(path)
+            ? string.Empty
+            : path.Replace('\\', '/').Trim('/');
+
+    /// <summary>Размеры-кандидаты вместе с числом файлов — планировщик не создаёт гигантскую пачку.</summary>
+    public List<(long Size, long Count)> GetDuplicateSizeCandidateCounts(long sessionId = 0)
+    {
+        using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = scoped
+            ? "SELECT size, COUNT(*) FROM scan_scope_effective WHERE scan_session_id=$sid AND size>0 " +
+              "GROUP BY size HAVING COUNT(*)>1 ORDER BY size"
+            : "SELECT size, COUNT(*) FROM files WHERE size>0 GROUP BY size HAVING COUNT(*)>1 ORDER BY size";
+        if (scoped) cmd.Add("$sid", sessionId);
+        using var reader = cmd.ExecuteReader();
+        var result = new List<(long, long)>();
+        while (reader.Read()) result.Add((reader.GetInt64(0), reader.GetInt64(1)));
+        return result;
     }
 
     /// <summary>Лёгкий неблокирующий чекпоинт WAL — движок зовёт между пачками размеров.</summary>
@@ -274,8 +572,8 @@ public sealed class FileRepository
         bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = scoped
-            ? "SELECT COUNT(*) FROM scan_scope_files WHERE scan_session_id=$sid AND size>0 AND size IN " +
-              "(SELECT size FROM scan_scope_files WHERE scan_session_id=$sid AND size>0 GROUP BY size HAVING COUNT(*)>1)"
+            ? "SELECT COUNT(*) FROM scan_scope_effective WHERE scan_session_id=$sid AND size>0 AND size IN " +
+              "(SELECT size FROM scan_scope_effective WHERE scan_session_id=$sid AND size>0 GROUP BY size HAVING COUNT(*)>1)"
             : "SELECT COUNT(*) FROM files WHERE size > 0 AND size IN " +
               "(SELECT size FROM files WHERE size > 0 GROUP BY size HAVING COUNT(*) > 1)";
         if (scoped) cmd.Add("$sid", sessionId);
@@ -307,6 +605,75 @@ public sealed class FileRepository
         return list;
     }
 
+    public List<FileRecord> GetBySizePage(long size, long afterId, int limit, long sessionId = 0)
+    {
+        limit = Math.Clamp(limit, 1, 10_000);
+        using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = scoped
+            ? $"SELECT {Cols} FROM files f JOIN scan_scope_effective s " +
+              "ON s.file_id=f.id AND s.scan_session_id=$sid " +
+              "WHERE f.size=$size AND f.id>$after ORDER BY f.id LIMIT $limit"
+            : $"SELECT {Cols} FROM files f WHERE f.size=$size AND f.id>$after ORDER BY f.id LIMIT $limit";
+        cmd.Add("$size", size);
+        cmd.Add("$after", afterId);
+        cmd.Add("$limit", limit);
+        if (scoped) cmd.Add("$sid", sessionId);
+        using var reader = cmd.ExecuteReader();
+        var result = new List<FileRecord>(limit);
+        while (reader.Read()) result.Add(Map(reader));
+        return result;
+    }
+
+    /// <summary>
+    /// Страница файлов одного размера, чей partial_hash действительно имеет коллизию. Группировка
+    /// выполняется SQLite, поэтому даже миллион одинаковых размеров не материализуется в RAM.
+    /// </summary>
+    public List<FileRecord> GetFullHashCandidatesForSizePage(long size, long afterId, int limit,
+        long sessionId = 0)
+    {
+        limit = Math.Clamp(limit, 1, 10_000);
+        using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = scoped
+            ? $"""
+                WITH shared AS (
+                    SELECT f2.partial_hash
+                    FROM files f2
+                    JOIN scan_scope_effective s2 ON s2.file_id=f2.id AND s2.scan_session_id=$sid
+                    WHERE f2.size=$size AND f2.partial_hash IS NOT NULL
+                    GROUP BY f2.partial_hash HAVING COUNT(*)>1
+                )
+                SELECT {Cols}
+                FROM files f
+                JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid
+                JOIN shared h ON h.partial_hash=f.partial_hash
+                WHERE f.size=$size AND f.id>$after
+                ORDER BY f.id LIMIT $limit
+                """
+            : $"""
+                WITH shared AS (
+                    SELECT partial_hash FROM files
+                    WHERE size=$size AND partial_hash IS NOT NULL
+                    GROUP BY partial_hash HAVING COUNT(*)>1
+                )
+                SELECT {Cols}
+                FROM files f JOIN shared h ON h.partial_hash=f.partial_hash
+                WHERE f.size=$size AND f.id>$after
+                ORDER BY f.id LIMIT $limit
+                """;
+        cmd.Add("$size", size);
+        cmd.Add("$after", afterId);
+        cmd.Add("$limit", limit);
+        if (scoped) cmd.Add("$sid", sessionId);
+        using var reader = cmd.ExecuteReader();
+        var result = new List<FileRecord>(limit);
+        while (reader.Read()) result.Add(Map(reader));
+        return result;
+    }
+
     /// <summary>
     /// Файлы заданных размеров одним запросом, упорядоченные по размеру (затем id). Используется
     /// движком пачками размеров: вместо N+1 (`GetBySize` на каждый размер) — один запрос на пачку,
@@ -328,10 +695,10 @@ public sealed class FileRepository
             names.Add(n);
             cmd.Add(n, sizes[i]);
         }
-        // Для скана папки берём только файлы из области сессии — иначе на большой БД пришлось бы тянуть
-        // все файлы этих размеров со всего тома. Корректность не страдает: downstream всё равно inScope.
+        // Берём только файлы явной области текущей сессии — иначе на большой исторической БД пришлось
+        // бы тянуть совпадающие размеры со всех когда-либо проверенных носителей.
         cmd.CommandText = scoped
-            ? $"SELECT {Cols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+            ? $"SELECT {Cols} FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
               $"WHERE f.size IN ({string.Join(",", names)}) ORDER BY f.size, f.id"
             : $"SELECT {Cols} FROM files f WHERE f.size IN ({string.Join(",", names)}) ORDER BY f.size, f.id";
         if (scoped) cmd.Add("$sid", sessionId);
@@ -341,12 +708,17 @@ public sealed class FileRepository
     }
 
     /// <summary>Значения полного хэша, встречающиеся более чем у одного файла (кандидаты в точные дубли).</summary>
-    public List<byte[]> GetSharedFullHashes()
+    public List<byte[]> GetSharedFullHashes(long sessionId = 0)
     {
         using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
-        cmd.CommandText =
-            "SELECT full_hash FROM files WHERE full_hash IS NOT NULL GROUP BY full_hash HAVING COUNT(*) > 1";
+        cmd.CommandText = scoped
+            ? "SELECT f.full_hash FROM files f " +
+              "JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+              "WHERE f.full_hash IS NOT NULL GROUP BY f.full_hash HAVING COUNT(*)>1"
+            : "SELECT full_hash FROM files WHERE full_hash IS NOT NULL GROUP BY full_hash HAVING COUNT(*) > 1";
+        if (scoped) cmd.Add("$sid", sessionId);
         using var r = cmd.ExecuteReader();
         var list = new List<byte[]>();
         while (r.Read()) { var b = r.Blob(0); if (b is not null) list.Add(b); }
@@ -356,25 +728,72 @@ public sealed class FileRepository
     /// <summary>Группы байт-идентичных файлов, встречающихся более чем на одном носителе (FR-40/41).</summary>
     public List<List<FileRecord>> GetCrossVolumeDuplicates()
     {
-        var hashes = new List<byte[]>();
-        using (var conn = _db.Open())
-        using (var cmd = conn.CreateCommand())
+        const int pageSize = 10_000;
+        var all = new List<List<FileRecord>>();
+        while (true)
         {
-            cmd.CommandText =
-                "SELECT full_hash FROM files WHERE full_hash IS NOT NULL " +
-                "GROUP BY full_hash HAVING COUNT(DISTINCT volume_id) > 1";
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) { var b = r.Blob(0); if (b is not null) hashes.Add(b); }
+            var page = GetCrossVolumeDuplicatesPage(all.Count, pageSize);
+            all.AddRange(page.Groups);
+            if (all.Count >= page.TotalGroups || page.Groups.Count == 0) return all;
+        }
+    }
+
+    /// <summary>
+    /// Страница междисковых совпадений одним SQL-запросом. Ранее сначала читался список хэшей,
+    /// затем для каждого выполнялся отдельный SELECT (N+1), из-за чего экран зависал на больших
+    /// архивах. Порядок стабилен: крупные группы первыми, затем сам BLOB хэша.
+    /// </summary>
+    public CrossVolumeDuplicatePage GetCrossVolumeDuplicatesPage(int offset, int limit)
+    {
+        offset = Math.Max(0, offset);
+        limit = Math.Clamp(limit, 1, 10_000);
+        using var conn = _db.Open();
+
+        long total;
+        using (var count = conn.CreateCommand())
+        {
+            count.CommandText = "SELECT COUNT(*) FROM (" +
+                                "SELECT 1 FROM files WHERE full_hash IS NOT NULL " +
+                                "GROUP BY full_hash HAVING COUNT(DISTINCT volume_id)>1)";
+            total = Convert.ToInt64(count.ExecuteScalar());
         }
 
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            WITH page_hashes AS (
+                SELECT full_hash, COUNT(*) AS file_count
+                FROM files
+                WHERE full_hash IS NOT NULL
+                GROUP BY full_hash
+                HAVING COUNT(DISTINCT volume_id) > 1
+                ORDER BY file_count DESC, full_hash
+                LIMIT $limit OFFSET $offset
+            )
+            SELECT {Cols}
+            FROM page_hashes h
+            JOIN files f ON f.full_hash=h.full_hash
+            ORDER BY h.file_count DESC, h.full_hash, f.volume_id, f.id
+            """;
+        cmd.Add("$limit", limit);
+        cmd.Add("$offset", offset);
+
         var result = new List<List<FileRecord>>();
-        foreach (var h in hashes)
+        byte[]? currentHash = null;
+        List<FileRecord>? currentGroup = null;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
         {
-            var files = GetByFullHash(h);
-            if (files.Select(f => f.VolumeId).Distinct().Count() > 1)
-                result.Add(files);
+            var file = Map(r);
+            if (file.FullHash is null) continue;
+            if (currentHash is null || !currentHash.AsSpan().SequenceEqual(file.FullHash))
+            {
+                currentHash = file.FullHash;
+                currentGroup = new List<FileRecord>();
+                result.Add(currentGroup);
+            }
+            currentGroup!.Add(file);
         }
-        return result;
+        return new CrossVolumeDuplicatePage(result, total);
     }
 
     public List<FileRecord> GetByFullHash(byte[] fullHash)
@@ -395,11 +814,12 @@ public sealed class FileRepository
     /// стадию Grouping в SQL-bound. Паттерн отработан на GetBySizesOrdered (короткоживущее
     /// соединение, порядок по full_hash — потребитель группирует соседние строки).
     /// </summary>
-    public List<FileRecord> GetByFullHashes(IReadOnlyList<byte[]> hashes)
+    public List<FileRecord> GetByFullHashes(IReadOnlyList<byte[]> hashes, long sessionId = 0)
     {
         var list = new List<FileRecord>();
         if (hashes.Count == 0) return list;
         using var conn = _db.Open();
+        bool scoped = sessionId > 0 && HasScope(conn, sessionId);
         using var cmd = conn.CreateCommand();
         var names = new List<string>(hashes.Count);
         for (int i = 0; i < hashes.Count; i++)
@@ -408,7 +828,11 @@ public sealed class FileRepository
             names.Add(n);
             cmd.Add(n, hashes[i]);
         }
-        cmd.CommandText = $"SELECT {Cols} FROM files f WHERE f.full_hash IN ({string.Join(",", names)}) ORDER BY f.full_hash, f.id";
+        cmd.CommandText = scoped
+            ? $"SELECT {Cols} FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+              $"WHERE f.full_hash IN ({string.Join(",", names)}) ORDER BY f.full_hash, f.id"
+            : $"SELECT {Cols} FROM files f WHERE f.full_hash IN ({string.Join(",", names)}) ORDER BY f.full_hash, f.id";
+        if (scoped) cmd.Add("$sid", sessionId);
         using var r = cmd.ExecuteReader();
         while (r.Read()) list.Add(Map(r));
         return list;
@@ -511,8 +935,9 @@ public sealed class FileRepository
 
     /// <summary>
     /// Сколько файлов категории ещё ждут перцептивного признака (для прогресса). При scope-скане
-    /// (<paramref name="sessionId"/>&gt;0 и есть область) считаем только файлы области — иначе на большой
-    /// старой БД счёт шёл бы по всему тому (P1 scope-aware perceptual). Пустая область → глобальный счёт.
+    /// (<paramref name="sessionId"/>&gt;0 и область была явно начата) считаем только файлы области —
+    /// иначе на большой старой БД счёт шёл бы по всему тому (P1 scope-aware perceptual). Явная пустая
+    /// область возвращает ноль; неизвестная сессия без маркера сохраняет совместимый глобальный режим.
     /// </summary>
     public long CountNeedingPerceptual(FileCategory category, long sessionId = 0)
     {
@@ -521,7 +946,7 @@ public sealed class FileRepository
         using var cmd = conn.CreateCommand();
         var cond = NeedingPerceptualCond(category);
         cmd.CommandText = scoped
-            ? $"SELECT COUNT(*) FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+            ? $"SELECT COUNT(*) FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
               $"WHERE f.category=$c AND {cond}"
             : $"SELECT COUNT(*) FROM files f WHERE f.category=$c AND {cond}";
         AddPerceptualParams(cmd, category);
@@ -542,7 +967,7 @@ public sealed class FileRepository
         var cond = NeedingPerceptualCond(category);
         // При scope-скане джойним область сессии (file_id, session_id), иначе тянули бы всю библиотеку тома.
         cmd.CommandText = scoped
-            ? $"SELECT {Cols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+            ? $"SELECT {Cols} FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
               $"WHERE f.category=$c AND {cond} AND f.id > $after ORDER BY f.id LIMIT $lim"
             : $"SELECT {Cols} FROM files f WHERE f.category=$c AND {cond} AND f.id > $after " +
               "ORDER BY f.id LIMIT $lim";
@@ -564,7 +989,7 @@ public sealed class FileRepository
         var col = category == FileCategory.Image ? "phash" : "audio_fp";
         // Scope-aware: группируем похожие только среди файлов области сессии (не по всей старой БД).
         cmd.CommandText = scoped
-            ? $"SELECT {Cols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+            ? $"SELECT {Cols} FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
               $"WHERE f.category=$c AND f.{col} IS NOT NULL"
             : $"SELECT {Cols} FROM files f WHERE f.category=$c AND f.{col} IS NOT NULL";
         cmd.Add("$c", Mappers.CategoryToDb(category));
@@ -596,7 +1021,7 @@ public sealed class FileRepository
         using var cmd = conn.CreateCommand();
         // Scope-aware, как GetByCategoryWithPerceptual: группируем похожие только среди файлов области сессии.
         cmd.CommandText = scoped
-            ? $"SELECT {slimCols} FROM files f JOIN scan_scope_files s ON s.file_id=f.id AND s.scan_session_id=$sid " +
+            ? $"SELECT {slimCols} FROM files f JOIN scan_scope_effective s ON s.file_id=f.id AND s.scan_session_id=$sid " +
               "WHERE f.category=$c AND f.phash IS NOT NULL AND f.id > $after ORDER BY f.id LIMIT $lim"
             : $"SELECT {slimCols} FROM files f WHERE f.category=$c AND f.phash IS NOT NULL AND f.id > $after " +
               "ORDER BY f.id LIMIT $lim";
@@ -661,68 +1086,109 @@ public sealed class FileRepository
         if (batch.Count == 0) return;
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
-        using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
-        // 3.7: sharpness пишется из записи, как и хэши, — у нового/изменившегося файла она null,
-        // поэтому DO UPDATE сбрасывает устаревшую резкость вместе с pHash (пересчитается заодно с ним).
-        cmd.CommandText = """
-            INSERT INTO files (volume_id, rel_path, name, ext, size, mtime, created, category,
-                               partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state, last_indexed,
-                               partial_ver, phash_ver, sharpness)
-            VALUES ($vol, $rel, $name, $ext, $size, $mtime, $created, $cat,
-                    $ph, $fh, $phash, $pix, $afp, $state, $idx, $pver, $phver, $sharp)
-            ON CONFLICT(volume_id, rel_path) DO UPDATE SET
-                name=excluded.name, ext=excluded.ext, size=excluded.size, mtime=excluded.mtime,
-                created=excluded.created, category=excluded.category,
-                partial_hash=excluded.partial_hash, full_hash=excluded.full_hash,
-                phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
-                scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
-                partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver,
-                sharpness=excluded.sharpness,
-                verified_full_hash=NULL
-            RETURNING id;
-            """;
-        var pVol = cmd.CreateParameter(); pVol.ParameterName = "$vol"; cmd.Parameters.Add(pVol);
-        var pRel = cmd.CreateParameter(); pRel.ParameterName = "$rel"; cmd.Parameters.Add(pRel);
-        var pName = cmd.CreateParameter(); pName.ParameterName = "$name"; cmd.Parameters.Add(pName);
-        var pExt = cmd.CreateParameter(); pExt.ParameterName = "$ext"; cmd.Parameters.Add(pExt);
-        var pSize = cmd.CreateParameter(); pSize.ParameterName = "$size"; cmd.Parameters.Add(pSize);
-        var pMtime = cmd.CreateParameter(); pMtime.ParameterName = "$mtime"; cmd.Parameters.Add(pMtime);
-        var pCreated = cmd.CreateParameter(); pCreated.ParameterName = "$created"; cmd.Parameters.Add(pCreated);
-        var pCat = cmd.CreateParameter(); pCat.ParameterName = "$cat"; cmd.Parameters.Add(pCat);
-        var pPh = cmd.CreateParameter(); pPh.ParameterName = "$ph"; cmd.Parameters.Add(pPh);
-        var pFh = cmd.CreateParameter(); pFh.ParameterName = "$fh"; cmd.Parameters.Add(pFh);
-        var pPhash = cmd.CreateParameter(); pPhash.ParameterName = "$phash"; cmd.Parameters.Add(pPhash);
-        var pPix = cmd.CreateParameter(); pPix.ParameterName = "$pix"; cmd.Parameters.Add(pPix);
-        var pAfp = cmd.CreateParameter(); pAfp.ParameterName = "$afp"; cmd.Parameters.Add(pAfp);
-        var pState = cmd.CreateParameter(); pState.ParameterName = "$state"; cmd.Parameters.Add(pState);
-        var pIdx = cmd.CreateParameter(); pIdx.ParameterName = "$idx"; cmd.Parameters.Add(pIdx);
-        var pVer = cmd.CreateParameter(); pVer.ParameterName = "$pver"; cmd.Parameters.Add(pVer);
-        var pPhVer = cmd.CreateParameter(); pPhVer.ParameterName = "$phver"; cmd.Parameters.Add(pPhVer);
-        var pSharp = cmd.CreateParameter(); pSharp.ParameterName = "$sharp"; cmd.Parameters.Add(pSharp);
 
-        foreach (var f in batch)
+        // Один RETURNING-запрос на каждый файл был главным SQL-bound участком перечисления.
+        // Теперь вход сначала попадает в TEMP staging короткими multi-row INSERT, после чего весь
+        // batch публикуется одним UPSERT и одним JOIN возвращает идентификаторы объектам.
+        using (var create = conn.CreateCommand())
         {
-            pVol.Value = f.VolumeId;
-            pRel.Value = f.RelPath;
-            pName.Value = f.Name;
-            pExt.Value = (object?)f.Ext ?? DBNull.Value;
-            pSize.Value = f.Size;
-            pMtime.Value = Db.Iso(f.Mtime);
-            pCreated.Value = (object?)Db.IsoOrNull(f.Created == default ? null : f.Created) ?? DBNull.Value;
-            pCat.Value = Mappers.CategoryToDb(f.Category);
-            pPh.Value = (object?)f.PartialHash ?? DBNull.Value;
-            pFh.Value = (object?)f.FullHash ?? DBNull.Value;
-            pPhash.Value = (object?)f.PHash ?? DBNull.Value;
-            pPix.Value = (object?)f.PixelHash ?? DBNull.Value;
-            pAfp.Value = (object?)f.AudioFp ?? DBNull.Value;
-            pState.Value = Mappers.StateToDb(f.ScanState);
-            pIdx.Value = (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value;
-            pVer.Value = f.PartialVer;
-            pPhVer.Value = f.PHashVer;
-            pSharp.Value = (object?)f.Sharpness ?? DBNull.Value;
-            f.Id = (long)cmd.ExecuteScalar()!;
+            create.Transaction = tx;
+            create.CommandText = """
+                CREATE TEMP TABLE IF NOT EXISTS upsert_meta_stage (
+                    ordinal INTEGER PRIMARY KEY,
+                    volume_id INTEGER NOT NULL, rel_path TEXT NOT NULL, name TEXT NOT NULL, ext TEXT,
+                    size INTEGER NOT NULL, mtime TEXT NOT NULL, created TEXT, category TEXT,
+                    partial_hash BLOB, full_hash BLOB, phash BLOB, pixel_hash BLOB, audio_fp BLOB,
+                    scan_state TEXT, last_indexed TEXT, partial_ver INTEGER, phash_ver INTEGER, sharpness REAL
+                );
+                DELETE FROM upsert_meta_stage;
+                """;
+            create.ExecuteNonQuery();
         }
+
+        const int stagingChunkSize = 40; // 19 параметров × 40 — ниже консервативного SQLite-лимита.
+        for (int start = 0; start < batch.Count; start += stagingChunkSize)
+        {
+            int count = Math.Min(stagingChunkSize, batch.Count - start);
+            using var stage = conn.CreateCommand();
+            stage.Transaction = tx;
+            var rows = new List<string>(count);
+            for (int local = 0; local < count; local++)
+            {
+                int ordinal = start + local;
+                var f = batch[ordinal];
+                string suffix = "_" + local;
+                rows.Add($"($o{suffix},$v{suffix},$r{suffix},$n{suffix},$e{suffix},$s{suffix},$m{suffix}," +
+                         $"$c{suffix},$cat{suffix},$ph{suffix},$fh{suffix},$pih{suffix},$px{suffix}," +
+                         $"$af{suffix},$st{suffix},$li{suffix},$pv{suffix},$phv{suffix},$sh{suffix})");
+                stage.Parameters.AddWithValue("$o" + suffix, ordinal);
+                stage.Parameters.AddWithValue("$v" + suffix, f.VolumeId);
+                stage.Parameters.AddWithValue("$r" + suffix, f.RelPath);
+                stage.Parameters.AddWithValue("$n" + suffix, f.Name);
+                stage.Parameters.AddWithValue("$e" + suffix, (object?)f.Ext ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$s" + suffix, f.Size);
+                stage.Parameters.AddWithValue("$m" + suffix, Db.Iso(f.Mtime));
+                stage.Parameters.AddWithValue("$c" + suffix,
+                    (object?)Db.IsoOrNull(f.Created == default ? null : f.Created) ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$cat" + suffix, Mappers.CategoryToDb(f.Category));
+                stage.Parameters.AddWithValue("$ph" + suffix, (object?)f.PartialHash ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$fh" + suffix, (object?)f.FullHash ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$pih" + suffix, (object?)f.PHash ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$px" + suffix, (object?)f.PixelHash ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$af" + suffix, (object?)f.AudioFp ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$st" + suffix, Mappers.StateToDb(f.ScanState));
+                stage.Parameters.AddWithValue("$li" + suffix, (object?)Db.IsoOrNull(f.LastIndexed) ?? DBNull.Value);
+                stage.Parameters.AddWithValue("$pv" + suffix, f.PartialVer);
+                stage.Parameters.AddWithValue("$phv" + suffix, f.PHashVer);
+                stage.Parameters.AddWithValue("$sh" + suffix, (object?)f.Sharpness ?? DBNull.Value);
+            }
+            stage.CommandText = "INSERT INTO upsert_meta_stage VALUES " + string.Join(',', rows);
+            stage.ExecuteNonQuery();
+        }
+
+        using (var publish = conn.CreateCommand())
+        {
+            publish.Transaction = tx;
+            // WHERE 1 disambiguates SQLite's SELECT ... ON CONFLICT grammar.
+            publish.CommandText = """
+                INSERT INTO files (volume_id, rel_path, name, ext, size, mtime, created, category,
+                                   partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state,
+                                   last_indexed, partial_ver, phash_ver, sharpness)
+                SELECT volume_id, rel_path, name, ext, size, mtime, created, category,
+                       partial_hash, full_hash, phash, pixel_hash, audio_fp, scan_state,
+                       last_indexed, partial_ver, phash_ver, sharpness
+                FROM upsert_meta_stage WHERE 1
+                ON CONFLICT(volume_id, rel_path) DO UPDATE SET
+                    name=excluded.name, ext=excluded.ext, size=excluded.size, mtime=excluded.mtime,
+                    created=excluded.created, category=excluded.category,
+                    partial_hash=excluded.partial_hash, full_hash=excluded.full_hash,
+                    phash=excluded.phash, pixel_hash=excluded.pixel_hash, audio_fp=excluded.audio_fp,
+                    scan_state=excluded.scan_state, last_indexed=excluded.last_indexed,
+                    partial_ver=excluded.partial_ver, phash_ver=excluded.phash_ver,
+                    sharpness=excluded.sharpness, verified_full_hash=NULL;
+                """;
+            publish.ExecuteNonQuery();
+        }
+
+        int assigned = 0;
+        using (var ids = conn.CreateCommand())
+        {
+            ids.Transaction = tx;
+            ids.CommandText = """
+                SELECT s.ordinal, f.id
+                FROM upsert_meta_stage s
+                JOIN files f ON f.volume_id=s.volume_id AND f.rel_path=s.rel_path
+                ORDER BY s.ordinal
+                """;
+            using var reader = ids.ExecuteReader();
+            while (reader.Read())
+            {
+                batch[reader.GetInt32(0)].Id = reader.GetInt64(1);
+                assigned++;
+            }
+        }
+        if (assigned != batch.Count)
+            throw new InvalidOperationException($"SQLite assigned {assigned} of {batch.Count} file identifiers.");
         tx.Commit();
     }
 
@@ -829,26 +1295,103 @@ public sealed class FileRepository
         return cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Отложить удаление до публикации сессии. Строка files и члены предыдущих готовых групп пока
+    /// остаются нетронутыми, но scope текущего скана исключает staged-id.
+    /// </summary>
+    public int StageDeleteByVolumeAndPath(long scanSessionId, long volumeId, string relPath)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO scan_pending_file_deletes(scan_session_id, file_id)
+            SELECT $sid, id FROM files WHERE volume_id=$v AND rel_path=$p
+            """;
+        cmd.Add("$sid", scanSessionId);
+        cmd.Add("$v", volumeId);
+        cmd.Add("$p", relPath);
+        return cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Отложенный вариант prune для активного скана.</summary>
+    public int StagePruneVolume(long scanSessionId, long volumeId, IReadOnlyCollection<long> keptIds)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        PrepareSeenTable(conn, tx, keptIds);
+        using var stage = conn.CreateCommand();
+        stage.Transaction = tx;
+        stage.CommandText = """
+            INSERT OR IGNORE INTO scan_pending_file_deletes(scan_session_id, file_id)
+            SELECT $sid, id FROM files
+            WHERE volume_id=$v AND id NOT IN (SELECT id FROM _seen)
+            """;
+        stage.Add("$sid", scanSessionId);
+        stage.Add("$v", volumeId);
+        int count = stage.ExecuteNonQuery();
+        tx.Commit();
+        return count;
+    }
+
+    /// <summary>
+    /// Единственная точка публикации: staged-удаления и статус Completed фиксируются одной
+    /// SQLite-транзакцией. Крах до commit оставляет последнюю готовую сессию и её файлы целыми.
+    /// </summary>
+    public int PublishStagedDeletesAndCompleteSession(long scanSessionId, long filesSeen, long filesSkipped)
+    {
+        using var conn = _db.Open();
+        using var tx = conn.BeginTransaction();
+        int deleted;
+        using (var remove = conn.CreateCommand())
+        {
+            remove.Transaction = tx;
+            remove.CommandText = "DELETE FROM files WHERE id IN (" +
+                                 "SELECT file_id FROM scan_pending_file_deletes WHERE scan_session_id=$sid)";
+            remove.Add("$sid", scanSessionId);
+            deleted = remove.ExecuteNonQuery();
+        }
+        using (var clear = conn.CreateCommand())
+        {
+            clear.Transaction = tx;
+            clear.CommandText = "DELETE FROM scan_pending_file_deletes WHERE scan_session_id=$sid";
+            clear.Add("$sid", scanSessionId);
+            clear.ExecuteNonQuery();
+        }
+        using (var complete = conn.CreateCommand())
+        {
+            complete.Transaction = tx;
+            complete.CommandText = """
+                UPDATE scan_sessions
+                SET stage=$stage, finished_at=$finished, files_seen=$seen, files_skipped=$skipped
+                WHERE id=$sid
+                """;
+            complete.Add("$stage", (long)ScanStage.Completed);
+            complete.Add("$finished", Db.IsoNow());
+            complete.Add("$seen", filesSeen);
+            complete.Add("$skipped", filesSkipped);
+            complete.Add("$sid", scanSessionId);
+            if (complete.ExecuteNonQuery() != 1)
+                throw new InvalidOperationException($"Scan session {scanSessionId} was not found during publication.");
+        }
+        tx.Commit();
+        return deleted;
+    }
+
+    public void DiscardStagedDeletes(long scanSessionId)
+    {
+        using var conn = _db.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM scan_pending_file_deletes WHERE scan_session_id=$sid";
+        cmd.Add("$sid", scanSessionId);
+        cmd.ExecuteNonQuery();
+    }
+
     /// <summary>Удалить из БД записи тома, не встреченные при последнем сканировании.</summary>
     public int PruneVolume(long volumeId, IReadOnlyCollection<long> keptIds)
     {
         using var conn = _db.Open();
         using var tx = conn.BeginTransaction();
-        using (var create = conn.CreateCommand())
-        {
-            create.Transaction = tx;
-            create.CommandText = "CREATE TEMP TABLE IF NOT EXISTS _seen(id INTEGER PRIMARY KEY)";
-            create.ExecuteNonQuery();
-            create.CommandText = "DELETE FROM _seen";
-            create.ExecuteNonQuery();
-        }
-        using (var ins = conn.CreateCommand())
-        {
-            ins.Transaction = tx;
-            ins.CommandText = "INSERT OR IGNORE INTO _seen(id) VALUES($id)";
-            var p = ins.CreateParameter(); p.ParameterName = "$id"; ins.Parameters.Add(p);
-            foreach (var id in keptIds) { p.Value = id; ins.ExecuteNonQuery(); }
-        }
+        PrepareSeenTable(conn, tx, keptIds);
         int removed;
         using (var del = conn.CreateCommand())
         {
@@ -859,6 +1402,31 @@ public sealed class FileRepository
         }
         tx.Commit();
         return removed;
+    }
+
+    private static void PrepareSeenTable(SqliteConnection conn, SqliteTransaction tx,
+        IReadOnlyCollection<long> keptIds)
+    {
+        using (var create = conn.CreateCommand())
+        {
+            create.Transaction = tx;
+            create.CommandText = "CREATE TEMP TABLE IF NOT EXISTS _seen(id INTEGER PRIMARY KEY); DELETE FROM _seen";
+            create.ExecuteNonQuery();
+        }
+        foreach (var chunk in keptIds.Chunk(400))
+        {
+            using var insert = conn.CreateCommand();
+            insert.Transaction = tx;
+            var values = new List<string>(chunk.Length);
+            for (int i = 0; i < chunk.Length; i++)
+            {
+                string parameter = "$id" + i;
+                values.Add("(" + parameter + ")");
+                insert.Add(parameter, chunk[i]);
+            }
+            insert.CommandText = "INSERT OR IGNORE INTO _seen(id) VALUES " + string.Join(",", values);
+            insert.ExecuteNonQuery();
+        }
     }
 
     // ---- Статистика ----

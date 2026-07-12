@@ -1,4 +1,5 @@
 using System.IO.Hashing;
+using System.Text;
 
 namespace Deduplicator.Core.Util;
 
@@ -13,6 +14,50 @@ public static class SafeIo
     public const string TempSuffix = ".dedup-tmp";
     public const string HardLinkSuffix = ".dedup-hl";
     private const int Buffer = 1 << 20;
+
+    /// <summary>Прочитать небольшой служебный текст с жёстким пределом размера.</summary>
+    public static string ReadAllTextLimited(string path, long maxBytes)
+    {
+        if (maxBytes < 1) throw new ArgumentOutOfRangeException(nameof(maxBytes));
+        using var stream = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read,
+            FileShare.Read, 16 * 1024, FileOptions.SequentialScan);
+        if (stream.Length > maxBytes)
+            throw new InvalidDataException($"Служебный файл слишком большой ({stream.Length:N0} байт).");
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
+            bufferSize: 16 * 1024, leaveOpen: false);
+        var text = reader.ReadToEnd();
+        // Для UTF-8 число символов не превышает число байт; дополнительная проверка защищает и
+        // нестандартные BOM-кодировки, если файл заменили сразу после открытия.
+        if (text.Length > maxBytes)
+            throw new InvalidDataException("Служебный файл превышает допустимый размер.");
+        return text;
+    }
+
+    /// <summary>Атомарно записать служебный UTF-8 текст рядом с целевым файлом.</summary>
+    public static void WriteAllTextAtomic(string path, string content, Encoding? encoding = null)
+    {
+        encoding ??= new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        string? dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(LongPath.Fix(dir));
+        string temp = path + "." + Guid.NewGuid().ToString("N") + TempSuffix;
+        try
+        {
+            using (var stream = new FileStream(LongPath.Fix(temp), FileMode.CreateNew, FileAccess.Write,
+                       FileShare.None, 16 * 1024, FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(stream, encoding, 16 * 1024, leaveOpen: true))
+            {
+                writer.Write(content);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(LongPath.Fix(temp), LongPath.Fix(path), overwrite: true);
+        }
+        catch
+        {
+            TryDelete(temp);
+            throw;
+        }
+    }
 
     /// <summary>
     /// Атомарно копирует src → dst: пишет во временный файл, сбрасывает на диск, затем

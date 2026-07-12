@@ -16,6 +16,7 @@ public static class RenameJournal
     public sealed record Entry(string Original, string Temp, string Final);
 
     private const string Prefix = "rename-journal-";
+    private const int MaxJournalBytes = 128 * 1024 * 1024;
 
     /// <summary>Зафиксировать план на диске. null-dir (тесты) или сбой записи → без журнала.</summary>
     public static string? TryBegin(string? dir, IReadOnlyList<Entry> entries)
@@ -25,7 +26,7 @@ public static class RenameJournal
         {
             Directory.CreateDirectory(dir);
             var path = Path.Combine(dir, Prefix + Guid.NewGuid().ToString("N") + ".json");
-            File.WriteAllText(path, JsonSerializer.Serialize(entries,
+            SafeIo.WriteAllTextAtomic(path, JsonSerializer.Serialize(entries,
                 new JsonSerializerOptions { WriteIndented = true }));
             return path;
         }
@@ -66,7 +67,8 @@ public static class RenameJournal
         {
             plans++;
             List<Entry>? entries;
-            try { entries = JsonSerializer.Deserialize<List<Entry>>(File.ReadAllText(journal)); }
+            try { entries = JsonSerializer.Deserialize<List<Entry>>(
+                SafeIo.ReadAllTextLimited(journal, MaxJournalBytes)); }
             catch (Exception ex) { problems.Add($"{journal}: журнал не читается ({ex.Message})"); continue; }
             if (entries is null || entries.Count == 0) { TryComplete(journal); continue; }
 

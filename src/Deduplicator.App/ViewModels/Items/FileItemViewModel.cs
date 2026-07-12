@@ -145,7 +145,8 @@ public partial class FileItemViewModel : ObservableObject
                 ? Convert.ToHexString(Model.FullHash)
                 : (Model.PHash is not null ? Convert.ToHexString(Model.PHash) : "id" + Model.Id);
 
-            var path = await Task.Run(() => _thumbs.EnsureThumbnail(FullPath!, key, 220));
+            // 320 px: достаточно чётко для крупной галереи результатов (плитка ~150 px, в т.ч. на HiDPI).
+            var path = await Task.Run(() => _thumbs.EnsureThumbnail(FullPath!, key, 320));
             if (path is null || !File.Exists(path)) return;
 
             var bmp = await Task.Run(() => new Bitmap(path));

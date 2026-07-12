@@ -64,6 +64,7 @@ public sealed class ScanService : IScanService, IDisposable
     private readonly IDuplicateGrouper _grouper;
     private readonly ISettingsService _settings;
     private readonly Fde.FastFileLister _fastLister;
+    private readonly Fde.IElevatedMftBrokerFactory? _mftBrokerFactory;
     // Движок точных дубликатов v2 (потоковая воронка вместо старого HashFunnel с N+1 по размеру).
     private readonly IExactDuplicateEngine _exactEngine;
     // 3.4: переносимый кэш проверки на съёмных носителях (.dedupindex).
@@ -93,6 +94,14 @@ public sealed class ScanService : IScanService, IDisposable
 
     // Сглаживатель прогресса: per-file Report не дёргает UI на каждый файл.
     private ProgressCoalescer<ScanProgress>? _coalescer;
+    private Timer? _progressHeartbeat;
+    private ScanProgressEstimator? _progressEstimator;
+    private ScanProgressPhase _progressPhase = ScanProgressPhase.Enumerating;
+    private double? _phaseFraction;
+
+    // P0: identity локальных носителей фиксируется на старте и проверяется перед пакетными
+    // записями/на границах фаз. Подмена флешки под той же буквой завершает скан ошибкой.
+    private VolumeIdentityGuard? _volumeIdentityGuard;
 
     // Накопленные уведомления о режиме перечисления по дискам (чтобы предупреждение одного диска
     // не затиралось другим и не висело устаревшим). Доступ только из потока скана.
@@ -125,7 +134,8 @@ public sealed class ScanService : IScanService, IDisposable
         VolumeRepository volumes, FileRepository files, ScanSessionRepository sessions,
         IVolumeService volumeService, IHashService hash, IImageMatchService images,
         IAudioMatchService audio, IDuplicateGrouper grouper, ISettingsService settings,
-        Fde.FastFileLister fastLister, VolumeScanStateRepository scanState)
+        Fde.FastFileLister fastLister, VolumeScanStateRepository scanState,
+        Fde.IElevatedMftBrokerFactory? mftBrokerFactory = null)
     {
         _volumes = volumes;
         _files = files;
@@ -137,6 +147,7 @@ public sealed class ScanService : IScanService, IDisposable
         _grouper = grouper;
         _settings = settings;
         _fastLister = fastLister;
+        _mftBrokerFactory = mftBrokerFactory;
         // Зависим от абстракции IExactDuplicateEngine; конкретику собираем из уже внедрённых
         // репозиториев/хэшера/группировщика, чтобы не менять сигнатуру конструктора и все вызовы.
         _exactEngine = new ExactDuplicateEngineV2(files, hash, grouper);
@@ -146,8 +157,23 @@ public sealed class ScanService : IScanService, IDisposable
 
     public ScanSession? GetResumableSession() => _sessions.GetUnfinished();
 
-    public void Pause() { if (IsRunning) { IsPaused = true; _gate.Reset(); } }
-    public void Resume() { IsPaused = false; _gate.Set(); }
+    public void Pause()
+    {
+        if (!IsRunning || IsPaused) return;
+        IsPaused = true;
+        _gate.Reset();
+        _progressEstimator?.Pause();
+        Report(_ => { }, immediate: true);
+    }
+
+    public void Resume()
+    {
+        if (!IsPaused) return;
+        _progressEstimator?.Resume();
+        IsPaused = false;
+        _gate.Set();
+        Report(_ => { }, immediate: true);
+    }
 
     public Task RunAsync(ScanOptions options, CancellationToken ct) =>
         Task.Run(() => RunCore(options, ct), ct);
@@ -163,11 +189,22 @@ public sealed class ScanService : IScanService, IDisposable
         _enumNotices.Clear();
         // Диагностика: фиксируем версию движка в логе — так видно, не запущена ли старая сборка.
         AppLog.Write($"Старт скана. Движок: {EngineBuildInfo.Summary}");
+        _progressEstimator = new ScanProgressEstimator(options.Depth);
+        _progressPhase = ScanProgressPhase.Enumerating;
+        _phaseFraction = null;
         Progress = new ScanProgress { Stage = ScanStage.Enumerating };
+        ApplyEstimate(Progress, _progressEstimator.BeginPhase(_progressPhase, 0, 0, 0));
         // Реальная отправка событий в UI идёт через сглаживатель (троттлинг ~5/сек по ТЗ + немедленная
         // отправка смены этапа/завершения). Создаём на каждый запуск, освобождаем в finally.
         _coalescer = new ProgressCoalescer<ScanProgress>(snap => ProgressChanged?.Invoke(snap),
             TimeSpan.FromMilliseconds(200));
+        // Один многогигабайтный файл может читаться минуты без завершённого FileHashed.
+        // Сердцебиение обновляет elapsed/ETA раз в секунду, не вмешиваясь в горячий I/O-путь.
+        _progressHeartbeat = new Timer(_ =>
+        {
+            try { if (IsRunning && !IsPaused) Report(_ => { }); }
+            catch (Exception ex) { AppLog.Error("ProgressHeartbeat", ex); }
+        }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
         // Создание сессии — ВНУТРИ try: это запись в БД (диск переполнен/БД занята — реальный кейс
         // у аудитории, чистящей забитые диски), и сбой здесь должен давать состояние «Ошибка
         // сканирования», а не необработанное исключение с падением приложения и вечным IsRunning.
@@ -214,16 +251,72 @@ public sealed class ScanService : IScanService, IDisposable
                 .ToDictionary(v => v.Id, v => v.MountPath!);
 
             var targets = ResolveTargets(options, catalog);
+            var resolvedVolumeIds = targets.Select(t => t.VolumeId).ToHashSet();
+            var missingRequestedVolumes = options.VolumeIds.Distinct()
+                .Where(id => !resolvedVolumeIds.Contains(id)).ToArray();
+            if (missingRequestedVolumes.Length > 0 || targets.Count == 0)
+                throw new IOException("Выбранный носитель отключён или был заменён до начала сканирования. " +
+                                      "Обновите список дисков и запустите проверку снова.");
             var scanScope = BuildScanScope(targets, mountById);
+
+            // Фиксируем identity только локальных физических томов. Для сетевых путей серийник
+            // провайдера часто недоступен/нестабилен; их полнота контролируется ошибками обхода.
+            var identityTargets = new List<VolumeIdentityExpectation>();
+            if (OperatingSystem.IsWindows())
+            {
+                foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
+                {
+                    if (!volumesById.TryGetValue(vid, out var volume) || volume.IsNetwork ||
+                        !mountById.TryGetValue(vid, out var mount)) continue;
+                    // Production VolumeService отдаёт корень DriveInfo. В тестах/встраиваниях том
+                    // может быть смоделирован обычной папкой — у неё нет собственной volume identity.
+                    if (!Fde.BackendSelector.IsWholeVolumeRoot(mount)) continue;
+                    // Expected берём ИЗ каталога, полученного до ResolveTargets. Повторный capture с
+                    // текущей буквы был бы опасен: swap между Sync и capture узаконил бы новую флешку.
+                    if (string.IsNullOrWhiteSpace(volume.Serial) ||
+                        string.Equals(volume.Serial.TrimEnd('\\', '/'), mount.TrimEnd('\\', '/'),
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new IOException($"У носителя {mount} нет проверяемого серийного номера. " +
+                                              "Сканирование остановлено для защиты каталога дисков.");
+                    identityTargets.Add(new VolumeIdentityExpectation(vid, mount, volume.Serial));
+                }
+            }
+            _volumeIdentityGuard = new VolumeIdentityGuard(identityTargets);
+            VerifyAllVolumeIdentities(force: true);
+
+            // Историческое число файлов даёт честную оценку первого этапа только для целых томов.
+            bool allTargetsAreWholeVolumes = targets.Count > 0 && targets.All(t =>
+                mountById.TryGetValue(t.VolumeId, out var mount) && IsSameRoot(t.ScanRoot, mount));
+            long historicalFiles = allTargetsAreWholeVolumes
+                ? targets.Select(t => t.VolumeId).Distinct()
+                    .Sum(vid => volumesById.TryGetValue(vid, out var v) ? v.IndexedFileCount : 0)
+                : 0;
+            if (historicalFiles > 0)
+            {
+                _progressEstimator?.SetEstimatedTotalFiles(historicalFiles);
+                Report(_ => { }, immediate: true);
+            }
 
             // Инкрементальность через USN-журнал: тома, не менявшиеся с прошлого скана, не перечисляем
             // заново (на 1M файлов это экономит весь обход); тома с НЕБОЛЬШИМИ изменениями (3.1)
             // обновляются точечно по дельте журнала. Любая неоднозначность → полный пересбор.
-            string optionsHash = OptionsHash(options);
+            string optionsHash = ScanOptionsFingerprint.ForEnumeration(options);
             var (skipVolumes, journalSnaps, deltaPlans) = PlanIncremental(targets, volumesById, options, optionsHash);
 
             // === Этап 1: обход и метаданные (пропуская неизменившиеся тома) ===
-            Enumerate(targets, mountById, ct, sessionId, skipVolumes, deltaPlans);
+            // Создание сессии само UAC не показывает. Запуск helper ленивый и возможен только после
+            // явного старта скана, для заранее выбранных целых томов и при opt-in в настройках.
+            EnumerationSummary enumeration;
+            using (Fde.IElevatedMftBroker? mftBroker = CreateElevatedMftBroker(identityTargets))
+                enumeration = Enumerate(targets, mountById, ct, sessionId, skipVolumes, deltaPlans, mftBroker);
+            VerifyAllVolumeIdentities(force: true);
+            if (enumeration.IncompleteVolumes.Count > 0)
+                throw new IOException("Обход одного или нескольких носителей завершился не полностью. " +
+                                      "Новые результаты не опубликованы; предыдущая успешная проверка сохранена.");
+            var afterEnumeration = Snapshot();
+            long totalFileEstimate = Math.Max(historicalFiles, afterEnumeration.FilesSeen);
+            if (totalFileEstimate > 0) _progressEstimator?.SetEstimatedTotalFiles(totalFileEstimate);
+            CompleteProgressPhase();
 
             // === Этапы 2–5: точные дубликаты через движок v2 ===
             // Потоковая воронка (size→partial→full→byte-verify→группы), без N+1 по размеру.
@@ -252,12 +345,18 @@ public sealed class ScanService : IScanService, IDisposable
                 SessionId = sessionId,
                 IsPreferredKeep = isPreferredKeep
             };
+            BeginProgressPhase(ScanProgressPhase.Exact);
+            VerifyAllVolumeIdentities(force: true);
             var exactResult = _exactEngine.ScanExact(exactRequest, new ScanReporter(this, sessionId, ct), ct);
+            VerifyAllVolumeIdentities(force: true);
+            CompleteProgressPhase();
             // 2.8: точные группы сессии целиком в БД — «Результаты» могут показывать предпросмотр,
             // пока идут перцептив и похожие (на большом диске это часы). Флаг снимается в finally.
-            _activeExactReady = true;
             if (exactResult.GroupsCreated > 0)
                 NoteEnumerationNotice("Точные дубликаты уже можно посмотреть в «Результатах» — проверка продолжается");
+            // Публикуем ready ПОСЛЕ сопутствующего сообщения: читатель, увидевший true, должен уже
+            // видеть полностью подготовленное состояние предпросмотра (без межпоточной гонки).
+            _activeExactReady = true;
             // Счётчик групп кумулятивен по всем типам: точные + похожие фото + похожая музыка.
             long exactTotal = exactResult.GroupsCreated, imageTotal = 0;
 
@@ -265,10 +364,23 @@ public sealed class ScanService : IScanService, IDisposable
             // P0-A: считаем признаки только для включённых категорий (нет смысла на исключённых типах).
             bool wantImages = options.IncludedCategories.Contains(FileCategory.Image);
             bool wantAudio = options.IncludedCategories.Contains(FileCategory.Audio);
-            if (options.Depth >= ScanDepth.WithSimilarImages && wantImages)
-                ComputeImagePerceptual(mountById, scanScope, ct, sessionId);
-            if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && _audio.IsAvailable && wantAudio)
-                ComputeAudioPerceptual(mountById, scanScope, ct, sessionId);
+            if (options.Depth >= ScanDepth.WithSimilarImages)
+            {
+                BeginProgressPhase(ScanProgressPhase.SimilarImages);
+                VerifyAllVolumeIdentities(force: true);
+                if (wantImages) ComputeImagePerceptual(mountById, scanScope, ct, sessionId);
+                VerifyAllVolumeIdentities(force: true);
+                CompleteProgressPhase();
+            }
+            if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio)
+            {
+                BeginProgressPhase(ScanProgressPhase.SimilarAudio);
+                VerifyAllVolumeIdentities(force: true);
+                if (_audio.IsAvailable && wantAudio)
+                    ComputeAudioPerceptual(mountById, scanScope, ct, sessionId);
+                VerifyAllVolumeIdentities(force: true);
+                CompleteProgressPhase();
+            }
 
             // === Этап 7: группировка похожих (точные уже построены движком) ===
             // P1.5: порог из профиля (если задан) переопределяет дефолтный.
@@ -282,32 +394,49 @@ public sealed class ScanService : IScanService, IDisposable
             Func<FileRecord, bool> audInScope = options.AudioProfile is { } apr
                 ? f => inScope(f) && SimilarityProfileService.Matches(f.Category, f.Size, f.Created, f.Mtime, f.RelPath, apr)
                 : inScope;
-            if (options.Depth >= ScanDepth.WithSimilarImages && wantImages)
+            if (options.Depth >= ScanDepth.WithSimilarImages)
             {
-                SetStage(ScanStage.Grouping, sessionId);
-                _grouper.BuildSimilarImageGroups(imgThreshold, imgInScope, _representativeRule,
-                    g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId,
-                    () => WaitGate(ct), isPreferredKeep);
+                BeginProgressPhase(ScanProgressPhase.SimilarGrouping);
+                VerifyAllVolumeIdentities(force: true);
+                if (wantImages)
+                {
+                    SetStage(ScanStage.Grouping, sessionId);
+                    _grouper.BuildSimilarImageGroups(imgThreshold, imgInScope, _representativeRule,
+                        g => { imageTotal = g; Report(p => p.GroupsFound = exactTotal + g); }, ct, sessionId,
+                        () => WaitGate(ct), isPreferredKeep);
+                }
+                if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && wantAudio)
+                    _grouper.BuildSimilarAudioGroups(audThreshold, audInScope, _representativeRule,
+                        g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId,
+                        () => WaitGate(ct), isPreferredKeep);
+                VerifyAllVolumeIdentities(force: true);
+                CompleteProgressPhase();
             }
-            if (options.Depth >= ScanDepth.WithSimilarImagesAndAudio && wantAudio)
-                _grouper.BuildSimilarAudioGroups(audThreshold, audInScope, _representativeRule,
-                    g => Report(p => p.GroupsFound = exactTotal + imageTotal + g), ct, sessionId,
-                    () => WaitGate(ct), isPreferredKeep);
 
-            // Отметить тома как просканированные.
-            foreach (var vid in targets.Select(t => t.VolumeId).Distinct())
-                _volumes.MarkScanned(vid);
+            BeginProgressPhase(ScanProgressPhase.Finalizing);
+            VerifyAllVolumeIdentities(force: true);
+            VerifyAllVolumeIdentities(force: true);
+            CompleteProgressPhase();
 
-            // Сохранить состояние USN-журнала для быстрого следующего скана (после успешного индексирования).
-            StoreJournalState(journalSnaps, optionsHash);
-
-            SetStage(ScanStage.Completed, sessionId);
-            _sessions.Finish(sessionId, ScanStage.Completed);
+            // Единственная точка публикации: физические удаления и Completed фиксируются одной
+            // SQLite-транзакцией. До этого момента отмена/крах не каскадирует изменения в файлы и
+            // члены последнего успешно завершённого результата.
+            var finalSnapshot = Snapshot();
+            _files.PublishStagedDeletesAndCompleteSession(
+                sessionId, finalSnapshot.FilesSeen, finalSnapshot.FilesSkipped);
             succeeded = true;
+            Report(p => p.Stage = ScanStage.Completed, immediate: true);
 
-            // 3.4: после УСПЕШНОГО скана выгружаем переносимый кэш на съёмные носители — другой
-            // компьютер с этим приложением прочитает его и не будет пересчитывать хэши.
-            ExportPortableIndexes(targets, volumesById, mountById);
+            // Всё после атомарной публикации — ускоряющие/переносимые метаданные, а не условие
+            // корректности результата. Их сбой логируется, но уже опубликованный скан не портит.
+            try
+            {
+                foreach (var vid in enumeration.CompleteVolumes) _volumes.MarkScanned(vid);
+                StoreJournalState(journalSnaps, optionsHash, enumeration.CompleteVolumes);
+            }
+            catch (Exception stateError) { AppLog.Error("FinalizeScanState", stateError); }
+            try { ExportPortableIndexes(targets, volumesById, mountById); }
+            catch (Exception exportError) { AppLog.Error("FinalizePortableIndexes", exportError); }
         }
         catch (OperationCanceledException)
         {
@@ -316,14 +445,31 @@ public sealed class ScanService : IScanService, IDisposable
             if (sessionId > 0)
             {
                 CleanupSessionGroups(sessionId, partialOnly: true);
-                SetStage(ScanStage.Cancelled, sessionId);
-                try { _sessions.Finish(sessionId, ScanStage.Cancelled); }
+                try { _files.DiscardStagedDeletes(sessionId); }
+                catch (Exception dex) { AppLog.Error("DiscardStagedDeletes(Cancelled)", dex); }
+                try
+                {
+                    SetStage(ScanStage.Cancelled, sessionId);
+                    _sessions.Finish(sessionId, ScanStage.Cancelled);
+                }
                 catch (Exception fex) { AppLog.Error("Finish(Cancelled)", fex); }
             }
         }
         catch (Exception ex)
         {
-            if (sessionId > 0) CleanupSessionGroups(sessionId, partialOnly: true);
+            if (ex is VolumeIdentityChangedException identityError)
+            {
+                // Даже ранее валидный checkpoint больше не используем: при следующем подключении
+                // правильного диска будет полный пересбор, а не доверие промежуточному индексу.
+                try { _scanState.Delete(identityError.VolumeId); }
+                catch (Exception dex) { AppLog.Error("DeleteCheckpoint(IdentityChanged)", dex); }
+            }
+            if (sessionId > 0)
+            {
+                CleanupSessionGroups(sessionId, partialOnly: true);
+                try { _files.DiscardStagedDeletes(sessionId); }
+                catch (Exception dex) { AppLog.Error("DiscardStagedDeletes(Failed)", dex); }
+            }
             Report(p => { p.Stage = ScanStage.Failed; p.Message = ex.Message; }, immediate: true);
             // Сама Finish — тоже запись в БД: если упало на Create (БД недоступна), не роняем повторно.
             if (sessionId > 0)
@@ -364,9 +510,11 @@ public sealed class ScanService : IScanService, IDisposable
                 catch { /* приоритет вернётся с завершением процесса */ }
             }
 
+            DisposeProgressHeartbeat();
             _coalescer?.Flush();
             _coalescer?.Dispose();
             _coalescer = null;
+            _volumeIdentityGuard = null;
             IsRunning = false;
             IsPaused = false;
             _gate.Set();
@@ -421,6 +569,7 @@ public sealed class ScanService : IScanService, IDisposable
         {
             if (!volumesById.TryGetValue(vid, out var vol) || !vol.IsRemovable) continue;
             if (!mountById.TryGetValue(vid, out var mountRoot)) continue;
+            VerifyVolumeIdentity(vid, force: true);
             _portableIndex.TryExport(vid, mountRoot);
         }
     }
@@ -439,21 +588,37 @@ public sealed class ScanService : IScanService, IDisposable
 
     // ---------------- Этап 1: обход ----------------
 
-    private void Enumerate(List<ScanTarget> targets, Dictionary<long, string> mountById,
+    private Fde.IElevatedMftBroker? CreateElevatedMftBroker(
+        IReadOnlyCollection<VolumeIdentityExpectation> identityTargets)
+    {
+        if (!_settings.Current.UseElevatedMftHelper || _mftBrokerFactory is null ||
+            !OperatingSystem.IsWindows() || Fde.EngineEnvironment.IsElevated()) return null;
+
+        var allowed = identityTargets
+            .Where(target => Fde.BackendSelector.IsWholeVolumeRoot(target.MountPath))
+            .Select(target => new Fde.ElevatedMftAllowedRoot(target.MountPath, target.Serial))
+            .DistinctBy(target => target.Root, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (allowed.Length == 0) return null;
+
+        // Trust-gate выполняется внутри фабрики fail-closed. Даже включённая настройка не может
+        // запустить unsigned/portable/user-writable helper; FastFileLister прозрачно уйдёт в fallback.
+        return _mftBrokerFactory.Create(allowed);
+    }
+
+    private EnumerationSummary Enumerate(List<ScanTarget> targets, Dictionary<long, string> mountById,
         CancellationToken ct, long sessionId, HashSet<long> skipVolumes,
-        Dictionary<long, UsnDeltaPlanRequest> deltaPlans)
+        Dictionary<long, UsnDeltaPlanRequest> deltaPlans, Fde.IElevatedMftBroker? mftBroker)
     {
         SetStage(ScanStage.Enumerating, sessionId);
+        var completeVolumes = new HashSet<long>();
+        var incompleteVolumes = new HashSet<long>();
 
-        // P1.2: для ЧИСТОГО скана папок (без целых томов) заполняем область сессии — тогда воронка считает
-        // кандидатов по ней, а не по всей старой БД. Для скана тома область = весь том, выгоды нет → не пишем.
-        bool useScope = _options.Folders.Count > 0 && _options.VolumeIds.Count == 0;
-        HashSet<long>? scopeIds = null;
-        if (useScope)
-        {
-            try { _files.ClearScope(sessionId); scopeIds = new HashSet<long>(); }
-            catch (Exception ex) { AppLog.Error("ClearScope", ex); }
-        }
+        // Единая явная область для ЛЮБОГО запуска: exact/perceptual SQL читает только выбранные
+        // диски/папки, а не всю историческую базу. Ошибка подготовки scope фатальна — безопаснее
+        // сохранить предыдущий результат, чем молча откатиться к глобальной выборке.
+        _files.ClearScope(sessionId);
+        _files.BeginScope(sessionId); // пустая папка остаётся пустой, не global fallback
 
         // Накапливаем seen и решение о прунинге на ВЕСЬ том. Иначе при сканировании двух папок
         // одного диска (режим Folders) prune после второй папки удалял бы из индекса записи первой
@@ -461,13 +626,20 @@ public sealed class ScanService : IScanService, IDisposable
         foreach (var volumeGroup in targets.GroupBy(t => t.VolumeId))
         {
             long volumeId = volumeGroup.Key;
-            if (!mountById.TryGetValue(volumeId, out var mountRoot)) continue;
+            if (!mountById.TryGetValue(volumeId, out var mountRoot))
+            {
+                incompleteVolumes.Add(volumeId);
+                continue;
+            }
+            VerifyVolumeIdentity(volumeId, force: true);
 
             // Инкрементальность: том не менялся с прошлого скана (по USN-журналу) — не перечисляем
             // заново, существующий индекс актуален. Воронка ниже отработает по сохранённым данным.
             if (skipVolumes.Contains(volumeId))
             {
                 AppLog.Write($"Том {volumeId}: без изменений по USN-журналу — перечисление пропущено.");
+                _files.AddVolumeToScope(sessionId, volumeId, _options.IncludedCategories);
+                completeVolumes.Add(volumeId);
                 continue;
             }
 
@@ -481,7 +653,11 @@ public sealed class ScanService : IScanService, IDisposable
             // (недоступна/аномалия) — честный полный пересбор тома ниже, причина уже в логе.
             if (deltaPlans.TryGetValue(volumeId, out var deltaPlan) &&
                 TryApplyUsnDelta(volumeId, mountRoot, deltaPlan, sessionId, ct))
+            {
+                _files.AddVolumeToScope(sessionId, volumeId, _options.IncludedCategories);
+                completeVolumes.Add(volumeId);
                 continue;
+            }
 
             // 3.4: переносимый кэш проверки (.dedupindex) в корне носителя — заполнен этим
             // приложением на ДРУГОМ компьютере. Чистый кэш хэшей второго уровня: применяется
@@ -509,6 +685,7 @@ public sealed class ScanService : IScanService, IDisposable
                 var listerOpts = new Fde.FastListerOptions
                 {
                     StatParallelism = metaDop,
+                    ElevatedMftBroker = mftBroker,
                     SkipHiddenSystem = _options.SkipHiddenSystem,    // не заходить в скрытые/системные папки (P1.5)
                     OnBackend = d => NoteBackend(d, sessionId),      // режим бэкенда по диску + диагностика
                     // Ошибки перечисления — это уведомления/недоступные ПАПКИ (целые поддеревья) и откат
@@ -532,6 +709,7 @@ public sealed class ScanService : IScanService, IDisposable
                         indexer.Process(ef);
                     }
                     catch (OperationCanceledException) { throw; }
+                    catch (VolumeIdentityChangedException) { throw; }
                     catch
                     {
                         Report(p => p.FilesSkipped++);
@@ -540,6 +718,7 @@ public sealed class ScanService : IScanService, IDisposable
             }
 
             indexer.FlushAll(); // хвост meta-пачки и буфера инкрементальных кандидатов (2.7)
+            VerifyVolumeIdentity(volumeId, force: true);
             var seen = indexer.Seen;
 
             // 3.4: пользователю видно, что скан ускорен кэшем с носителя (и сколько записей он дал).
@@ -567,8 +746,13 @@ public sealed class ScanService : IScanService, IDisposable
             {
                 if (enumErrors == 0)
                 {
-                    try { _files.PruneVolume(volumeId, seen); }
-                    catch (Exception ex) { AppLog.Error("PruneVolume", ex); }
+                    VerifyVolumeIdentity(volumeId, force: true);
+                    try { _files.StagePruneVolume(sessionId, volumeId, seen); }
+                    catch (Exception ex)
+                    {
+                        enumErrors++;
+                        AppLog.Error("PruneVolume", ex);
+                    }
                 }
                 else
                 {
@@ -576,22 +760,27 @@ public sealed class ScanService : IScanService, IDisposable
                 }
             }
 
-            // P1.2: копим in-scope файлы тома; область запишем ОДНОЙ транзакцией после всех томов.
-            if (scopeIds != null) scopeIds.UnionWith(seen);
+            if (enumErrors == 0)
+            {
+                completeVolumes.Add(volumeId);
+            }
+            else
+            {
+                incompleteVolumes.Add(volumeId);
+                NoteEnumerationNotice(
+                    $"Проверка тома {mountRoot} неполная: недоступных папок/ошибок обхода — {enumErrors:N0}. " +
+                    "Быстрое продолжение для него не сохранено; следующий запуск повторит обход");
+            }
+
+            // Пишем scope сразу по завершении тома. Раньше второй HashSet на весь многомиллионный
+            // скан жил до конца перечисления и почти удваивал пик managed-памяти.
+            _files.AddScope(sessionId, seen);
         }
 
-        // P1.2: единая запись области (всё-или-ничего). При любом сбое область очищается, и движок
-        // безопасно идёт по ГЛОБАЛЬНОМУ запросу — надмножество безопасно, частичное подмножество нет.
-        if (scopeIds is { Count: > 0 })
-        {
-            try { _files.AddScope(sessionId, scopeIds); }
-            catch (Exception ex)
-            {
-                AppLog.Error("AddScope", ex);
-                try { _files.ClearScope(sessionId); } catch { /* fallback на глобальный запрос */ }
-            }
-        }
+        return new EnumerationSummary(completeVolumes, incompleteVolumes);
     }
+
+    private sealed record EnumerationSummary(HashSet<long> CompleteVolumes, HashSet<long> IncompleteVolumes);
 
     /// <summary>
     /// Пер-томовое состояние этапа индексирования: meta-пачки, пакетный lookup инкрементальных
@@ -634,7 +823,7 @@ public sealed class ScanService : IScanService, IDisposable
         /// индексе (записан или строго переиспользован); false — отфильтрован (системная папка,
         /// атрибуты/размер/расширение, невыбранная категория) и в индексе ему не место.
         /// </summary>
-        public bool Process(Fde.EnumeratedFile ef)
+        public bool Process(Fde.EnumeratedFile ef, uint? usnReason = null)
         {
             // Системные папки и skip-файлы раньше отсекал EnumerateFilesSafe/SkipDir/SkipFile.
             // В USN-режиме движок выдаёт плоский список всего тома — $Recycle.Bin и т.п. отсекаем тут.
@@ -682,7 +871,12 @@ public sealed class ScanService : IScanService, IDisposable
             // (2.7, см. FlushLookup ниже) — кандидат копится в буфер, существующие
             // метаданные подтягиваются одним SELECT на пачку, весь индекс тома в память
             // не грузится. Критерий строгого совпадения не менялся.
-            if (_s._options.Incremental)
+            // USN уже является более сильным сигналом, чем совпавшие size/mtime/created. Для
+            // изменений данных/потоков/hardlink и неоднозначных причин не разрешаем metadata-reuse:
+            // запись идёт в UpsertMetaBatch с пустыми хэшами, где старые значения сбрасываются.
+            bool mayReuseHashes = _s._options.Incremental &&
+                                  (usnReason is null || !UsnDeltaPlanner.RequiresHashInvalidation(usnReason.Value));
+            if (mayReuseHashes)
             {
                 _lookupBuffer.Add((record, cleanFull));
                 if (_lookupBuffer.Count >= LookupBatch) FlushLookup();
@@ -700,17 +894,16 @@ public sealed class ScanService : IScanService, IDisposable
         public void FlushAll()
         {
             FlushLookup(); // 2.7: хвост буфера инкрементальных кандидатов (< LookupBatch)
-            if (_batch.Count > 0)
-            {
-                _s._files.UpsertMetaBatch(_batch);
-                foreach (var b in _batch) Seen.Add(b.Id);
-                _batch.Clear();
-            }
+            FlushMetaBatch();
         }
 
         // Общий сброс meta-пачки (семантика прежняя: Upsert → seen → прогресс сессии).
         private void FlushMetaBatch()
         {
+            if (_batch.Count == 0) return;
+            // Последняя проверка непосредственно перед изменением индекса: если букву уже занял
+            // другой носитель, ни одна строка его метаданных не попадёт в volume_id старого диска.
+            _s.VerifyVolumeIdentity(_volumeId, force: true);
             _s._files.UpsertMetaBatch(_batch);
             foreach (var b in _batch) Seen.Add(b.Id);
             _batch.Clear();
@@ -815,18 +1008,6 @@ public sealed class ScanService : IScanService, IDisposable
 
     // ---------------- Инкрементальность (USN-журнал) ----------------
 
-    /// <summary>Хэш фильтров скана: при их изменении переиспользовать индекс нельзя — полный пересбор.</summary>
-    private static string OptionsHash(ScanOptions o)
-    {
-        var exts = string.Join(",", o.ExcludedExtensions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
-        // Категории — тоже фильтр «что индексировать»: их смена должна форсировать полный пересбор
-        // (иначе на неизменившемся томе вновь включённая категория не проиндексировалась бы).
-        var cats = string.Join(",", o.IncludedCategories.Select(c => (int)c).OrderBy(x => x));
-        var s = $"{o.MinFileSize}|{o.MaxFileSize}|{o.SkipHiddenSystem}|{(int)o.Depth}|{exts}|{cats}";
-        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(s));
-        return Convert.ToHexString(hash);
-    }
-
     /// <summary>Заявка на дельта-реконсайл тома: журнал и диапазон [StartUsn; StopUsn) для чтения.</summary>
     private readonly record struct UsnDeltaPlanRequest(ulong JournalId, long StartUsn, long StopUsn);
 
@@ -890,6 +1071,7 @@ public sealed class ScanService : IScanService, IDisposable
     private bool TryApplyUsnDelta(long volumeId, string mountRoot, UsnDeltaPlanRequest req,
         long sessionId, CancellationToken ct)
     {
+        VerifyVolumeIdentity(volumeId, force: true);
         Fde.UsnDeltaResult delta;
         try
         {
@@ -918,18 +1100,30 @@ public sealed class ScanService : IScanService, IDisposable
         var indexer = new VolumeIndexer(this, volumeId, mountRoot, sessionId);
         var hooks = new UsnDeltaApplyHooks
         {
-            Stat = Fde.FileStatReader.TryGet,
-            TryIndexFile = ef =>
+            Stat = path =>
+            {
+                VerifyVolumeIdentity(volumeId);
+                return Fde.FileStatReader.TryGet(path);
+            },
+            TryIndexFile = (ef, reason) =>
             {
                 WaitGate(ct); // пауза/отмена действуют и на дельте
                 // Каталоги и reparse-точки обычное перечисление отфильтровывает ещё в движке
                 // (FastFileLister) — здесь та же граница, чтобы не индексировать их через дельту.
                 const uint DIRECTORY = 0x10, REPARSE_POINT = 0x400;
                 if ((ef.Attributes & (DIRECTORY | REPARSE_POINT)) != 0) return false;
-                return indexer.Process(ef);
+                return indexer.Process(ef, reason);
             },
-            DeleteByRelPath = rel => _files.DeleteByVolumeAndPath(volumeId, rel),
-            VolumeAlive = () => Directory.Exists(mountRoot)
+            DeleteByRelPath = rel =>
+            {
+                VerifyVolumeIdentity(volumeId, force: true);
+                _files.StageDeleteByVolumeAndPath(sessionId, volumeId, rel);
+            },
+            VolumeAlive = () =>
+            {
+                VerifyVolumeIdentity(volumeId);
+                return Directory.Exists(mountRoot);
+            }
         };
 
         var outcome = UsnDeltaExecutor.Apply(plan, mountRoot, hooks);
@@ -940,6 +1134,7 @@ public sealed class ScanService : IScanService, IDisposable
         }
 
         indexer.FlushAll();
+        VerifyVolumeIdentity(volumeId, force: true);
         NoteEnumerationNotice(
             $"Быстрое обновление по журналу USN ({mountRoot}): изменений {outcome.Reindexed}, удалений {outcome.Deleted}");
         return true;
@@ -956,12 +1151,19 @@ public sealed class ScanService : IScanService, IDisposable
     /// читалась и применялась ровно до него (StopUsn), а изменения во время скана лежат выше и
     /// будут дочитаны следующей дельтой (повторное применение идемпотентно — restat смотрит на диск).
     /// </summary>
-    private void StoreJournalState(Dictionary<long, Fde.UsnJournalSnapshot> snaps, string optionsHash)
+    private void StoreJournalState(Dictionary<long, Fde.UsnJournalSnapshot> snaps, string optionsHash,
+        IReadOnlySet<long> completeVolumes)
     {
         foreach (var (vid, snap) in snaps)
         {
+            if (!completeVolumes.Contains(vid))
+            {
+                AppLog.Write($"USN checkpoint тома {vid} не обновлён: обход был неполным.");
+                continue;
+            }
             try
             {
+                VerifyVolumeIdentity(vid, force: true);
                 _scanState.Upsert(new VolumeScanState
                 {
                     VolumeId = vid,
@@ -971,6 +1173,14 @@ public sealed class ScanService : IScanService, IDisposable
                     EngineVersion = IncrementalScanPlanner.EngineVersion,
                     OptionsHash = optionsHash
                 });
+            }
+            catch (VolumeIdentityChangedException ex)
+            {
+                // Если смена произошла в узком окне коммита, удаляем и старый, и только что
+                // записанный watermark: следующий запуск обязан сделать полный пересбор.
+                try { _scanState.Delete(ex.VolumeId); }
+                catch (Exception dex) { AppLog.Error("DeleteCheckpoint(StoreIdentityChanged)", dex); }
+                throw;
             }
             catch (Exception ex) { AppLog.Error("StoreJournalState", ex); }
         }
@@ -1025,15 +1235,20 @@ public sealed class ScanService : IScanService, IDisposable
             _ct = ct;
         }
 
-        public void WaitGate() => _s.WaitGate(_ct);
+        public void WaitGate()
+        {
+            _s.WaitGate(_ct);
+            _s.VerifyAllVolumeIdentities(); // троттлинг внутри guard: горячий путь остаётся дешёвым
+        }
         public void Stage(ScanStage stage) => _s.SetStage(stage, _sessionId);
         public void StageQuiet(ScanStage stage) => _s.SetStageQuiet(stage);
         public void FileHashed(string path, long bytes) =>
             _s.Report(p => { p.FilesHashed++; p.BytesProcessed += bytes; p.CurrentFile = path; });
         public void Skipped() => _s.Report(p => p.FilesSkipped++);
         public void ChangedSkipped() => _s.Report(p => { p.FilesSkipped++; p.FilesChangedSkipped++; });
-        public void Fraction(double value) => _s.Report(p => p.Fraction = value);
+        public void Fraction(double value) => _s.ReportPhaseFraction(value);
         public void ExactGroups(long count) => _s.Report(p => p.GroupsFound = count);
+        public void VerifyVolumes() => _s.VerifyAllVolumeIdentities(force: true);
         public void SessionTick()
         {
             var snap = _s.Snapshot();
@@ -1114,6 +1329,10 @@ public sealed class ScanService : IScanService, IDisposable
             {
                 PathFor = f => FullPath(f, mountById),
                 ReadDopFor = ClampedContentDop,
+                PhysicalDeviceKeyFor = vid => _readPlans.TryGetValue(vid, out var plan)
+                    ? plan.PhysicalDeviceKey
+                    : $"volume:{vid}",
+                PreferSequentialFor = vid => _readPlans.TryGetValue(vid, out var plan) && plan.PreferSequential,
                 Budget = budget,
                 MaxVolumeParallelism = _maxVolumeParallelism,
                 ComputePixelHash = _computePixelHash,
@@ -1138,11 +1357,12 @@ public sealed class ScanService : IScanService, IDisposable
             // у них sharpness останется NULL (бейдж «Лучший кадр» просто не покажется до
             // следующего пересчёта фото) — это подсказка UI, а не данные для группировки.
             var done = chunk.Where(f => f.PHash is not null || hadStalePHash.Contains(f.Id)).ToList();
+            VerifyAllVolumeIdentities(force: true);
             _files.UpdateComputedBatch(done);
             computed += done.Count(f => f.PHash is not null);
 
             processedImages += page.Count;
-            Report(p => p.Fraction = Math.Min(1.0, processedImages / (double)total));
+            ReportPhaseFraction(Math.Min(1.0, processedImages / (double)total));
         }
 
         // Debug-счётчики (раздел P1.5: «почему похожие не нашлись»).
@@ -1191,12 +1411,13 @@ public sealed class ScanService : IScanService, IDisposable
                 if (path is null) continue;
                 f.AudioFp = _audio.ComputeFingerprint(path, ct);
                 if (f.AudioFp is not null) { f.ScanState = ScanState.Perceptual; computed++; }
-                Report(p => { p.FilesHashed++; p.CurrentFile = path; });
+                Report(p => { p.FilesHashed++; p.BytesProcessed += f.Size; p.CurrentFile = path; });
             }
+            VerifyAllVolumeIdentities(force: true);
             _files.UpdateComputedBatch(page.Where(f => f.AudioFp is not null).ToList());
 
             processedAudio += page.Count;
-            Report(p => p.Fraction = Math.Min(1.0, processedAudio / (double)total));
+            ReportPhaseFraction(Math.Min(1.0, processedAudio / (double)total));
         }
 
         AppLog.Write($"Похожая музыка: кандидатов {total}, отфильтровано профилем {skippedByProfile}, " +
@@ -1223,10 +1444,16 @@ public sealed class ScanService : IScanService, IDisposable
         _gate.Wait(ct);
     }
 
+    private void VerifyVolumeIdentity(long volumeId, bool force = false) =>
+        _volumeIdentityGuard?.VerifyVolume(volumeId, force);
+
+    private void VerifyAllVolumeIdentities(bool force = false) =>
+        _volumeIdentityGuard?.VerifyAll(force);
+
     private void SetStage(ScanStage stage, long sessionId)
     {
         // Смена этапа — немедленно (минуя троттлинг): пользователь сразу видит «Полный хэш» и т.п.
-        Report(p => { p.Stage = stage; p.Fraction = null; }, immediate: true);
+        Report(p => p.Stage = stage, immediate: true);
         var snap = Snapshot();
         _sessions.UpdateProgress(sessionId, stage, snap.FilesSeen, snap.FilesSkipped);
     }
@@ -1239,8 +1466,17 @@ public sealed class ScanService : IScanService, IDisposable
 
     public void Dispose()
     {
+        DisposeProgressHeartbeat();
         _coalescer?.Dispose();
         _gate.Dispose();
+    }
+
+    private void DisposeProgressHeartbeat()
+    {
+        var timer = Interlocked.Exchange(ref _progressHeartbeat, null);
+        if (timer is null) return;
+        using var done = new ManualResetEvent(false);
+        if (timer.Dispose(done)) done.WaitOne();
     }
 
     private void SetStageQuiet(ScanStage stage)
@@ -1251,17 +1487,83 @@ public sealed class ScanService : IScanService, IDisposable
         if (changed) Report(p => p.Stage = stage, immediate: true);
     }
 
+    private void BeginProgressPhase(ScanProgressPhase phase)
+    {
+        _progressPhase = phase;
+        _phaseFraction = null;
+        var snap = Snapshot();
+        var estimate = _progressEstimator?.BeginPhase(phase, snap.FilesSeen,
+            FileOperations(snap), snap.BytesProcessed);
+        Report(p =>
+        {
+            if (estimate is not null) ApplyEstimate(p, estimate);
+        }, immediate: true);
+    }
+
+    private void CompleteProgressPhase()
+    {
+        _phaseFraction = 1;
+        var snap = Snapshot();
+        var estimate = _progressEstimator?.CompletePhase(snap.FilesSeen,
+            FileOperations(snap), snap.BytesProcessed);
+        Report(p =>
+        {
+            if (estimate is not null) ApplyEstimate(p, estimate);
+        }, immediate: true);
+    }
+
+    private void ReportPhaseFraction(double value)
+    {
+        value = Math.Clamp(value, 0, 1);
+        // Fraction exact-движка описывает size/hash-воронку, но после неё остаётся обязательная
+        // побайтовая кластеризация без известного total. Резервируем ей 15% exact-диапазона,
+        // чтобы UI не показывал 98% перед потенциально долгим чтением больших дублей.
+        _phaseFraction = _progressPhase == ScanProgressPhase.Exact ? value * 0.85 : value;
+        Report(_ => { });
+    }
+
     private void Report(Action<ScanProgress> mutate, bool immediate = false)
     {
         ScanProgress snapshot;
         lock (_progressLock)
         {
             mutate(Progress);
+            var estimator = _progressEstimator;
+            if (estimator is not null)
+            {
+                ScanProgressEstimate estimate = Progress.Stage switch
+                {
+                    ScanStage.Completed => estimator.Finish(true, Progress.FilesSeen,
+                        FileOperations(Progress), Progress.BytesProcessed),
+                    ScanStage.Cancelled or ScanStage.Failed => estimator.Finish(false, Progress.FilesSeen,
+                        FileOperations(Progress), Progress.BytesProcessed),
+                    _ => estimator.Update(Progress.FilesSeen, FileOperations(Progress),
+                        Progress.BytesProcessed, _phaseFraction)
+                };
+                ApplyEstimate(Progress, estimate);
+            }
             snapshot = Progress.Clone();
         }
         var coalescer = _coalescer;
         if (coalescer is null) ProgressChanged?.Invoke(snapshot); // вне скана (на всякий случай)
         else coalescer.Report(snapshot, immediate);
+    }
+
+    private static long FileOperations(ScanProgress p)
+    {
+        if (p.FilesSeen > long.MaxValue - p.FilesHashed) return long.MaxValue;
+        return Math.Max(0, p.FilesSeen + p.FilesHashed);
+    }
+
+    private static void ApplyEstimate(ScanProgress progress, ScanProgressEstimate estimate)
+    {
+        progress.OverallFraction = estimate.OverallFraction;
+        progress.Fraction = estimate.OverallFraction; // совместимость старого ScanViewModel
+        progress.Elapsed = estimate.Elapsed;
+        progress.EstimatedRemaining = estimate.EstimatedRemaining;
+        progress.BytesPerSecond = estimate.BytesPerSecond;
+        progress.FilesPerSecond = estimate.FilesPerSecond;
+        progress.EstimatedTotalFiles = estimate.EstimatedTotalFiles;
     }
 
     // ---------------- Цели сканирования ----------------
@@ -1345,7 +1647,11 @@ public sealed class ScanService : IScanService, IDisposable
         _readPlans = VolumeReadPlanner.Build(
             targets.Select(t => t.VolumeId), byId,
             _settings.Current.EcoMode ? 1 : Math.Max(1, options.Parallelism));
-        _maxVolumeParallelism = Math.Max(1, _readPlans.Count);
+        // Внешний параллелизм теперь считается по ФИЗИЧЕСКИМ устройствам, а не по разделам.
+        _maxVolumeParallelism = Math.Max(1, _readPlans.Values
+            .Select(p => p.PhysicalDeviceKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count());
         foreach (var p in _readPlans.Values)
             AppLog.Write($"План чтения тома «{p.Label}»: {(p.PreferSequential ? "последовательно" : "параллельно")}, " +
                          $"метаданные DOP={p.MetadataDop}, содержимое DOP={p.ContentDop}");

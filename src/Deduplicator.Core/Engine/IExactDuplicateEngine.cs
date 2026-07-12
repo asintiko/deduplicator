@@ -65,6 +65,12 @@ public interface IExactScanReporter
     void ExactGroups(long count);
     /// <summary>Контрольная точка для сохранения прогресса сессии (возобновляемость).</summary>
     void SessionTick();
+
+    /// <summary>
+    /// Принудительно проверить identity всех активных носителей перед пакетной записью. Default
+    /// оставляет совместимость тестовых/внешних репортёров, которым сторож не нужен.
+    /// </summary>
+    void VerifyVolumes() { }
 }
 
 /// <summary>

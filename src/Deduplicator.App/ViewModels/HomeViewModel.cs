@@ -60,6 +60,11 @@ public partial class HomeViewModel : PageViewModel
     [ObservableProperty] private string _lastSnapshotText = "Проверок пока не было";
     [ObservableProperty] private string _freedTotalText = "";
     [ObservableProperty] private string _noDisksText = "";
+    [ObservableProperty] private bool _hasDuplicateResults;
+    // Есть что освобождать (сверенные точные копии с ненулевым выигрышем места). Отделено от
+    // HasDuplicateResults: сотни «похожих»/непроверенных групп дают 0 Б к освобождению — показывать
+    // на главной «Можно освободить 0 Б» было бы бессмысленно и тревожно (правка по скрину пользователя).
+    [ObservableProperty] private bool _hasReclaimable;
 
     public HomeViewModel(NavigationService nav, IVolumeService volumes, IStatisticsService statistics,
         Deduplicator.Core.Data.OperationLogRepository opLog, IDriveWatcher driveWatcher)
@@ -164,6 +169,7 @@ public partial class HomeViewModel : PageViewModel
     [RelayCommand]
     private async Task RefreshAsync()
     {
+        if (IsBusy) return;
         IsBusy = true;
         try
         {
@@ -192,6 +198,8 @@ public partial class HomeViewModel : PageViewModel
             IndexedFilesText = $"{summary.Stats.TotalIndexedFiles:N0}";
             DuplicateGroupsText = $"{summary.Stats.TotalGroups:N0}";
             ReclaimableText = Format.Bytes(summary.Stats.TotalReclaimableBytes);
+            HasDuplicateResults = summary.Stats.TotalGroups > 0;
+            HasReclaimable = summary.Stats.TotalReclaimableBytes > 0;
             LastSnapshotText = summary.LastScan == default
                 ? "Проверок пока не было"
                 : $"Последняя проверка: {Format.DateShort(summary.LastScan)}";
@@ -221,6 +229,12 @@ public partial class HomeViewModel : PageViewModel
             NoDisksText = RecentDisks.Count == 0
                 ? "Подключите первый диск, чтобы начать."
                 : "";
+        }
+        catch (Exception ex)
+        {
+            StatusTitle = "Не удалось обновить сводку";
+            StatusText = "Данные не изменены. Проверьте подключение дисков и попробуйте ещё раз.";
+            Core.Util.AppLog.Error("Home.Refresh", ex);
         }
         finally
         {
@@ -260,23 +274,31 @@ public partial class HomeViewModel : PageViewModel
 
     private static string BuildStatusTitle(int connected, DuplicateStatistics stats)
     {
-        if (connected == 0) return "Жду подключённый диск";
-        if (stats.TotalGroups > 0) return "Дубликаты уже найдены";
-        if (stats.TotalIndexedFiles > 0) return "Архив дисков сохранён";
-        return "Можно начинать проверку";
+        if (stats.TotalReclaimableBytes > 0) return "Можно освободить место";
+        if (stats.TotalGroups > 0) return "Проверка завершена";
+        if (connected == 0 && stats.TotalIndexedFiles > 0) return "Последняя проверка сохранена";
+        if (connected == 0) return "Подключите диск или выберите папку";
+        if (stats.TotalIndexedFiles > 0) return "Всё готово к новой проверке";
+        return "Начните с простой проверки";
     }
 
     private static string BuildStatusText(int connected, DuplicateStatistics stats)
     {
-        if (connected == 0)
-            return "Подключите внешний диск или флешку. Списки файлов с прошлых проверок остаются в архиве.";
+        if (stats.TotalReclaimableBytes > 0)
+            return $"Найдено {stats.TotalGroups:N0} групп копий. Просмотрите предложения — без вашего подтверждения ничего не удалится.";
 
         if (stats.TotalGroups > 0)
-            return $"Найдено групп дублей: {stats.TotalGroups:N0}. Можно открыть результаты и выбрать, что убрать.";
+            return $"Найдено {stats.TotalGroups:N0} групп похожих файлов. Точных копий для освобождения места не нашлось — откройте результаты и решите сами.";
+
+        if (connected == 0 && stats.TotalIndexedFiles > 0)
+            return "Списки файлов доступны даже без подключённых дисков. Подключите носитель для новой проверки или откройте сохранённые данные.";
+
+        if (connected == 0)
+            return "Подключите внешний диск, флешку или выберите папку. Рекомендуемые безопасные настройки уже включены.";
 
         if (stats.TotalIndexedFiles > 0)
-            return "Списки файлов сохранены. Можно искать дубликаты даже с дисками, которые сейчас отключены.";
+            return "Подключённые диски видны программе. Выберите, где искать, — остальные параметры можно не менять.";
 
-        return "Выберите поиск дубликатов. Программа запомнит файлы, чтобы диск было видно даже после отключения.";
+        return "Выберите диск или папку. Программа найдёт одинаковые файлы и сначала покажет их вам для проверки.";
     }
 }

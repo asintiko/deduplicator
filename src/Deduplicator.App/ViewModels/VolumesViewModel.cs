@@ -32,6 +32,7 @@ public partial class VolumesViewModel : PageViewModel
     [ObservableProperty] private int _totalVolumes;
     [ObservableProperty] private string _totalFilesText = "0";
     [ObservableProperty] private string _totalSizeText = "—";
+    [ObservableProperty] private string? _error;
 
     [ObservableProperty] private bool _showRemoveConfirm;
     private VolumeItemViewModel? _pendingRemove;
@@ -64,6 +65,7 @@ public partial class VolumesViewModel : PageViewModel
         if (_loading) return;
         _loading = true;
         IsBusy = true;
+        Error = null;
         try
         {
             var (items, total) = await Task.Run(() =>
@@ -78,6 +80,11 @@ public partial class VolumesViewModel : PageViewModel
             TotalVolumes = items.Count;
             TotalFilesText = $"{total.files:N0}";
             TotalSizeText = Format.Bytes(total.bytes);
+        }
+        catch (Exception ex)
+        {
+            Error = "Не удалось обновить список дисков. Проверьте подключение носителей и повторите.";
+            Core.Util.AppLog.Error("Volumes.Refresh", ex);
         }
         finally
         {
@@ -109,15 +116,23 @@ public partial class VolumesViewModel : PageViewModel
         var item = _pendingRemove;
         _pendingRemove = null;
         if (item is null) return;
-        await Task.Run(() =>
+        try
         {
-            _volumeRepo.Delete(item.Id);
-            // FK-каскад снёс files/duplicate_members этого тома, но пустые/одиночные группы и
-            // осиротевшие эталоны остались бы в результатах и статистике (аудит 2026-07-02).
-            try { _groups.DissolveDegenerateGroups(); }
-            catch (Exception ex) { Core.Util.AppLog.Error("DissolveDegenerateGroups", ex); }
-        });
-        await RefreshAsync();
+            await Task.Run(() =>
+            {
+                _volumeRepo.Delete(item.Id);
+                // FK-каскад снёс files/duplicate_members этого тома, но пустые/одиночные группы и
+                // осиротевшие эталоны остались бы в результатах и статистике (аудит 2026-07-02).
+                try { _groups.DissolveDegenerateGroups(); }
+                catch (Exception ex) { Core.Util.AppLog.Error("DissolveDegenerateGroups", ex); }
+            });
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            Error = "Не удалось убрать носитель из каталога. Данные не изменены — попробуйте ещё раз.";
+            Core.Util.AppLog.Error("Volumes.Remove", ex);
+        }
     }
 
     [RelayCommand]

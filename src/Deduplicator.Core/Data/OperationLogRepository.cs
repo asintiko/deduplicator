@@ -3,6 +3,8 @@ using Deduplicator.Core.Models;
 
 namespace Deduplicator.Core.Data;
 
+public sealed record OperationLogPage(IReadOnlyList<OperationLogEntry> Items, long TotalCount, long? NextBeforeId);
+
 /// <summary>Журнал операций — основа обратимости (FR-32).</summary>
 public sealed class OperationLogRepository
 {
@@ -62,6 +64,42 @@ public sealed class OperationLogRepository
         var list = new List<OperationLogEntry>();
         while (r.Read()) list.Add(Map(r));
         return list;
+    }
+
+    /// <summary>
+    /// Keyset-страница журнала. Стоимость следующей страницы не растёт вместе с размером таблицы,
+    /// в отличие от OFFSET; новые операции сверху не сдвигают уже показанные строки.
+    /// </summary>
+    public OperationLogPage GetPage(int limit, long? beforeId = null, bool onlyReversible = false)
+    {
+        limit = Math.Clamp(limit, 1, 500);
+        using var conn = _db.Open();
+
+        long total;
+        using (var count = conn.CreateCommand())
+        {
+            count.CommandText = "SELECT COUNT(*) FROM operations_log " +
+                                (onlyReversible ? "WHERE reversible=1 AND restored=0" : "");
+            total = Convert.ToInt64(count.ExecuteScalar());
+        }
+
+        using var cmd = conn.CreateCommand();
+        var conditions = new List<string>();
+        if (onlyReversible) conditions.Add("reversible=1 AND restored=0");
+        if (beforeId is not null) conditions.Add("id < $before");
+        cmd.CommandText =
+            "SELECT id, op_type, file_id, group_id, src_path, dst_path, performed_at, reversible, restored, size_bytes, file_name " +
+            "FROM operations_log " +
+            (conditions.Count > 0 ? "WHERE " + string.Join(" AND ", conditions) + " " : "") +
+            "ORDER BY id DESC LIMIT $limit";
+        cmd.Add("$limit", limit);
+        if (beforeId is not null) cmd.Add("$before", beforeId.Value);
+
+        using var r = cmd.ExecuteReader();
+        var items = new List<OperationLogEntry>(limit);
+        while (r.Read()) items.Add(Map(r));
+        long? next = items.Count == limit ? items[^1].Id : null;
+        return new OperationLogPage(items, total, next);
     }
 
     public OperationLogEntry? GetById(long id)

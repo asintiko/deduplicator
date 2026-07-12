@@ -1,238 +1,281 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:loc="clr-namespace:Deduplicator.App.Localization"
+             xmlns:conv="clr-namespace:Deduplicator.App.Converters"
              xmlns:controls="clr-namespace:Deduplicator.App.Controls"
              x:Class="Deduplicator.App.Views.ScanView">
 
-    <Grid RowDefinitions="Auto,*" Margin="28,24">
-        <StackPanel Grid.Row="0" Margin="0,0,0,18">
-            <TextBlock Classes="h1" Text="{x:Static loc:Strings.ScanTitle}"/>
-            <TextBlock Classes="muted" Text="Выберите диски и нажмите “Начать поиск”. Удаление будет только после отдельного подтверждения." Margin="0,4,0,0" TextWrapping="Wrap"/>
-        </StackPanel>
+    <Grid Margin="32,28,32,32">
+        <ScrollViewer>
+            <StackPanel MaxWidth="1040" HorizontalAlignment="Stretch" Spacing="22">
 
-        <ScrollViewer Grid.Row="1">
-            <StackPanel Spacing="16" MaxWidth="900" HorizontalAlignment="Left">
+                <!-- Шапка страницы -->
+                <StackPanel Spacing="5">
+                    <TextBlock Classes="eyebrow" Text="БЕЗОПАСНАЯ ПРОВЕРКА"/>
+                    <TextBlock Classes="h1" Text="{x:Static loc:Strings.ScanTitle}"/>
+                    <TextBlock Classes="bodyLarge muted"
+                               Text="Выберите диск или папку — остальное программа сделает сама: найдёт все одинаковые файлы и похожие фото. Ничего не удалится без вашего подтверждения."
+                               TextWrapping="Wrap" MaxWidth="760" HorizontalAlignment="Left"/>
+                </StackPanel>
 
-                <!-- ===== Настройка (когда не выполняется) ===== -->
-                <StackPanel Spacing="16" IsVisible="{Binding !IsRunning}">
-                    <Border Classes="card" IsVisible="{Binding EmptyHint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                        <StackPanel Orientation="Horizontal" Spacing="12">
-                            <PathIcon Data="{StaticResource IconWarning}" Foreground="{DynamicResource WarningBrush}"/>
-                            <TextBlock Text="{Binding EmptyHint}" Classes="muted" VerticalAlignment="Center"/>
-                        </StackPanel>
+                <!-- ===== Настройка ===== -->
+                <StackPanel Spacing="16" IsVisible="{Binding IsSetupVisible}">
+                    <Border Classes="cardFlat"
+                            IsVisible="{Binding EmptyHint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <Border Classes="iconTile" Width="42" Height="42" Background="{DynamicResource WarningSoft}">
+                                <PathIcon Data="{StaticResource IconWarning}" Foreground="{DynamicResource WarningBrush}"
+                                          Width="20" Height="20"/>
+                            </Border>
+                            <TextBlock Grid.Column="1" Margin="12,0,0,0" Text="{Binding EmptyHint}" Classes="bodyLarge"
+                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        </Grid>
                     </Border>
 
-                    <!-- #6: ошибка сверки больше не исчезает молча -->
-                    <Border Classes="card" IsVisible="{Binding IsFailed}" Background="{DynamicResource DangerBrush}">
-                        <StackPanel Orientation="Horizontal" Spacing="12">
-                            <PathIcon Data="{StaticResource IconWarning}" Foreground="White"/>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="{x:Static loc:Strings.ScanFailed}" Foreground="White" FontWeight="SemiBold"/>
-                                <TextBlock Text="{Binding FailText}" Foreground="White" Classes="caption" TextWrapping="Wrap"/>
+                    <Border Classes="cardFlat" IsVisible="{Binding IsFailed}"
+                            Background="{DynamicResource DangerSoft}" BorderBrush="{DynamicResource DangerBrush}">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <Border Classes="iconTile" Background="{DynamicResource DangerBrush}">
+                                <PathIcon Data="{StaticResource IconWarning}" Foreground="{DynamicResource DangerForeground}"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center" Spacing="3">
+                                <TextBlock Classes="sectionTitle" Text="{x:Static loc:Strings.ScanFailed}"
+                                           Foreground="{DynamicResource DangerBrush}"/>
+                                <TextBlock Text="{Binding FailText}" Classes="muted" TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Assertive"/>
                             </StackPanel>
-                        </StackPanel>
+                        </Grid>
                     </Border>
 
-                    <!-- UI-аудит must №6: отмена — явное состояние, а не молча исчезнувший прогресс -->
-                    <Border Classes="card" IsVisible="{Binding IsCancelled}">
-                        <StackPanel Orientation="Horizontal" Spacing="12">
-                            <PathIcon Data="{StaticResource IconPause}"/>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="Проверка остановлена" FontWeight="SemiBold"/>
-                                <TextBlock Classes="caption" TextWrapping="Wrap"
-                                           Text="Просмотренные файлы уже запомнены — повторный запуск пройдёт быстрее. Прежние результаты не тронуты."/>
+                    <Border Classes="cardFlat" IsVisible="{Binding IsCancelled}">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <Border Classes="iconTile">
+                                <PathIcon Data="{StaticResource IconPause}" Foreground="{DynamicResource AccentBrush}"/>
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="14,0,0,0" VerticalAlignment="Center" Spacing="3">
+                                <TextBlock Classes="sectionTitle" Text="Проверка остановлена"/>
+                                <TextBlock Classes="muted" TextWrapping="Wrap"
+                                           Text="Просмотренные файлы уже запомнены. Повторный запуск продолжится быстрее, а прежние результаты останутся нетронутыми."/>
                             </StackPanel>
-                        </StackPanel>
+                        </Grid>
                     </Border>
 
-                    <Border x:Name="OnboardingScanDisks" Classes="card">
-                        <StackPanel Spacing="12">
-                            <Grid ColumnDefinitions="*,Auto">
-                                <TextBlock Grid.Column="0" Classes="h2" Text="{x:Static loc:Strings.ScanSelectVolumes}" VerticalAlignment="Center"/>
-                                <Button Grid.Column="1" Command="{Binding SelectAllVolumesCommand}"
-                                        ToolTip.Tip="Быстро отметить или снять все диски в списке">
-                                    <TextBlock Text="{Binding SelectAllLabel}"/>
-                                </Button>
+                    <!-- Основной сценарий: носители -->
+                    <Border x:Name="OnboardingScanDisks" Classes="hero"
+                            AutomationProperties.Name="Выбор дисков для проверки">
+                        <StackPanel Spacing="18">
+                            <Grid ColumnDefinitions="Auto,*">
+                                <Border Classes="iconTile" Background="{DynamicResource AccentSoft}">
+                                    <PathIcon Data="{StaticResource IconHdd}" Foreground="{DynamicResource AccentBrush}"
+                                              Width="22" Height="22"/>
+                                </Border>
+                                <StackPanel Grid.Column="1" Margin="14,0" VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock Classes="sectionTitle" Text="{x:Static loc:Strings.ScanSelectVolumes}" Foreground="White"/>
+                                    <TextBlock Classes="caption"
+                                               Foreground="#D9E0EF"
+                                               TextWrapping="Wrap"
+                                               Text="Выберите один диск — или отдельную папку на нём."/>
+                                </StackPanel>
                             </Grid>
-                            <TextBlock Classes="caption" Text="{x:Static loc:Strings.ScanMultiHint}" TextWrapping="Wrap"/>
+
                             <ItemsControl ItemsSource="{Binding Volumes}">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <Border Padding="0,6">
-                                            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto,Auto">
-                                                <CheckBox Grid.Row="0" Grid.Column="0"
-                                                          IsChecked="{Binding IsChecked, Mode=TwoWay}"
-                                                          VerticalAlignment="Center">
-                                                    <StackPanel Orientation="Horizontal" Spacing="10">
-                                                        <PathIcon Data="{StaticResource IconHdd}" Width="16" Height="16"/>
-                                                        <TextBlock Text="{Binding DisplayName}" FontWeight="Medium"/>
-                                                        <TextBlock Text="{Binding IndexedText}" Classes="caption" VerticalAlignment="Center"/>
+                                        <Border Classes="cardFlat" Padding="16,13" Margin="0,0,0,9">
+                                            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,*,Auto,Auto">
+                                                <RadioButton Grid.RowSpan="2" Grid.Column="0"
+                                                             IsChecked="{Binding IsChecked, Mode=TwoWay}"
+                                                             VerticalAlignment="Center"
+                                                             AutomationProperties.Name="{Binding DisplayName}"/>
+                                                <StackPanel Grid.Column="1" Margin="12,0,0,0" Spacing="3" VerticalAlignment="Center">
+                                                    <StackPanel Orientation="Horizontal" Spacing="9">
+                                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                                                   FontSize="16" TextTrimming="CharacterEllipsis"/>
+                                                        <Border Classes="badge" Background="{DynamicResource SurfaceStrong}">
+                                                            <TextBlock Text="{Binding IndexedText}" Classes="caption"/>
+                                                        </Border>
                                                     </StackPanel>
-                                                </CheckBox>
-
-                                                <Button Grid.Row="0" Grid.Column="1" Classes="ghost"
+                                                    <TextBlock Text="{Binding ScanScopeText}" Classes="caption"
+                                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                                                </StackPanel>
+                                                <Button Grid.Column="2" Margin="12,0,0,0" Classes="tonal"
                                                         Command="{Binding $parent[ItemsControl].DataContext.ChooseFolderCommand}"
-                                                        CommandParameter="{Binding}"
-                                                        IsEnabled="{Binding IsChecked}"
-                                                        ToolTip.Tip="Выбрать одну папку на этом диске, чтобы не проверять весь диск">
-                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        CommandParameter="{Binding}" IsEnabled="{Binding IsChecked}"
+                                                        ToolTip.Tip="Ограничить поиск одной папкой на этом диске">
+                                                    <StackPanel Orientation="Horizontal" Spacing="7">
                                                         <PathIcon Data="{StaticResource IconFolder}" Width="15" Height="15"/>
                                                         <TextBlock Text="{Binding PickFolderText}"/>
                                                     </StackPanel>
                                                 </Button>
-
-                                                <Button Grid.Row="0" Grid.Column="2" Classes="ghost" Margin="6,0,0,0"
+                                                <Button Grid.Column="3" Classes="ghost iconButton"
                                                         Command="{Binding $parent[ItemsControl].DataContext.ClearFolderCommand}"
-                                                        CommandParameter="{Binding}"
-                                                        IsEnabled="{Binding IsChecked}"
+                                                        CommandParameter="{Binding}" IsEnabled="{Binding IsChecked}"
                                                         IsVisible="{Binding HasScanFolder}"
-                                                        ToolTip.Tip="Снова проверять весь диск">
-                                                    <PathIcon Data="{StaticResource IconClose}" Width="14" Height="14"/>
+                                                        ToolTip.Tip="Снова проверять весь диск"
+                                                        AutomationProperties.Name="Сбросить выбранную папку">
+                                                    <PathIcon Data="{StaticResource IconClose}" Width="15" Height="15"/>
                                                 </Button>
-
-                                                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
-                                                           Text="{Binding ScanScopeText}" Classes="caption"
-                                                           Margin="32,2,0,0" TextWrapping="Wrap"/>
                                             </Grid>
                                         </Border>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
+
+                            <!-- План + главное действие -->
+                            <Border Classes="card" Padding="20">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <StackPanel Spacing="5" VerticalAlignment="Center">
+                                        <TextBlock Classes="eyebrow" Text="ПЛАН ПРОВЕРКИ"/>
+                                        <TextBlock Text="{Binding SelectedVolumesSummary}" Classes="sectionTitle"
+                                                   TextWrapping="Wrap"/>
+                                        <TextBlock Text="{Binding ScanOptionsSummary}" Classes="caption"
+                                                   TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="20,0,0,0" Spacing="8" VerticalAlignment="Center">
+                                        <Button x:Name="OnboardingScanStart" Classes="primary"
+                                                Padding="24,12" Command="{Binding StartCommand}"
+                                                ToolTip.Tip="Запустить проверку выбранных дисков"
+                                                AutomationProperties.Name="Начать поиск копий"
+                                                AutomationProperties.HelpText="Запускает безопасную проверку; файлы не удаляются">
+                                            <StackPanel Orientation="Horizontal" Spacing="9">
+                                                <PathIcon Data="{StaticResource IconPlay}"/>
+                                                <TextBlock Text="{x:Static loc:Strings.ScanStart}" FontWeight="SemiBold"/>
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
                         </StackPanel>
                     </Border>
 
-                    <Border Classes="card">
-                        <StackPanel Spacing="12">
-                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanDepth}"/>
-                            <ComboBox MinWidth="320" ItemsSource="{Binding DepthOptions}"
-                                      ToolTip.Tip="Чем больше видов файлов искать, тем дольше проверка"
-                                      SelectedItem="{Binding SelectedDepth, Mode=TwoWay}">
-                                <ComboBox.Styles>
-                                    <Style Selector="ComboBoxItem">
-                                        <Setter Property="IsEnabled" Value="{Binding Enabled}"/>
-                                    </Style>
-                                </ComboBox.Styles>
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding Label}"/>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-                            <TextBlock Classes="caption" Text="{Binding ScanModeHint}" TextWrapping="Wrap"/>
-                            <!-- P1.5: строгость поиска похожих (действует в режимах поиска похожих) -->
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="{x:Static loc:Strings.SimilarityStrictness}" Classes="muted"/>
-                                <ComboBox MinWidth="320" ItemsSource="{Binding StrictnessOptions}"
-                                          SelectedItem="{Binding SelectedStrictness, Mode=TwoWay}">
-                                    <ComboBox.ItemTemplate>
-                                        <DataTemplate><TextBlock Text="{Binding Label}"/></DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
-                            </StackPanel>
-                        </StackPanel>
-                    </Border>
-
-                    <!-- P0-A: какие типы файлов проверять -->
-                    <Border Classes="card">
-                        <StackPanel Spacing="8">
-                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanCategories}"/>
-                            <CheckBox IsChecked="{Binding IncludeImages, Mode=TwoWay}" Content="{x:Static loc:Strings.CatImages}"/>
-                            <CheckBox IsChecked="{Binding IncludeVideo, Mode=TwoWay}" Content="{x:Static loc:Strings.CatVideo}"/>
-                            <CheckBox IsChecked="{Binding IncludeAudio, Mode=TwoWay}" Content="{x:Static loc:Strings.CatAudio}"/>
-                            <CheckBox IsChecked="{Binding IncludeDocuments, Mode=TwoWay}" Content="{x:Static loc:Strings.CatDocuments}"/>
-                            <CheckBox IsChecked="{Binding IncludeOther, Mode=TwoWay}" Content="{x:Static loc:Strings.CatOther}"/>
-                        </StackPanel>
-                    </Border>
-
-                    <Button Classes="primary" HorizontalAlignment="Left" Command="{Binding StartCommand}"
-                            ToolTip.Tip="Запустить проверку выбранных дисков">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <PathIcon Data="{StaticResource IconPlay}" Foreground="White"/>
-                            <TextBlock Text="{x:Static loc:Strings.ScanStart}"/>
-                        </StackPanel>
-                    </Button>
                 </StackPanel>
 
-                <!-- ===== Прогресс (когда выполняется или завершено) ===== -->
-                <!-- Фиксированная ширина: окно не «прыгает» от длинных имён файлов. -->
-                <Border Classes="card" IsVisible="{Binding IsRunning}" Width="560" HorizontalAlignment="Left">
-                    <StackPanel Spacing="14">
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <!-- Ночь-6: фирменное анимированное лого для живости; детальные счётчики ниже не трогаем.
-                                 IsVisible к IsRunning — чтобы анимация не крутилась в скрытой карточке. -->
-                            <controls:AnimatedLogo Size="48" VerticalAlignment="Center" Margin="0,0,2,0"
-                                                   IsVisible="{Binding IsRunning}"/>
-                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanRunning}" VerticalAlignment="Center"/>
-                            <TextBlock Text="·" Classes="muted" VerticalAlignment="Center"/>
-                            <TextBlock Text="{Binding StageTitle}" VerticalAlignment="Center"
-                                       Foreground="{DynamicResource AccentBrush}" FontWeight="Medium"/>
-                            <TextBlock Text="{Binding ProgressValue, StringFormat={}{0:0}%}" VerticalAlignment="Center"
-                                       FontWeight="SemiBold" IsVisible="{Binding !ProgressIndeterminate}"/>
-                        </StackPanel>
-
-                        <ProgressBar IsIndeterminate="{Binding ProgressIndeterminate}" Value="{Binding ProgressValue}" Maximum="100"/>
-
-                        <Grid ColumnDefinitions="*,*,*,*">
-                            <StackPanel Grid.Column="0" Margin="0,0,14,0">
-                                <TextBlock Classes="caption" Text="{x:Static loc:Strings.ScanFilesSeen}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock FontSize="19" FontWeight="SemiBold" Text="{Binding FilesSeenText}"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="1" Margin="0,0,14,0">
-                                <TextBlock Classes="caption" Text="{x:Static loc:Strings.ScanFilesHashed}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock FontSize="19" FontWeight="SemiBold" Text="{Binding FilesHashedText}"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="2" Margin="0,0,14,0">
-                                <TextBlock Classes="caption" Text="{x:Static loc:Strings.ScanGroups}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock FontSize="19" FontWeight="SemiBold" Text="{Binding GroupsText}"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="3">
-                                <TextBlock Classes="caption" Text="{x:Static loc:Strings.ScanSkipped}" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock FontSize="19" FontWeight="SemiBold" Text="{Binding SkippedText}"/>
-                            </StackPanel>
+                <!-- ===== Выполнение ===== -->
+                <Border Classes="hero" IsVisible="{Binding IsRunning}"
+                        AutomationProperties.Name="Ход поиска копий">
+                    <StackPanel Spacing="22">
+                        <Grid ColumnDefinitions="Auto,*">
+                            <controls:AnimatedLogo Size="54" VerticalAlignment="Center"
+                                                   IsVisible="{Binding !IsPaused}"/>
+                            <Border Classes="iconTile" Width="54" Height="54" IsVisible="{Binding IsPaused}">
+                                <PathIcon Data="{StaticResource IconPause}" Foreground="{DynamicResource AccentBrush}"
+                                          Width="24" Height="24"/>
+                            </Border>
+                            <Grid Grid.Column="1" Margin="16,0,0,0" RowDefinitions="Auto,Auto">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <StackPanel VerticalAlignment="Center" Spacing="3">
+                                        <TextBlock Classes="eyebrow" Text="ИДЁТ ПРОВЕРКА" Foreground="#E6E8FF" IsVisible="{Binding !IsPaused}"/>
+                                        <TextBlock Classes="eyebrow" Text="ПАУЗА" Foreground="#E6E8FF" IsVisible="{Binding IsPaused}"/>
+                                        <TextBlock Classes="h2" Text="{Binding StageTitle}" Foreground="White" TextWrapping="Wrap"
+                                                   AutomationProperties.LiveSetting="Polite"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="12,0,0,0" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <TextBlock Classes="display" Text="{Binding ProgressValue, StringFormat={}{0:0}%}"
+                                                   Foreground="White" HorizontalAlignment="Right" IsVisible="{Binding !ProgressIndeterminate}"/>
+                                        <TextBlock Classes="caption" Foreground="#D9E0EF" HorizontalAlignment="Right"
+                                                   Text="{Binding EstimatedRemainingText, StringFormat='Осталось {0}'}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Grid.Row="1" Classes="caption" Foreground="#D9E0EF" Margin="0,6,0,0"
+                                           Text="Можно свернуть приложение — поиск продолжится." TextWrapping="Wrap"/>
+                            </Grid>
                         </Grid>
 
-                        <!-- Текущий файл: фикс. высота и обрезка, чтобы не дёргать разметку. -->
-                        <TextBlock Classes="caption" Text="{Binding CurrentFile}" Height="16"
-                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ClipToBounds="True"/>
+                        <ProgressBar IsIndeterminate="{Binding ProgressIndeterminate}"
+                                     Value="{Binding ProgressValue}" Maximum="100" Height="10"/>
 
-                        <!-- Почему медленно (напр. «быстрый режим MFT недоступен — нет прав администратора»). -->
-                        <TextBlock Classes="caption" Text="{Binding InfoText}" TextWrapping="Wrap"
-                                   IsVisible="{Binding InfoText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                        <Border Classes="cardFlat" Padding="16">
+                            <Grid ColumnDefinitions="*,*,*,*">
+                                <StackPanel Grid.Column="0" Spacing="3">
+                                    <TextBlock Classes="caption" Text="Просмотрено"/>
+                                    <TextBlock Classes="sectionTitle" Text="{Binding FilesSeenText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="12,0,0,0" Spacing="3">
+                                    <TextBlock Classes="caption" Text="Сверено"/>
+                                    <TextBlock Classes="sectionTitle" Text="{Binding FilesHashedText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Margin="12,0,0,0" Spacing="3">
+                                    <TextBlock Classes="caption" Text="Найдено групп"/>
+                                    <TextBlock Classes="sectionTitle" Text="{Binding GroupsText}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="3" Margin="12,0,0,0" Spacing="3">
+                                    <TextBlock Classes="caption" Text="Пропущено"/>
+                                    <TextBlock Classes="sectionTitle" Text="{Binding SkippedText}"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
 
-                        <StackPanel Orientation="Horizontal" Spacing="10">
-                            <Button Command="{Binding PauseCommand}" ToolTip.Tip="Поставить поиск на паузу или продолжить">
-                                <Panel>
-                                    <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding !IsPaused}">
-                                        <PathIcon Data="{StaticResource IconPause}"/>
-                                        <TextBlock Text="{x:Static loc:Strings.Pause}"/>
-                                    </StackPanel>
-                                    <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding IsPaused}">
-                                        <PathIcon Data="{StaticResource IconPlay}"/>
-                                        <TextBlock Text="{x:Static loc:Strings.Resume}"/>
-                                    </StackPanel>
-                                </Panel>
-                            </Button>
-                            <Button Classes="danger" Command="{Binding CancelCommand}" ToolTip.Tip="Остановить текущий поиск">
-                                <TextBlock Text="{x:Static loc:Strings.Cancel}"/>
-                            </Button>
+                        <StackPanel Spacing="12">
+                            <StackPanel Spacing="5" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding CurrentFile}" Classes="mono caption" Foreground="#D9E0EF" Height="18"
+                                           TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                <WrapPanel>
+                                    <TextBlock Classes="caption" Foreground="#D9E0EF" Margin="0,0,18,4" Text="{Binding ElapsedText, StringFormat='Прошло: {0}'}"/>
+                                    <TextBlock Classes="caption" Foreground="#D9E0EF" Margin="0,0,18,4" Text="{Binding BytesPerSecondText, StringFormat='Чтение: {0}'}"/>
+                                    <TextBlock Classes="caption" Foreground="#D9E0EF" Margin="0,0,18,4" Text="{Binding FilesPerSecondText, StringFormat='Темп: {0}'}"/>
+                                </WrapPanel>
+                                <TextBlock Classes="caption" Foreground="#D9E0EF" Text="{Binding InfoText}" TextWrapping="Wrap"
+                                           IsVisible="{Binding InfoText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                            </StackPanel>
+                            <WrapPanel HorizontalAlignment="Right">
+                                <Button Classes="tonal" Command="{Binding PauseCommand}"
+                                        Margin="0,0,10,6"
+                                        ToolTip.Tip="Поставить поиск на паузу или продолжить"
+                                        AutomationProperties.Name="Пауза или продолжение поиска">
+                                    <Panel>
+                                        <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding !IsPaused}">
+                                            <PathIcon Data="{StaticResource IconPause}"/>
+                                            <TextBlock Text="{x:Static loc:Strings.Pause}"/>
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding IsPaused}">
+                                            <PathIcon Data="{StaticResource IconPlay}"/>
+                                            <TextBlock Text="{x:Static loc:Strings.Resume}"/>
+                                        </StackPanel>
+                                    </Panel>
+                                </Button>
+                                <Button Classes="ghost" Command="{Binding CancelCommand}"
+                                        Margin="0,0,0,6"
+                                        ToolTip.Tip="Остановить текущий поиск"
+                                        AutomationProperties.Name="Остановить поиск">
+                                    <TextBlock Text="Остановить" Foreground="{DynamicResource DangerBrush}"/>
+                                </Button>
+                            </WrapPanel>
                         </StackPanel>
                     </StackPanel>
                 </Border>
 
-                <Border Classes="card" IsVisible="{Binding IsDone}">
-                    <StackPanel Orientation="Horizontal" Spacing="14">
-                        <PathIcon Data="{StaticResource IconCheckCircle}" Width="28" Height="28"
-                                  Foreground="{DynamicResource SuccessBrush}"/>
-                        <StackPanel VerticalAlignment="Center">
-                            <TextBlock Classes="h2" Text="{x:Static loc:Strings.ScanDone}"/>
-                            <TextBlock Classes="caption">
-                                <Run Text="{x:Static loc:Strings.ScanGroups}"/><Run Text=": "/><Run Text="{Binding GroupsText}"/>
+                <!-- ===== Завершение ===== -->
+                <Border Classes="hero" IsVisible="{Binding IsDone}">
+                    <StackPanel Spacing="16">
+                    <Grid ColumnDefinitions="Auto,*">
+                        <Border Width="64" Height="64" CornerRadius="20"
+                                Background="{DynamicResource SuccessSoft}">
+                            <PathIcon Data="{StaticResource IconCheckCircle}" Width="32" Height="32"
+                                      Foreground="{DynamicResource SuccessBrush}"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="20,0" VerticalAlignment="Center" Spacing="5">
+                            <TextBlock Classes="eyebrow" Text="ГОТОВО" Foreground="{DynamicResource SuccessBrush}"/>
+                            <TextBlock Classes="display" Text="{x:Static loc:Strings.ScanDone}" Foreground="White" TextWrapping="Wrap"/>
+                            <TextBlock Classes="bodyLarge" Foreground="#D9E0EF" TextWrapping="Wrap">
+                                <Run Text="Найдено групп: "/><Run Text="{Binding GroupsText}"/>
+                                <Run Text=" · Проверка заняла "/><Run Text="{Binding ElapsedText}"/>
                             </TextBlock>
+                            <TextBlock Classes="caption" Foreground="#D9E0EF" TextWrapping="Wrap"
+                                       Text="Теперь спокойно просмотрите результаты и решите, какие копии действительно лишние."/>
                         </StackPanel>
-                        <Button Classes="primary" Command="{Binding ViewResultsCommand}" VerticalAlignment="Center"
-                                ToolTip.Tip="Открыть найденные группы дублей">
-                            <TextBlock Text="{x:Static loc:Strings.ViewResults}"/>
-                        </Button>
+                    </Grid>
+                        <WrapPanel HorizontalAlignment="Right">
+                            <Button Classes="primary" Command="{Binding ViewResultsCommand}" Margin="0,0,10,6"
+                                    ToolTip.Tip="Открыть найденные группы дублей">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{x:Static loc:Strings.ViewResults}"/>
+                                    <PathIcon Data="{StaticResource IconChevronRight}"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Classes="ghost" Command="{Binding NewScanCommand}" Margin="0,0,0,6">
+                                <TextBlock Text="Новый поиск" Foreground="White"/>
+                            </Button>
+                        </WrapPanel>
                     </StackPanel>
                 </Border>
             </StackPanel>

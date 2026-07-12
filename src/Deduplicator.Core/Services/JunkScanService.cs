@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using Deduplicator.Core.Models;
 using Deduplicator.Core.Util;
 
@@ -6,8 +7,18 @@ namespace Deduplicator.Core.Services;
 
 public interface IJunkScanService
 {
-    List<JunkItem> Scan(JunkScanOptions options, Action<int>? onProgress, CancellationToken ct);
+    List<JunkItem> Scan(JunkScanOptions options, Action<JunkScanProgress>? onProgress, CancellationToken ct);
 }
+
+public sealed record JunkScanProgress(
+    long FilesVisited,
+    long BytesVisited,
+    int ItemsFound,
+    int RootsCompleted,
+    int TotalRoots,
+    double? Fraction,
+    TimeSpan Elapsed,
+    TimeSpan? EstimatedRemaining);
 
 /// <summary>Поиск «мусора»: пустые папки, файлы нулевого размера, временные файлы, битые ярлыки, большие файлы.</summary>
 public sealed class JunkScanService : IJunkScanService
@@ -23,10 +34,11 @@ public sealed class JunkScanService : IJunkScanService
 
     private const int MaxItems = 50_000; // защита от переполнения памяти/UI на огромных дисках
 
-    public List<JunkItem> Scan(JunkScanOptions options, Action<int>? onProgress, CancellationToken ct)
+    public List<JunkItem> Scan(JunkScanOptions options, Action<JunkScanProgress>? onProgress, CancellationToken ct)
     {
         var items = new List<JunkItem>();
         var emptyDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var progress = new ProgressState(options.Roots, onProgress);
 
         // Один COM-объект WScript.Shell на весь скан (создавать на каждый .lnk нельзя — утечка/крах).
         object? shell = options.BrokenShortcuts ? CreateShell() : null;
@@ -35,7 +47,8 @@ public sealed class JunkScanService : IJunkScanService
             foreach (var root in options.Roots)
             {
                 ct.ThrowIfCancellationRequested();
-                Walk(root, options, items, emptyDirs, shell, onProgress, ct);
+                Walk(root, options, items, emptyDirs, shell, progress, ct);
+                progress.RootCompleted(items.Count);
             }
         }
         finally
@@ -51,6 +64,7 @@ public sealed class JunkScanService : IJunkScanService
             // Отбираем только верхние пустые папки (родитель не пуст / отсутствует).
             foreach (var d in emptyDirs)
             {
+                if (items.Count >= MaxItems) break;
                 var parent = Directory.GetParent(d.TrimEnd('\\', '/'))?.FullName;
                 if (parent is null || !emptyDirs.Contains(parent))
                 {
@@ -60,8 +74,10 @@ public sealed class JunkScanService : IJunkScanService
                     items.Add(new JunkItem { Kind = JunkKind.EmptyFolder, Path = d, IsFolder = true, Modified = mtime });
                 }
             }
-            onProgress?.Invoke(items.Count);
+            progress.Report(items.Count, force: true);
         }
+
+        progress.Finish(items.Count);
 
         return items;
     }
@@ -81,9 +97,9 @@ public sealed class JunkScanService : IJunkScanService
     /// Пустой каталог определяется по принципу пост-обхода: поддерево без единого файла.
     /// </summary>
     private void Walk(string root, JunkScanOptions o, List<JunkItem> items,
-        HashSet<string> emptyDirs, object? shell, Action<int>? onProgress, CancellationToken ct)
+        HashSet<string> emptyDirs, object? shell, ProgressState progress, CancellationToken ct)
     {
-        var rootFrame = MakeFrame(root, o, items, shell, onProgress, ct);
+        var rootFrame = MakeFrame(root, o, items, shell, progress, ct);
         if (rootFrame is null) return; // корень недоступен
 
         var stack = new Stack<DirFrame>();
@@ -101,14 +117,18 @@ public sealed class JunkScanService : IJunkScanService
                 try { if ((sub.Attributes & FileAttributes.ReparsePoint) != 0) { top.HasFiles = true; continue; } }
                 catch { continue; }
 
-                var child = MakeFrame(Path.Combine(top.Dir, sub.Name), o, items, shell, onProgress, ct);
+                var child = MakeFrame(Path.Combine(top.Dir, sub.Name), o, items, shell, progress, ct);
                 if (child is null) { top.HasFiles = true; continue; } // нет доступа — родитель не пуст
                 stack.Push(child);
             }
             else
             {
                 stack.Pop();
-                if (!top.HasFiles && o.EmptyFolders) emptyDirs.Add(top.Dir);
+                if (!top.HasFiles && o.EmptyFolders)
+                {
+                    if (emptyDirs.Count < MaxItems) emptyDirs.Add(top.Dir);
+                    else top.HasFiles = true; // кап памяти: не считаем предков «пустыми» по неполному набору
+                }
                 if (stack.Count > 0 && top.HasFiles) stack.Peek().HasFiles = true;
             }
         }
@@ -119,7 +139,7 @@ public sealed class JunkScanService : IJunkScanService
     /// null — каталог недоступен (родитель пометит себя непустым, чтобы не считать ошибочно пустым).
     /// </summary>
     private DirFrame? MakeFrame(string dir, JunkScanOptions o, List<JunkItem> items,
-        object? shell, Action<int>? onProgress, CancellationToken ct)
+        object? shell, ProgressState progress, CancellationToken ct)
     {
         FileInfo[] files;
         DirectoryInfo[] subdirs;
@@ -143,29 +163,119 @@ public sealed class JunkScanService : IJunkScanService
             try
             {
                 hasFiles = true;
+                progress.VisitFile(Math.Max(0, f.Length), items.Count);
                 if (o.SkipHiddenSystem && (f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0)
                     continue;
 
                 var full = Path.Combine(dir, f.Name);
-                if (o.TempFiles && IsTemp(f))
-                    Add(items, JunkKind.TempFile, full, f);
-                else if (o.ZeroByteFiles && f.Length == 0)
-                    Add(items, JunkKind.ZeroByteFile, full, f);
-
+                // Один физический путь должен появляться ровно один раз. Большой файл всегда
+                // получает самый осторожный тип: он не попадёт в массовый выбор «мусора», даже
+                // если одновременно имеет расширение .tmp или нулевой размер.
+                JunkKind? kind = null;
                 if (o.LargeFiles && f.Length >= o.LargeThresholdBytes)
-                    Add(items, JunkKind.LargeFile, full, f);
+                    kind = JunkKind.LargeFile;
+                else if (o.TempFiles && IsTemp(f))
+                    kind = JunkKind.TempFile;
+                else if (o.ZeroByteFiles && f.Length == 0)
+                    kind = JunkKind.ZeroByteFile;
+                else if (o.BrokenShortcuts && shell is not null &&
+                         f.Extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase) &&
+                         IsBrokenShortcut(shell, full))
+                    kind = JunkKind.BrokenShortcut;
 
-                if (o.BrokenShortcuts && shell is not null &&
-                    f.Extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase) &&
-                    IsBrokenShortcut(shell, full))
-                    Add(items, JunkKind.BrokenShortcut, full, f);
+                if (kind is { } detectedKind)
+                    Add(items, detectedKind, full, f);
             }
             catch (OperationCanceledException) { throw; }
             catch { hasFiles = true; /* проблемный файл — пропускаем */ }
         }
 
-        if (items.Count % 200 == 0) onProgress?.Invoke(items.Count);
+        progress.Report(items.Count);
         return new DirFrame { Dir = dir, Subdirs = subdirs, HasFiles = hasFiles };
+    }
+
+    private sealed class ProgressState
+    {
+        private readonly Action<JunkScanProgress>? _callback;
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly long _estimatedBytes;
+        private readonly int _totalRoots;
+        private long _files;
+        private long _bytes;
+        private int _rootsCompleted;
+        private long _lastReportedFiles;
+        private TimeSpan _lastReportedAt;
+
+        public ProgressState(IReadOnlyCollection<string> roots, Action<JunkScanProgress>? callback)
+        {
+            _callback = callback;
+            _totalRoots = Math.Max(1, roots.Count);
+            _estimatedBytes = roots.Select(EstimateUsedBytes).Where(v => v > 0).Sum();
+        }
+
+        public void VisitFile(long bytes, int itemsFound)
+        {
+            _files++;
+            _bytes += bytes;
+            if (_files - _lastReportedFiles >= 200) Report(itemsFound);
+        }
+
+        public void RootCompleted(int itemsFound)
+        {
+            _rootsCompleted++;
+            Report(itemsFound, force: true);
+        }
+
+        public void Finish(int itemsFound)
+        {
+            _rootsCompleted = _totalRoots;
+            Emit(itemsFound, 1.0);
+        }
+
+        public void Report(int itemsFound, bool force = false)
+        {
+            if (_callback is null) return;
+            var now = _clock.Elapsed;
+            if (!force && _files == _lastReportedFiles && now - _lastReportedAt < TimeSpan.FromMilliseconds(300))
+                return;
+            if (!force && _files - _lastReportedFiles < 200 && now - _lastReportedAt < TimeSpan.FromMilliseconds(300))
+                return;
+
+            double? fraction = _estimatedBytes > 0
+                ? Math.Min(0.99, _bytes / (double)_estimatedBytes)
+                : _rootsCompleted > 0 ? Math.Min(0.99, _rootsCompleted / (double)_totalRoots) : null;
+            Emit(itemsFound, fraction);
+        }
+
+        private void Emit(int itemsFound, double? fraction)
+        {
+            _lastReportedFiles = _files;
+            _lastReportedAt = _clock.Elapsed;
+            TimeSpan? eta = null;
+            if (fraction is > 0.01 and < 1 && _clock.Elapsed >= TimeSpan.FromSeconds(2))
+            {
+                double seconds = _clock.Elapsed.TotalSeconds * (1 - fraction.Value) / fraction.Value;
+                if (double.IsFinite(seconds)) eta = TimeSpan.FromSeconds(Math.Min(seconds, TimeSpan.FromDays(7).TotalSeconds));
+            }
+            try
+            {
+                _callback?.Invoke(new JunkScanProgress(_files, _bytes, itemsFound, _rootsCompleted,
+                    _totalRoots, fraction, _clock.Elapsed, eta));
+            }
+            catch (Exception ex) { AppLog.Error("JunkScan.ProgressCallback", ex); }
+        }
+
+        private static long EstimateUsedBytes(string root)
+        {
+            try
+            {
+                var driveRoot = Path.GetPathRoot(Path.GetFullPath(root));
+                if (string.IsNullOrWhiteSpace(driveRoot)) return 0;
+                var drive = new DriveInfo(driveRoot);
+                return drive.IsReady ? Math.Max(0, drive.TotalSize - drive.AvailableFreeSpace) : 0;
+            }
+            catch { return 0; }
+        }
     }
 
     private static object? CreateShell()

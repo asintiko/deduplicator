@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Deduplicator.Core.Util;
 
 namespace Deduplicator.Core.Data;
 
@@ -8,7 +9,11 @@ namespace Deduplicator.Core.Data;
 /// </summary>
 public sealed class Database
 {
+    public const int CurrentSchemaVersion = 1;
+    private const int MigrationBackupsToKeep = 3;
+
     public string Path { get; }
+    public string? LastMigrationBackupPath { get; private set; }
     private readonly string _connectionString;
 
     public Database(string dbPath)
@@ -47,32 +52,141 @@ public sealed class Database
         return conn;
     }
 
-    /// <summary>Создаёт схему, если её ещё нет. Идемпотентно.</summary>
+    /// <summary>
+    /// Создаёт/обновляет схему атомарно. Перед изменением существующей базы создаётся согласованный
+    /// SQLite-backup; при ошибке миграции он автоматически возвращается на место.
+    /// </summary>
     public void Initialize()
     {
-        using var conn = Open();
+        string? backupPath = null;
+        bool hadDatabase = File.Exists(Path) && new FileInfo(Path).Length > 0;
 
-        // Миграции — ДО основной схемы. Schema.Sql создаёт индексы по колонкам, которые на СТАРОЙ
-        // базе появляются только миграцией (idx_groups_session_type → scan_session_id): прежний
-        // порядок ронял CREATE INDEX ещё до миграций, и приложение после обновления версии падало
-        // на старте (найдено пробой композиции на реальной пользовательской БД, 2026-07-02).
-        // На свежей БД таблиц ещё нет — миграция пропускается, колонки создаст CREATE TABLE.
-        foreach (var (table, column, ddl) in Schema.ColumnMigrations)
+        try
         {
-            if (!TableExists(conn, table)) continue;
-            if (ColumnExists(conn, table, column)) continue;
-            using var m = conn.CreateCommand();
-            m.CommandText = ddl;
-            m.ExecuteNonQuery();
+            using var conn = Open();
+            EnsureIntegrity(conn, "до миграции");
+
+            int currentVersion = GetUserVersion(conn);
+            if (currentVersion > CurrentSchemaVersion)
+                throw new InvalidOperationException(
+                    $"База данных создана более новой версией приложения (схема {currentVersion}, " +
+                    $"поддерживается до {CurrentSchemaVersion}).");
+
+            if (hadDatabase && currentVersion < CurrentSchemaVersion)
+            {
+                backupPath = CreateMigrationBackup(conn, currentVersion);
+                LastMigrationBackupPath = backupPath;
+            }
+
+            using (var tx = conn.BeginTransaction())
+            {
+                // Миграции — ДО основной схемы. Schema.Sql создаёт индексы по колонкам, которые на
+                // старой базе появляются только миграцией. Вся последовательность теперь либо
+                // фиксируется целиком, либо целиком откатывается.
+                foreach (var (table, column, ddl) in Schema.ColumnMigrations)
+                {
+                    if (!TableExists(conn, table, tx)) continue;
+                    if (ColumnExists(conn, table, column, tx)) continue;
+                    using var migration = conn.CreateCommand();
+                    migration.Transaction = tx;
+                    migration.CommandText = ddl;
+                    migration.ExecuteNonQuery();
+                }
+
+                using var schema = conn.CreateCommand();
+                schema.Transaction = tx;
+                schema.CommandText = Schema.Sql;
+                schema.ExecuteNonQuery();
+
+                using var version = conn.CreateCommand();
+                version.Transaction = tx;
+                version.CommandText = $"PRAGMA user_version = {CurrentSchemaVersion}";
+                version.ExecuteNonQuery();
+                tx.Commit();
+            }
+
+            // Носители: устранить дубли по серийнику и навесить UNIQUE-индекс. Эта старая
+            // data-migration идемпотентна и выполняется после появления всех таблиц.
+            DeduplicateVolumesAndEnforceUniqueSerial(conn);
+            EnsureIntegrity(conn, "после миграции");
+            TrimMigrationBackups();
         }
+        catch
+        {
+            if (backupPath is not null)
+                RestoreMigrationBackup(backupPath);
+            throw;
+        }
+    }
 
+    private static int GetUserVersion(SqliteConnection conn)
+    {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = Schema.Sql;
-        cmd.ExecuteNonQuery();
+        cmd.CommandText = "PRAGMA user_version";
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
 
-        // Носители: устранить дубли по серийнику и навесить UNIQUE-индекс,
-        // чтобы гонка при параллельной синхронизации больше не плодила копии одного диска.
-        DeduplicateVolumesAndEnforceUniqueSerial(conn);
+    private static void EnsureIntegrity(SqliteConnection conn, string stage)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA quick_check";
+        var result = Convert.ToString(cmd.ExecuteScalar()) ?? "unknown";
+        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Проверка целостности базы {stage} завершилась ошибкой: {result}");
+    }
+
+    private string CreateMigrationBackup(SqliteConnection source, int fromVersion)
+    {
+        string stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff", System.Globalization.CultureInfo.InvariantCulture);
+        string backupPath = $"{Path}.pre-v{fromVersion}-{stamp}.bak";
+        var backupConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = backupPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        }.ToString();
+        using var destination = new SqliteConnection(backupConnectionString);
+        destination.Open();
+        source.BackupDatabase(destination);
+        AppLog.Write($"DB migration backup created: {System.IO.Path.GetFileName(backupPath)}");
+        return backupPath;
+    }
+
+    private void RestoreMigrationBackup(string backupPath)
+    {
+        try
+        {
+            SqliteConnection.ClearAllPools();
+            File.Copy(backupPath, Path, overwrite: true);
+            TryDelete(Path + "-wal");
+            TryDelete(Path + "-shm");
+            AppLog.Write($"DB migration rolled back from {System.IO.Path.GetFileName(backupPath)}");
+        }
+        catch (Exception restoreError)
+        {
+            AppLog.Error("Database.RestoreMigrationBackup", restoreError);
+        }
+    }
+
+    private void TrimMigrationBackups()
+    {
+        try
+        {
+            var directory = System.IO.Path.GetDirectoryName(Path);
+            var fileName = System.IO.Path.GetFileName(Path);
+            if (string.IsNullOrEmpty(directory)) return;
+            foreach (var old in Directory.EnumerateFiles(directory, fileName + ".pre-v*.bak")
+                         .OrderByDescending(File.GetLastWriteTimeUtc)
+                         .Skip(MigrationBackupsToKeep))
+                TryDelete(old);
+        }
+        catch (Exception ex) { AppLog.Error("Database.TrimMigrationBackups", ex); }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { /* best effort */ }
     }
 
     /// <summary>
@@ -148,17 +262,19 @@ public sealed class Database
         return cmd.ExecuteScalar() is not null;
     }
 
-    private static bool TableExists(SqliteConnection conn, string table)
+    private static bool TableExists(SqliteConnection conn, string table, SqliteTransaction? tx = null)
     {
         using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$t LIMIT 1";
         cmd.Parameters.AddWithValue("$t", table);
         return cmd.ExecuteScalar() is not null;
     }
 
-    private static bool ColumnExists(SqliteConnection conn, string table, string column)
+    private static bool ColumnExists(SqliteConnection conn, string table, string column, SqliteTransaction? tx = null)
     {
         using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = $"PRAGMA table_info({table})";
         using var r = cmd.ExecuteReader();
         while (r.Read())

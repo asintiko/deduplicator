@@ -21,6 +21,7 @@ public partial class DiskHealthViewModel : PageViewModel
 
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string? _message;
+    [ObservableProperty] private string? _errorText;
     [ObservableProperty] private bool _anyPredictFailure;
 
     public DiskHealthViewModel(IDiskHealthService health) => _health = health;
@@ -34,21 +35,34 @@ public partial class DiskHealthViewModel : PageViewModel
         if (IsBusy) return;
         IsBusy = true;
         Message = null;
+        ErrorText = null;
 
-        if (!_health.IsSupported)
+        try
         {
+            if (!_health.IsSupported)
+            {
+                Disks.Clear();
+                AnyPredictFailure = false;
+                Message = Strings.HealthUnsupported;
+                return;
+            }
+
+            var disks = await Task.Run(() => _health.GetDisks());
             Disks.Clear();
-            Message = Strings.HealthUnsupported;
-            IsBusy = false;
-            return;
+            foreach (var d in disks) Disks.Add(new DiskHealthItemViewModel(d));
+
+            AnyPredictFailure = disks.Any(d => d.PredictFailure);
+            Message = disks.Count == 0 ? Strings.HealthNoData : null;
         }
-
-        var disks = await Task.Run(() => _health.GetDisks());
-        Disks.Clear();
-        foreach (var d in disks) Disks.Add(new DiskHealthItemViewModel(d));
-
-        AnyPredictFailure = disks.Any(d => d.PredictFailure);
-        Message = disks.Count == 0 ? Strings.HealthNoData : null;
-        IsBusy = false;
+        catch (Exception ex)
+        {
+            ErrorText = UserFacingError.Describe(ex,
+                "Не удалось прочитать состояние дисков. Повторите попытку; сканирование файлов можно продолжать.");
+            Deduplicator.Core.Util.AppLog.Error("DiskHealth.Refresh", ex);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 }

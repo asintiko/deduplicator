@@ -44,6 +44,8 @@ internal static class UsnRecordParser
             return true;
         }
 
+        if (recLen < MinRecordBytes) return false;
+
         ulong frn = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(8));
         ulong pfrn = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(16));
         long usn = BinaryPrimitives.ReadInt64LittleEndian(span.Slice(24));
@@ -52,7 +54,11 @@ internal static class UsnRecordParser
         ushort nameLen = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(56));
         ushort nameOff = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(58));
 
-        string name = nameLen > 0 && nameOff + nameLen <= recLen
+        if (nameLen > 0 && ((nameLen & 1) != 0 || nameOff < MinRecordBytes ||
+                            (uint)nameOff + nameLen > recLen))
+            return false;
+
+        string name = nameLen > 0
             ? Encoding.Unicode.GetString(span.Slice(nameOff, nameLen))
             : string.Empty;
 

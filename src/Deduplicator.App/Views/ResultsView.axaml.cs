@@ -51,6 +51,14 @@ public partial class ResultsView : UserControl
         // чтобы случайный Enter не подтвердил удаление.
         if (e.PropertyName == nameof(ResultsViewModel.ShowDeleteConfirm) && _vm?.ShowDeleteConfirm == true)
             Dispatcher.UIThread.Post(() => this.FindControl<Button>("DeleteCancelButton")?.Focus());
+        if (e.PropertyName == nameof(ResultsViewModel.ShowRenameDialog) && _vm?.ShowRenameDialog == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Button>("RenameCancelButton")?.Focus());
+        if (e.PropertyName == nameof(ResultsViewModel.ShowDistributeDialog) && _vm?.ShowDistributeDialog == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Button>("DistributeCancelButton")?.Focus());
+        if (e.PropertyName == nameof(ResultsViewModel.ShowHardlinkConfirm) && _vm?.ShowHardlinkConfirm == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Button>("HardlinkCancelButton")?.Focus());
+        if (e.PropertyName == nameof(ResultsViewModel.IsBusy) && _vm?.IsBusy == true)
+            Dispatcher.UIThread.Post(() => this.FindControl<Control>("ResultsBusyOverlay")?.Focus());
     }
 
     /// <summary>

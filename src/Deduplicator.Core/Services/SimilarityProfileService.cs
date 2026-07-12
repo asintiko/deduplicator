@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Deduplicator.Core.Models;
+using Deduplicator.Core.Util;
 
 namespace Deduplicator.Core.Services;
 
@@ -10,6 +11,7 @@ namespace Deduplicator.Core.Services;
 /// </summary>
 public sealed class SimilarityProfileService
 {
+    private const int MaxProfilesBytes = 4 * 1024 * 1024;
     private readonly string _path;
 
     public SimilarityProfileService(string? storePath = null)
@@ -82,7 +84,7 @@ public sealed class SimilarityProfileService
         try
         {
             if (!File.Exists(_path)) return Array.Empty<SimilarityProfile>();
-            var json = File.ReadAllText(_path);
+            var json = SafeIo.ReadAllTextLimited(_path, MaxProfilesBytes);
             return JsonSerializer.Deserialize<List<SimilarityProfile>>(json) ?? new List<SimilarityProfile>();
         }
         catch { return Array.Empty<SimilarityProfile>(); }
@@ -94,7 +96,7 @@ public sealed class SimilarityProfileService
         {
             var dir = Path.GetDirectoryName(_path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(_path, JsonSerializer.Serialize(profiles,
+            SafeIo.WriteAllTextAtomic(_path, JsonSerializer.Serialize(profiles,
                 new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { /* профили — не критичны для работы */ }

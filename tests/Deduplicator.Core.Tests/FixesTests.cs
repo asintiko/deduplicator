@@ -82,6 +82,50 @@ public class FixesTests : IDisposable
         Assert.True(File.Exists(src)); // восстановлен на место
     }
 
+    // ---- Настройка «папка удалённых файлов»: Reconfigure меняет карантин на лету ----
+
+    [Fact]
+    public void Reconfigure_redirects_new_deletes_to_chosen_folder_and_old_restores_still_work()
+    {
+        var db = new Database(Path.Combine(_dir, "qr.db"));
+        db.Initialize();
+        var log = new OperationLogRepository(db);
+        var oldQuarantine = Path.Combine(_dir, "quarantine_old");
+        var ops = new FileOpsService(log, new FileRepository(db), new GroupRepository(db),
+            new HashService(), oldQuarantine);
+
+        // Удаление №1 идёт в стандартную папку.
+        var src1 = Path.Combine(_dir, "a.bin");
+        File.WriteAllBytes(src1, new byte[] { 1, 2, 3 });
+        Assert.True(ops.Delete(new FileRecord { VolumeId = 1, RelPath = "a.bin", Name = "a.bin", Size = 3 },
+            src1, useRecycleBin: false, groupId: null));
+        var firstEntry = log.GetAll(onlyReversible: true).Single();
+        Assert.StartsWith(oldQuarantine, firstEntry.DstPath!, StringComparison.OrdinalIgnoreCase);
+
+        // Пользователь выбрал другую папку — применяем без перезапуска.
+        var newQuarantine = Path.Combine(_dir, "Удалённые");
+        ops.Reconfigure(newQuarantine);
+        Assert.Equal(newQuarantine, ops.QuarantineDir);
+        Assert.True(Directory.Exists(newQuarantine)); // папка создана сразу
+
+        // Удаление №2 идёт уже в новую папку.
+        var src2 = Path.Combine(_dir, "b.bin");
+        File.WriteAllBytes(src2, new byte[] { 4, 5, 6, 7 });
+        Assert.True(ops.Delete(new FileRecord { VolumeId = 1, RelPath = "b.bin", Name = "b.bin", Size = 4 },
+            src2, useRecycleBin: false, groupId: null));
+        var secondEntry = log.GetAll(onlyReversible: true)
+            .First(e => e.FileName == "b.bin");
+        Assert.StartsWith(newQuarantine, secondEntry.DstPath!, StringComparison.OrdinalIgnoreCase);
+
+        // Старый файл из прежней папки всё ещё восстанавливается (путь в журнале абсолютный).
+        Assert.True(ops.Restore(firstEntry));
+        Assert.True(File.Exists(src1));
+
+        // Пустое значение игнорируется (папка не меняется).
+        ops.Reconfigure("   ");
+        Assert.Equal(newQuarantine, ops.QuarantineDir);
+    }
+
     // ---- M2: жёсткая ссылка не оставляет временный файл ----
 
     [Fact]

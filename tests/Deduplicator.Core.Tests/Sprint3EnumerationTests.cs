@@ -22,13 +22,17 @@ public class Sprint3EnumerationTests
     }
 
     [Fact]
-    public void Ntfs_NotAdmin_SuggestsAdmin()
+    public void Ntfs_NotAdmin_SuggestsNarrowHelper_NotWholeAppElevation()
     {
         var d = BackendSelector.Decide(@"G:\", @"G:\", "NTFS", DriveType.Fixed,
             isWindows: true, isElevated: false, isWholeVolume: true);
         Assert.Equal(EnumerationBackend.Win32Find, d.Backend);
         Assert.Equal(BackendFallbackReason.NotElevated, d.Reason);
-        Assert.Contains("администратора", BackendMessages.BuildUserNotice(d)); // для NTFS админ реально помогает
+        var message = BackendMessages.BuildUserNotice(d);
+        Assert.Contains("MFT-помощник", message);
+        Assert.Contains("повышать права всего приложения не нужно", message);
+        Assert.DoesNotContain("запустите программу от имени администратора", message,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -14,6 +14,7 @@ using Deduplicator.App.ViewModels.Items;
 using Deduplicator.Core.Audio;
 using Deduplicator.Core.Models;
 using Deduplicator.Core.Services;
+using Deduplicator.Core.Util;
 
 namespace Deduplicator.App.ViewModels;
 
@@ -43,7 +44,8 @@ public partial class ScanViewModel : PageViewModel
     [ObservableProperty] private DepthOption? _selectedDepth;
     [ObservableProperty] private StrictnessOption? _selectedStrictness;
 
-    // P0-A «Что искать»: какие категории файлов проверять. По умолчанию — все.
+    // P0-A «Что искать»: какие категории файлов проверять. Всегда все — экран проверки без ручной
+    // настройки (просьба пользователя «просто ищет все файлы»), поэтому эти флаги остаются true.
     [ObservableProperty] private bool _includeImages = true;
     [ObservableProperty] private bool _includeVideo = true;
     [ObservableProperty] private bool _includeAudio = true;
@@ -58,16 +60,26 @@ public partial class ScanViewModel : PageViewModel
     [ObservableProperty] private string? _failText;
     [ObservableProperty] private bool _isCancelled; // must №6: отмена — явное состояние с карточкой
 
-    /// <summary>Подпись кнопки-переключателя выбора носителей (меняется по состоянию).</summary>
-    public string SelectAllLabel =>
-        Volumes.Count > 0 && Volumes.All(v => v.IsChecked) ? Strings.ScanSelectAllOff : Strings.ScanSelectAll;
+    /// <summary>Настройка и финальный экран — разные продуктовые состояния.
+    /// Раньше после завершения весь мастер настройки снова появлялся над итогом.</summary>
+    public bool IsSetupVisible => !IsRunning && !IsDone;
 
-    public string ScanModeHint => SelectedDepth?.Value switch
+    /// <summary>Крупная сводка выбора рядом с главным действием (одиночный выбор диска).</summary>
+    public string SelectedVolumesSummary
     {
-        ScanDepth.WithSimilarImagesAndAudio => "Медленнее: ищет одинаковые файлы, похожие фото и похожую музыку.",
-        ScanDepth.WithSimilarImages => "Дольше: ищет одинаковые файлы и похожие фото.",
-        _ => "Быстро: находит полностью одинаковые файлы. Лучше для первого запуска."
-    };
+        get
+        {
+            var selected = Volumes.FirstOrDefault(v => v.IsChecked);
+            if (selected is null) return "Диск не выбран";
+            return selected.HasScanFolder
+                ? $"Диск: {selected.DisplayName} · выбранная папка"
+                : $"Диск: {selected.DisplayName} · проверка целиком";
+        }
+    }
+
+    /// <summary>Спокойное описание того, что произойдёт: ищем всё, настраивать ничего не нужно.</summary>
+    public string ScanOptionsSummary =>
+        "Ищем одинаковые файлы среди всех типов и похожие фотографии. Ничего настраивать не нужно — просто нажмите «Начать поиск».";
 
     [ObservableProperty] private string _stageTitle = "";
     [ObservableProperty] private string? _currentFile;
@@ -79,6 +91,10 @@ public partial class ScanViewModel : PageViewModel
     [ObservableProperty] private string _groupsText = "0";
     [ObservableProperty] private string? _emptyHint;
     [ObservableProperty] private string? _infoText;
+    [ObservableProperty] private string _elapsedText = "0 с";
+    [ObservableProperty] private string _estimatedRemainingText = "Считаем…";
+    [ObservableProperty] private string _bytesPerSecondText = "—";
+    [ObservableProperty] private string _filesPerSecondText = "—";
 
     public ScanViewModel(IScanService scan, IVolumeService volumes, ISettingsService settings,
         IAudioMatchService audioService, NavigationService nav)
@@ -92,7 +108,11 @@ public partial class ScanViewModel : PageViewModel
         DepthOptions.Add(new DepthOption(ScanDepth.ExactOnly, Strings.DepthExact, true));
         DepthOptions.Add(new DepthOption(ScanDepth.WithSimilarImages, Strings.DepthImages, true));
         DepthOptions.Add(new DepthOption(ScanDepth.WithSimilarImagesAndAudio, Strings.DepthAudio, _audioService.IsAvailable));
-        SelectedDepth = DepthOptions.First(o => o.Enabled);
+        // «Найти всё» без ручной настройки: по умолчанию ищем одинаковые файлы среди ВСЕХ типов
+        // + похожие фото (главная ценность продукта). Похожую музыку не включаем автоматически —
+        // это медленный внешний fpcalc; точные аудио-дубликаты всё равно находит обычный проход.
+        SelectedDepth = DepthOptions.FirstOrDefault(o => o.Value == ScanDepth.WithSimilarImages && o.Enabled)
+                        ?? DepthOptions.First(o => o.Enabled);
 
         // P1.5: строгость поиска похожих (профиль).
         StrictnessOptions.Add(new StrictnessOption(0, Strings.StrictnessStrict));
@@ -101,7 +121,8 @@ public partial class ScanViewModel : PageViewModel
         SelectedStrictness = StrictnessOptions[1]; // Обычно
     }
 
-    partial void OnSelectedDepthChanged(DepthOption? value) => OnPropertyChanged(nameof(ScanModeHint));
+    partial void OnIsRunningChanged(bool value) => OnPropertyChanged(nameof(IsSetupVisible));
+    partial void OnIsDoneChanged(bool value) => OnPropertyChanged(nameof(IsSetupVisible));
 
     public void Preselect(long volumeId) => _pendingPreselect = volumeId;
 
@@ -115,24 +136,12 @@ public partial class ScanViewModel : PageViewModel
 
     public override void OnNavigatedTo()
     {
-        if (!IsRunning) { LoadCategoriesFromSettings(); _ = LoadVolumesAsync(); }
-    }
-
-    /// <summary>Загрузить чекбоксы «что искать» из настроек (пустой список = все включены).</summary>
-    private void LoadCategoriesFromSettings()
-    {
-        var saved = _settings.Current.IncludedCategories;
-        if (saved is null || saved.Count == 0)
+        // Экран проверки без ручной настройки: всегда ищем во всех типах файлов.
+        if (!IsRunning)
         {
             IncludeImages = IncludeVideo = IncludeAudio = IncludeDocuments = IncludeOther = true;
-            return;
+            _ = LoadVolumesAsync();
         }
-        bool Has(FileCategory c) => saved.Contains(c.ToString());
-        IncludeImages = Has(FileCategory.Image);
-        IncludeVideo = Has(FileCategory.Video);
-        IncludeAudio = Has(FileCategory.Audio);
-        IncludeDocuments = Has(FileCategory.Document);
-        IncludeOther = Has(FileCategory.Other);
     }
 
     /// <summary>Собрать выбранные категории (P0-A). Пустой набор означает ошибку валидации.</summary>
@@ -169,41 +178,64 @@ public partial class ScanViewModel : PageViewModel
 
             foreach (var item in Volumes) item.PropertyChanged -= OnCheckChanged;
             Volumes.Clear();
-            bool hasPreselect = _pendingPreselect is not null;
             foreach (var v in connected)
             {
                 var item = new VolumeCheckItem(v);
                 item.PropertyChanged += OnCheckChanged;
-                item.IsChecked = hasPreselect ? _pendingPreselect == v.Id : ShouldSelectByDefault(v);
-                Volumes.Add(item);
+                Volumes.Add(item); // без отметки — одиночный выбор задаём ровно одним элементом ниже
             }
 
-            if (!hasPreselect && Volumes.Count > 0 && !Volumes.Any(v => v.IsChecked))
-            {
-                foreach (var item in Volumes) item.IsChecked = true;
-            }
-
+            // Одиночный выбор: ровно ОДИН диск выбран по умолчанию. Приоритет — предвыбранный том
+            // (подсказка «флешка с фото»), иначе первый несистемный диск, иначе первый доступный.
+            long? pre = _pendingPreselect;
             _pendingPreselect = null;
+            int initialIdx = -1;
+            if (pre is long id) initialIdx = connected.FindIndex(v => v.Id == id);
+            if (initialIdx < 0) initialIdx = connected.FindIndex(ShouldSelectByDefault);
+            if (initialIdx < 0 && Volumes.Count > 0) initialIdx = 0;
+            if (initialIdx >= 0) Volumes[initialIdx].IsChecked = true;
+
             EmptyHint = connected.Count == 0 ? Strings.ScanNoVolumes : null;
-            OnPropertyChanged(nameof(SelectAllLabel));
+            OnPropertyChanged(nameof(SelectedVolumesSummary));
             StartCommand.NotifyCanExecuteChanged();
+        }
+        catch (Exception ex)
+        {
+            // Этот путь запускается из навигации fire-and-forget. Ошибка чтения БД/носителей
+            // не должна становиться ненаблюдаемым Task и оставлять активным устаревший выбор.
+            foreach (var item in Volumes) item.PropertyChanged -= OnCheckChanged;
+            Volumes.Clear();
+            EmptyHint = UserFacingError.Describe(ex,
+                "Не удалось обновить список дисков. Проверьте подключение носителей и повторите.");
+            AppLog.Error("Scan.LoadVolumes", ex);
+            OnPropertyChanged(nameof(SelectedVolumesSummary));
         }
         finally
         {
             _loadingVolumes = false;
-        }
-    }
-
-    private void OnCheckChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(VolumeCheckItem.IsChecked))
-        {
-            OnPropertyChanged(nameof(SelectAllLabel));
             StartCommand.NotifyCanExecuteChanged();
         }
     }
 
-    /// <summary>Переключатель «выбрать все / снять все» носители (для сверки сразу по нескольким дискам).</summary>
+    private bool _singleSelectGuard;
+
+    private void OnCheckChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(VolumeCheckItem.IsChecked)) return;
+
+        // Одиночный выбор (радиокнопочная логика): выбрали диск — снимаем выбор с остальных.
+        if (!_singleSelectGuard && sender is VolumeCheckItem it && it.IsChecked)
+        {
+            _singleSelectGuard = true;
+            foreach (var v in Volumes)
+                if (!ReferenceEquals(v, it) && v.IsChecked) v.IsChecked = false;
+            _singleSelectGuard = false;
+        }
+
+        OnPropertyChanged(nameof(SelectedVolumesSummary));
+        StartCommand.NotifyCanExecuteChanged();
+    }
+
     [RelayCommand]
     private async Task ChooseFolderAsync(VolumeCheckItem? item)
     {
@@ -228,7 +260,7 @@ public partial class ScanViewModel : PageViewModel
         item.ScanFolder = folder;
         item.IsChecked = true;
         EmptyHint = null;
-        OnPropertyChanged(nameof(SelectAllLabel));
+        OnPropertyChanged(nameof(SelectedVolumesSummary));
         StartCommand.NotifyCanExecuteChanged();
     }
 
@@ -237,13 +269,7 @@ public partial class ScanViewModel : PageViewModel
     {
         if (item is null) return;
         item.ScanFolder = null;
-    }
-
-    [RelayCommand]
-    private void SelectAllVolumes()
-    {
-        bool allChecked = Volumes.Count > 0 && Volumes.All(v => v.IsChecked);
-        foreach (var v in Volumes) v.IsChecked = !allChecked;
+        OnPropertyChanged(nameof(SelectedVolumesSummary));
     }
 
     private bool CanStart() => !IsRunning && Volumes.Any(v => v.IsChecked);
@@ -326,7 +352,7 @@ public partial class ScanViewModel : PageViewModel
             VolumeIds = ids,
             Folders = folders.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             Depth = SelectedDepth?.Value ?? ScanDepth.ExactOnly,
-            Parallelism = s.MaxParallelism,
+            Parallelism = PerformanceProfiles.ResolveParallelism(s, Environment.ProcessorCount),
             Incremental = true,
             ImageThreshold = s.DefaultImageThreshold,
             AudioThreshold = s.DefaultAudioThreshold,
@@ -355,9 +381,15 @@ public partial class ScanViewModel : PageViewModel
         IsPaused = false;
         InfoText = null;
         ProgressIndeterminate = true;
+        ElapsedText = "0 с";
+        EstimatedRemainingText = "Считаем…";
+        BytesPerSecondText = "—";
+        FilesPerSecondText = "—";
         StartCommand.NotifyCanExecuteChanged();
 
         _scan.ProgressChanged += OnProgress;
+        Exception? startFailure = null;
+        bool cancelledBeforeTerminalState = false;
         try
         {
             await _scan.RunAsync(options, _cts.Token);
@@ -365,6 +397,7 @@ public partial class ScanViewModel : PageViewModel
         catch (OperationCanceledException)
         {
             // Отмена до фактического старта задачи (Task.Run с ct) — не сбой.
+            cancelledBeforeTerminalState = true;
         }
         catch (Exception ex)
         {
@@ -372,8 +405,10 @@ public partial class ScanViewModel : PageViewModel
             // его try (например, БД недоступна при создании сессии). Без catch оно уходило из
             // async-команды и роняло приложение «в рабочий стол» (аудит 2026-07-02).
             Core.Util.AppLog.Error("ScanViewModel.StartAsync", ex);
+            startFailure = ex;
             IsFailed = true;
-            FailText = ex.Message;
+            FailText = UserFacingError.Describe(ex, "Проверку не удалось завершить. Прежние результаты сохранены — попробуйте ещё раз.");
+            Deduplicator.Core.Util.AppLog.Error("ScanViewModel.Start", ex);
         }
         finally
         {
@@ -381,15 +416,20 @@ public partial class ScanViewModel : PageViewModel
             IsRunning = false;
             IsPaused = false;
             ProgressIndeterminate = false;
-            IsDone = _scan.Progress.Stage == ScanStage.Completed;
+            var terminalStage = _scan.Progress.Stage;
+            IsDone = startFailure is null && !cancelledBeforeTerminalState &&
+                     terminalStage == ScanStage.Completed;
             HasResults = IsDone;
             // #6: ошибка сверки больше не молчит — показываем понятное состояние.
-            IsFailed = _scan.Progress.Stage == ScanStage.Failed;
-            if (IsFailed)
-                FailText = string.IsNullOrWhiteSpace(_scan.Progress.Message)
-                    ? Strings.ScanFailed : _scan.Progress.Message;
+            IsFailed = startFailure is not null || terminalStage == ScanStage.Failed;
+            if (startFailure is not null)
+                FailText = UserFacingError.Describe(startFailure,
+                    "Проверку не удалось завершить. Прежние результаты сохранены — попробуйте ещё раз.");
+            else if (terminalStage == ScanStage.Failed)
+                FailText = "Проверка остановлена. Прежние результаты сохранены. Проверьте, что носитель подключён и доступен, затем повторите. Подробности есть в журнале диагностики.";
             // UI-аудит (must №6): отмена — не молчаливое исчезновение прогресса, а явное состояние.
-            IsCancelled = _scan.Progress.Stage == ScanStage.Cancelled;
+            IsCancelled = startFailure is null &&
+                          (cancelledBeforeTerminalState || terminalStage == ScanStage.Cancelled);
             StartCommand.NotifyCanExecuteChanged();
         }
     }
@@ -400,15 +440,38 @@ public partial class ScanViewModel : PageViewModel
     {
         StageTitle = p.StageTitle;
         CurrentFile = p.CurrentFile;
-        FilesSeenText = $"{p.FilesSeen:N0}";
+        FilesSeenText = p.EstimatedTotalFiles is > 0
+            ? $"{p.FilesSeen:N0} из ~{p.EstimatedTotalFiles.Value:N0}"
+            : $"{p.FilesSeen:N0}";
         FilesHashedText = $"{p.FilesHashed:N0}";
         SkippedText = $"{p.FilesSkipped:N0}";
         GroupsText = $"{p.GroupsFound:N0}";
-        ProgressIndeterminate = p.Fraction is null && p.Stage is not (ScanStage.Completed or ScanStage.Cancelled or ScanStage.Failed);
-        ProgressValue = (p.Fraction ?? 0) * 100;
+        ProgressIndeterminate = p.OverallFraction is null &&
+                                p.Stage is not (ScanStage.Completed or ScanStage.Cancelled or ScanStage.Failed);
+        ProgressValue = (p.OverallFraction ?? p.Fraction ?? 0) * 100;
+        ElapsedText = FormatDuration(p.Elapsed);
+        EstimatedRemainingText = p.EstimatedRemaining is { } remaining
+            ? "~" + FormatDuration(remaining)
+            : p.Stage is ScanStage.Completed or ScanStage.Cancelled or ScanStage.Failed ? "—" : "Считаем…";
+        BytesPerSecondText = p.BytesPerSecond > 0
+            ? $"{Format.Bytes((long)p.BytesPerSecond)}/с"
+            : "—";
+        FilesPerSecondText = p.FilesPerSecond > 0
+            ? $"{p.FilesPerSecond:N0} файл/с"
+            : "—";
         // Информационное сообщение во время скана (напр. «быстрый режим MFT недоступен»). На ошибке
         // его место занимает FailText, поэтому здесь показываем только не-ошибочные сообщения.
         if (p.Stage != ScanStage.Failed) InfoText = p.Message;
+    }
+
+    private static string FormatDuration(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero) value = TimeSpan.Zero;
+        if (value.TotalHours >= 1)
+            return $"{(int)value.TotalHours} ч {value.Minutes:00} мин";
+        if (value.TotalMinutes >= 1)
+            return $"{(int)value.TotalMinutes} мин {value.Seconds:00} с";
+        return $"{Math.Max(0, value.Seconds)} с";
     }
 
     [RelayCommand]
@@ -424,6 +487,18 @@ public partial class ScanViewModel : PageViewModel
 
     [RelayCommand]
     private void ViewResults() => _nav.To<ResultsViewModel>();
+
+    [RelayCommand]
+    private void NewScan()
+    {
+        IsDone = false;
+        IsFailed = false;
+        IsCancelled = false;
+        FailText = null;
+        InfoText = null;
+        CurrentFile = null;
+        _ = LoadVolumesAsync();
+    }
 
     private static bool ShouldSelectByDefault(VolumeRecord volume)
     {

@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Linq;
+using Avalonia.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Deduplicator.App.Infrastructure;
@@ -32,6 +34,22 @@ public partial class GroupItemViewModel : ObservableObject
     public bool IsSimilar => Model.MatchType is MatchType.SimilarImage or MatchType.SimilarAudio;
     public bool HasImages => Model.MatchType is MatchType.SimilarImage or MatchType.Exact;
     public bool IsExact => Model.MatchType is MatchType.Exact or MatchType.ExactVideo;
+
+    /// <summary>Группа состоит из фотографий → показываем крупной галереей (наглядное сравнение),
+    /// иначе — компактным списком строк. Члены группы одной категории (одинаковый/похожий контент),
+    /// поэтому достаточно посмотреть на первый файл.</summary>
+    public bool IsImageGroup => Files.Count > 0 && Files[0].Model.Category == FileCategory.Image;
+    public bool IsFileGroup => !IsImageGroup;
+
+    /// <summary>Иконка-индикатор типа группы в заголовке карточки.</summary>
+    public Geometry? GroupIcon => Converters.Converters.Icon.Convert(
+        Model.MatchType switch
+        {
+            MatchType.SimilarImage => "IconImage",
+            MatchType.SimilarAudio => "IconMusic",
+            MatchType.ExactVideo => "IconVideo",
+            _ => "IconLayers"
+        }, typeof(Geometry), null, CultureInfo.CurrentCulture) as Geometry;
 
     /// <summary>Точная группа, не сверенная полностью (есть офлайн/непрочитанные члены) — удаление запрещено.</summary>
     public bool IsUnverifiedExact => IsExact && Model.Confidence < 1.0;

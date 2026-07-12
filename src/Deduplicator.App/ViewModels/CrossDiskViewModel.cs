@@ -40,6 +40,7 @@ public sealed class CrossDiskGroupItem
 /// <summary>Экран «Память дисков»: дубликаты между носителями из кэша, с живым статусом подключения.</summary>
 public partial class CrossDiskViewModel : PageViewModel
 {
+    private const int PageSize = 50;
     private readonly FileRepository _files;
     private readonly IVolumeService _volumes;
     private readonly IDriveWatcher _watcher;
@@ -47,6 +48,7 @@ public partial class CrossDiskViewModel : PageViewModel
     private bool _loading;
     private bool _active;
     private bool _reloadPending;
+    private int _pageIndex;
 
     public override string Title => Strings.CrossDiskTitle;
 
@@ -55,6 +57,10 @@ public partial class CrossDiskViewModel : PageViewModel
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string? _empty;
     [ObservableProperty] private string _summary = "";
+    [ObservableProperty] private string _pageStatus = "";
+    [ObservableProperty] private string? _error;
+    [ObservableProperty] private bool _hasMore;
+    [ObservableProperty] private bool _hasPrevious;
 
     public CrossDiskViewModel(FileRepository files, IVolumeService volumes, IDriveWatcher watcher, NavigationService nav)
     {
@@ -77,18 +83,39 @@ public partial class CrossDiskViewModel : PageViewModel
     public override void OnNavigatedFrom() => _active = false;
 
     [RelayCommand]
-    private async Task LoadAsync()
+    private Task LoadAsync() => LoadPageAsync(reset: true);
+
+    [RelayCommand]
+    private async Task LoadMoreAsync()
+    {
+        if (_loading || !HasMore) return;
+        _pageIndex++;
+        await LoadPageAsync(reset: false);
+    }
+
+    [RelayCommand]
+    private async Task LoadPreviousAsync()
+    {
+        if (_loading || _pageIndex == 0) return;
+        _pageIndex--;
+        await LoadPageAsync(reset: false);
+    }
+
+    private async Task LoadPageAsync(bool reset)
     {
         if (_loading) return;
         _loading = true;
         IsBusy = true;
+        Error = null;
+        if (reset) _pageIndex = 0;
+        int offset = _pageIndex * PageSize;
         try
         {
-            var items = await Task.Run(() =>
+            var loaded = await Task.Run(() =>
             {
                 var catalog = _volumes.SyncAndGetCatalog().ToDictionary(v => v.Id);
-                var raw = _files.GetCrossVolumeDuplicates();
-                return raw.Select(files => new CrossDiskGroupItem
+                var page = _files.GetCrossVolumeDuplicatesPage(offset, PageSize);
+                var items = page.Groups.Select(files => new CrossDiskGroupItem
                 {
                     Files = files.Select(f =>
                     {
@@ -105,14 +132,25 @@ public partial class CrossDiskViewModel : PageViewModel
                 })
                 .OrderByDescending(g => g.Files.Count)
                 .ToList();
+                return (Items: items, page.TotalGroups);
             });
 
             Groups.Clear();
-            foreach (var g in items) Groups.Add(g);
-            Summary = items.Count == 0 ? "" :
-                $"{Format.Count(items.Count, "группа", "группы", "групп")} · " +
-                $"{Format.Count(items.Sum(g => g.Files.Count), "файл", "файла", "файлов")}";
-            Empty = items.Count == 0 ? Strings.CrossDiskNothing : null;
+            foreach (var g in loaded.Items) Groups.Add(g);
+            long start = loaded.TotalGroups == 0 ? 0 : offset + 1L;
+            long end = offset + loaded.Items.Count;
+            HasPrevious = _pageIndex > 0;
+            HasMore = end < loaded.TotalGroups;
+            Summary = loaded.TotalGroups == 0 ? "" :
+                $"{Format.Count((int)Math.Min(int.MaxValue, loaded.TotalGroups), "группа", "группы", "групп")} · " +
+                $"страница {_pageIndex + 1:N0}";
+            PageStatus = loaded.TotalGroups == 0 ? "" : $"{start:N0}–{end:N0} из {loaded.TotalGroups:N0}";
+            Empty = loaded.TotalGroups == 0 ? Strings.CrossDiskNothing : null;
+        }
+        catch (Exception ex)
+        {
+            Error = "Не удалось прочитать сравнение дисков. Подключите носители и попробуйте ещё раз.";
+            Deduplicator.Core.Util.AppLog.Error("CrossDisk.Load", ex);
         }
         finally
         {

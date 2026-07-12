@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
-using System.Text;
 using Deduplicator.Core.Data;
+using Deduplicator.Core.Engine;
 using Deduplicator.Core.Models;
 
 namespace Deduplicator.Core.Services;
@@ -23,6 +23,8 @@ public interface IVolumeService
 /// <summary>Обнаружение и идентификация носителей по серийному номеру тома.</summary>
 public sealed class VolumeService : IVolumeService
 {
+    private readonly record struct DriveTopology(uint DiskNumber, int MediaType);
+
     private readonly VolumeRepository _volumes;
     public VolumeService(VolumeRepository volumes) => _volumes = volumes;
 
@@ -33,7 +35,7 @@ public sealed class VolumeService : IVolumeService
         try { drives = DriveInfo.GetDrives(); }
         catch { return result; }
 
-        var mediaByLetter = GetDriveMediaTypes();
+        var topologyByLetter = GetDriveTopology();
 
         foreach (var d in drives)
         {
@@ -47,11 +49,11 @@ public sealed class VolumeService : IVolumeService
                 // Полумёртвый сетевой диск (хост недоступен, но маппинг жив) делает IsReady/serial/size
                 // синхронными SMB-запросами на десятки секунд. Ограничиваем по времени, чтобы ОДИН такой
                 // шар не тормозил обнаружение остальных дисков (NFR-1, ревью projact5).
-                rec = TryBuildWithTimeout(() => BuildRecord(d, mediaByLetter), TimeSpan.FromSeconds(3));
+                rec = TryBuildWithTimeout(() => BuildRecord(d, topologyByLetter), TimeSpan.FromSeconds(3));
             }
             else
             {
-                try { rec = BuildRecord(d, mediaByLetter); }
+                try { rec = BuildRecord(d, topologyByLetter); }
                 catch { rec = null; } // недоступный носитель пропускаем — не валим перечисление (NFR-1)
             }
             if (rec is not null) result.Add(rec);
@@ -60,12 +62,16 @@ public sealed class VolumeService : IVolumeService
     }
 
     /// <summary>Собрать запись о диске (может делать синхронные FS-запросы). null — диск не готов.</summary>
-    private VolumeRecord? BuildRecord(DriveInfo d, Dictionary<char, int> mediaByLetter)
+    private VolumeRecord? BuildRecord(DriveInfo d, Dictionary<char, DriveTopology> topologyByLetter)
     {
         if (!d.IsReady) return null;
         var root = d.RootDirectory.FullName;
         bool isNetwork = d.DriveType == DriveType.Network;
-        int media = root.Length > 0 && mediaByLetter.TryGetValue(char.ToUpperInvariant(root[0]), out var m) ? m : 0;
+        DriveTopology? topology = root.Length > 0 &&
+                                  topologyByLetter.TryGetValue(char.ToUpperInvariant(root[0]), out var t)
+            ? t
+            : null;
+        int media = topology?.MediaType ?? 0;
 
         // 1.2: seek-penalty IOCTL — первичный сигнал «механика vs флэш» (без прав администратора).
         // Точнее WMI: USB3-SSD/флешка → нет штрафа → параллельные чтения; HDD в USB-боксе,
@@ -81,10 +87,17 @@ public sealed class VolumeService : IVolumeService
             };
         }
 
+        string serial = VolumeIdentityProbe.TryGetSerial(root) ?? root;
+        string physicalKey = isNetwork
+            ? "network:" + root.TrimEnd('\\', '/').ToUpperInvariant()
+            : topology is { } local
+                ? "disk:" + local.DiskNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "volume:" + serial.Trim().ToUpperInvariant();
+
         return new VolumeRecord
         {
             Label = string.IsNullOrWhiteSpace(d.VolumeLabel) ? d.Name.TrimEnd('\\') : d.VolumeLabel,
-            Serial = GetVolumeSerial(root) ?? root,
+            Serial = serial,
             FsType = SafeGet(() => d.DriveFormat),
             TotalBytes = SafeGet(() => d.TotalSize),
             FreeBytes = SafeGet(() => d.AvailableFreeSpace),
@@ -93,7 +106,9 @@ public sealed class VolumeService : IVolumeService
             IsRemovable = d.DriveType == DriveType.Removable,
             IsNetwork = isNetwork,
             MediaType = media,
-            HasSeekPenalty = seekPenalty
+            HasSeekPenalty = seekPenalty,
+            PhysicalDiskNumber = topology?.DiskNumber,
+            PhysicalDeviceKey = physicalKey
         };
     }
 
@@ -108,10 +123,13 @@ public sealed class VolumeService : IVolumeService
         catch { return null; }
     }
 
-    /// <summary>Сопоставление буквы диска с типом носителя (HDD/SSD) через WMI Storage.</summary>
-    private static Dictionary<char, int> GetDriveMediaTypes()
+    /// <summary>
+    /// Сопоставление буквы с физическим DiskNumber и типом носителя через WMI Storage. DiskNumber
+    /// сохраняем даже когда MediaType неизвестен: именно он не даёт двум разделам HDD читаться вместе.
+    /// </summary>
+    private static Dictionary<char, DriveTopology> GetDriveTopology()
     {
-        var result = new Dictionary<char, int>();
+        var result = new Dictionary<char, DriveTopology>();
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return result;
         try
         {
@@ -145,9 +163,11 @@ public sealed class VolumeService : IVolumeService
                     if (letterObj is null) continue;
                     char letter = Convert.ToChar(letterObj);
                     if (letter == '\0') continue;
-                    if (uint.TryParse(o["DiskNumber"]?.ToString(), out var diskNo) &&
-                        diskMedia.TryGetValue(diskNo, out var media))
-                        result[char.ToUpperInvariant(letter)] = media;
+                    if (uint.TryParse(o["DiskNumber"]?.ToString(), out var diskNo))
+                    {
+                        diskMedia.TryGetValue(diskNo, out var media);
+                        result[char.ToUpperInvariant(letter)] = new DriveTopology(diskNo, media);
+                    }
                 }
             }
         }
@@ -180,6 +200,8 @@ public sealed class VolumeService : IVolumeService
                 v.IsNetwork = c.IsNetwork; // HIGH (ревью projact5): без этого сетевой диск читался параллельно
                 v.MediaType = c.MediaType;
                 v.HasSeekPenalty = c.HasSeekPenalty; // 1.2: сигнал IOCTL обязан пережить merge (как IsNetwork)
+                v.PhysicalDiskNumber = c.PhysicalDiskNumber;
+                v.PhysicalDeviceKey = c.PhysicalDeviceKey;
                 if (v.TotalBytes == 0) v.TotalBytes = c.TotalBytes;
             }
             else
@@ -192,36 +214,9 @@ public sealed class VolumeService : IVolumeService
 
     public long Register(VolumeRecord volume) => _volumes.Upsert(volume);
 
-    // --- Серийный номер тома через WinAPI ---
-
-    private static string? GetVolumeSerial(string rootPath)
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return null;
-        try
-        {
-            var volName = new StringBuilder(261);
-            var fsName = new StringBuilder(261);
-            if (GetVolumeInformation(rootPath, volName, volName.Capacity, out uint serial,
-                    out _, out _, fsName, fsName.Capacity))
-            {
-                return $"{(serial >> 16) & 0xFFFF:X4}-{serial & 0xFFFF:X4}";
-            }
-        }
-        catch { /* ignore */ }
-        return null;
-    }
-
     private static T SafeGet<T>(Func<T> get)
     {
         try { return get(); } catch { return default!; }
     }
 
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetVolumeInformation(
-        string lpRootPathName,
-        StringBuilder lpVolumeNameBuffer, int nVolumeNameSize,
-        out uint lpVolumeSerialNumber, out uint lpMaximumComponentLength,
-        out uint lpFileSystemFlags,
-        StringBuilder lpFileSystemNameBuffer, int nFileSystemNameSize);
 }

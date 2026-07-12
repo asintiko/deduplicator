@@ -51,6 +51,10 @@ internal static class Schema
     CREATE INDEX IF NOT EXISTS idx_files_partial  ON files(partial_hash);
     CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
     CREATE INDEX IF NOT EXISTS idx_files_volume   ON files(volume_id);
+    -- Ленивый офлайн-проводник: prefix-range по нормализованному пути не сканирует весь том
+    -- при каждом раскрытии вложенной папки. replace/char — детерминированные функции SQLite.
+    CREATE INDEX IF NOT EXISTS idx_files_volume_rel_norm
+        ON files(volume_id, replace(rel_path, char(92), '/') COLLATE NOCASE);
     -- Составные индексы для быстрой воронки exact-скана (раздел 5.2 аудита):
     -- потоковая выборка кандидатов по размеру и группировка по (size, hash) без N+1 запросов.
     CREATE INDEX IF NOT EXISTS idx_files_size_id       ON files(size, id);
@@ -122,10 +126,15 @@ internal static class Schema
         options_hash   TEXT
     );
 
-    -- Файлы в области текущего скана (P1.2): для скана ПАПКИ на большой старой БД кандидаты считаются
-    -- только по этим строкам, а не по всей таблице files. Заполняется при сканировании папок; для скана
-    -- целого тома НЕ используется (там область = весь том, выгоды нет). Безопасность от пропусков: scope
-    -- заполняется полным набором просмотренных in-scope файлов, а итоговую корректность гарантирует inScope.
+    -- Явный маркер области нужен отдельно от строк файлов: пустая выбранная папка — это корректная
+    -- ПУСТАЯ область, а не сигнал откатиться к глобальной исторической базе.
+    CREATE TABLE IF NOT EXISTS scan_scope_sessions (
+        scan_session_id INTEGER PRIMARY KEY
+    );
+
+    -- Файлы в области текущего скана (P1.2): кандидаты для выбранных дисков/папок считаются только
+    -- по этим строкам, а не по всей таблице files. Безопасность от пропусков: scope заполняется
+    -- полным набором просмотренных in-scope файлов, а итоговую корректность гарантирует inScope.
     CREATE TABLE IF NOT EXISTS scan_scope_files (
         scan_session_id INTEGER NOT NULL,
         file_id         INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -135,6 +144,40 @@ internal static class Schema
     );
     CREATE INDEX IF NOT EXISTS idx_scan_scope_size ON scan_scope_files(scan_session_id, size);
     CREATE INDEX IF NOT EXISTS idx_scan_scope_cat_size ON scan_scope_files(scan_session_id, category, size);
+
+    -- Для неизменившегося/USN-обновлённого тома не копируем миллионы file_id во временную
+    -- таблицу: достаточно компактного дескриптора «сессия + том + категория».
+    CREATE TABLE IF NOT EXISTS scan_scope_volumes (
+        scan_session_id INTEGER NOT NULL,
+        volume_id      INTEGER NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
+        category       TEXT NOT NULL,
+        PRIMARY KEY (scan_session_id, volume_id, category)
+    );
+    CREATE INDEX IF NOT EXISTS idx_scan_scope_volumes_session ON scan_scope_volumes(scan_session_id, volume_id);
+
+    -- Физические удаления из канонического индекса откладываются до атомарной публикации успешной
+    -- сессии. Так отмена/сбой не каскадирует удаление членов последнего готового результата.
+    CREATE TABLE IF NOT EXISTS scan_pending_file_deletes (
+        scan_session_id INTEGER NOT NULL,
+        file_id         INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        PRIMARY KEY (scan_session_id, file_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_delete_file ON scan_pending_file_deletes(file_id);
+
+    CREATE VIEW IF NOT EXISTS scan_scope_effective AS
+        SELECT scan_session_id, file_id, size, category FROM scan_scope_files
+        UNION ALL
+        SELECT sv.scan_session_id, f.id, f.size, f.category
+        FROM scan_scope_volumes sv
+        JOIN files f ON f.volume_id=sv.volume_id AND f.category=sv.category
+        WHERE NOT EXISTS (
+            SELECT 1 FROM scan_scope_files sf
+            WHERE sf.scan_session_id=sv.scan_session_id AND sf.file_id=f.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM scan_pending_file_deletes pd
+            WHERE pd.scan_session_id=sv.scan_session_id AND pd.file_id=f.id
+        );
     """;
 
     /// <summary>

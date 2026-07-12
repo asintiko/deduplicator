@@ -18,6 +18,7 @@ public sealed class UsnEnumerator : IFileEnumerator
     private const ulong RootRecord = 5UL;                      // корневой каталог тома — запись №5
 
     internal readonly record struct Rec(ulong Parent, uint Attrs, string Name);
+    internal readonly record struct RawRec(ulong Frn, ulong Parent, uint Attrs, string Name);
 
     /// <summary>
     /// IFileEnumerator-контракт (используется CLI). Здесь сохраняем СТАРОЕ поведение: при сбое MFT
@@ -43,12 +44,30 @@ public sealed class UsnEnumerator : IFileEnumerator
 
     /// <summary>Построить карту MFT или бросить <see cref="MftEnumerationUnavailableException"/> с причиной.</summary>
     internal static (Dictionary<ulong, Rec> map, string drive) ReadMap(string root, CancellationToken ct)
-    {
-        try
+        => TranslateMftErrors(() =>
         {
-            return ReadMft(root, ct);
-        }
+            string drive = VolumeOf(root);
+            var map = new Dictionary<ulong, Rec>(capacity: 1 << 20);
+            ReadRawRecordsCore(root, rec => map[rec.Frn] = new Rec(rec.Parent, rec.Attrs, rec.Name), ct);
+            return (map, drive);
+        });
+
+    /// <summary>
+    /// Поток сырых записей MFT для отдельного привилегированного helper-процесса. Здесь намеренно
+    /// не строятся полные пути и не применяются продуктовые фильтры: helper только читает структуру
+    /// NTFS, а доверенный основной процесс принимает результат лишь после финальной рамки Complete.
+    /// </summary>
+    internal static long ReadRawRecords(string root, Action<RawRec> onRecord, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(onRecord);
+        return TranslateMftErrors(() => ReadRawRecordsCore(root, onRecord, ct));
+    }
+
+    private static T TranslateMftErrors<T>(Func<T> action)
+    {
+        try { return action(); }
         catch (OperationCanceledException) { throw; }
+        catch (MftEnumerationUnavailableException) { throw; }
         catch (NotSupportedException ex)
         {
             throw new MftEnumerationUnavailableException(BackendFallbackReason.UnsupportedUsnRecord, ex.Message);
@@ -132,14 +151,16 @@ public sealed class UsnEnumerator : IFileEnumerator
         return result;
     }
 
-    /// <summary>Читаем все записи MFT тома в словарь FRN -> (родитель, атрибуты, имя).</summary>
-    private static (Dictionary<ulong, Rec> map, string drive) ReadMft(string root, CancellationToken ct)
+    /// <summary>
+    /// Читаем записи MFT и сразу передаём вызывающему. Elevated-сторона не строит полные пути,
+    /// поэтому основной процесс может отбросить весь неполный поток при EOF или ошибке IPC.
+    /// </summary>
+    private static long ReadRawRecordsCore(string root, Action<RawRec> onRecord, CancellationToken ct)
     {
         string drive = VolumeOf(root);                 // "C:"
         string devicePath = @"\\.\" + drive;
 
         using var h = Native.OpenVolumeRead(devicePath);
-        var map = new Dictionary<ulong, Rec>(capacity: 1 << 20);
         long v2 = 0, unsupported = 0;
 
         const int OutSize = 1 << 20; // 1 МБ за вызов
@@ -174,7 +195,8 @@ public sealed class UsnEnumerator : IFileEnumerator
                 // Первые 8 байт — следующий StartFileReferenceNumber.
                 start = BinaryPrimitives.ReadUInt64LittleEndian(managed.AsSpan(0, 8));
 
-                ParseRecords(managed, (int)bytesReturned, map, ref v2, ref unsupported);
+                if (!ParseRecords(managed, (int)bytesReturned, onRecord, ref v2, ref unsupported))
+                    throw new NotSupportedException("USN вернул неполный или повреждённый хвост MFT-буфера");
             }
         }
         finally
@@ -191,7 +213,7 @@ public sealed class UsnEnumerator : IFileEnumerator
                 $"USN: встретилось {unsupported} записей неподдерживаемой версии (из {v2 + unsupported}) — " +
                 "откат на обычный обход, чтобы не потерять файлы.");
 
-        return (map, drive);
+        return v2;
     }
 
     /// <summary>
@@ -200,28 +222,31 @@ public sealed class UsnEnumerator : IFileEnumerator
     /// FSCTL_ENUM_USN_DATA с входом V0 на NTFS). Любую другую версию НЕ теряем молча, а считаем —
     /// вызывающий решает, не пора ли откатиться на обычный обход.
     /// </summary>
-    private static void ParseRecords(byte[] buf, int length, Dictionary<ulong, Rec> map,
+    private static bool ParseRecords(byte[] buf, int length, Action<RawRec> onRecord,
         ref long v2, ref long unsupported)
     {
+        if (length < 8 || length > buf.Length) return false;
         var span = buf.AsSpan(0, length);
         int offset = 8; // пропускаем «следующий FRN»
-        while (UsnRecordParser.TryParse(span, offset, out var rec))
+        while (offset < span.Length)
         {
+            if (!UsnRecordParser.TryParse(span, offset, out var rec)) return false;
             if (rec.Major == 2)
             {
                 v2++;
                 if (rec.Name.Length > 0)
-                    map[rec.Frn] = new Rec(rec.ParentFrn, rec.Attributes, rec.Name);
+                    onRecord(new RawRec(rec.Frn, rec.ParentFrn, rec.Attributes, rec.Name));
             }
             else
             {
                 // major == 3 (128-битные FRN) и прочие версии для входа V0 на NTFS не приходят;
-                // если всё же встретились — считаем как неподдерживаемые (см. порог отката в ReadMft).
+                // если всё же встретились — считаем как неподдерживаемые (см. проверку после чтения MFT).
                 unsupported++;
             }
 
             offset += rec.Length;
         }
+        return offset == span.Length;
     }
 
     /// <summary>Рекурсивно (с мемоизацией) строим путь каталога по цепочке родителей.</summary>

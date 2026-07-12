@@ -15,6 +15,8 @@ using Deduplicator.Core.Services;
 namespace Deduplicator.App.ViewModels;
 
 public sealed record ThemeOption(string Value, string Label);
+public sealed record PerformanceModeOption(string Value, string Label, string Description);
+public sealed record UiScaleOption(double Value, string Label);
 
 /// <summary>Настройки приложения (экран 10).</summary>
 public partial class SettingsViewModel : PageViewModel
@@ -23,6 +25,7 @@ public partial class SettingsViewModel : PageViewModel
     private readonly IAudioMatchService _audio;
     private readonly IUpdateService _update;
     private readonly ISentinelService _sentinel;
+    private readonly IFileOpsService _fileOps;
     private readonly AppPaths _paths;
     private string? _releaseUrl;
 
@@ -30,6 +33,8 @@ public partial class SettingsViewModel : PageViewModel
 
     public ObservableCollection<RuleOption> Rules { get; } = new();
     public ObservableCollection<ThemeOption> Themes { get; } = new();
+    public ObservableCollection<PerformanceModeOption> PerformanceModes { get; } = new();
+    public ObservableCollection<UiScaleOption> UiScales { get; } = new();
 
     /// <summary>Устанавливается представлением — выбор папки карантина.</summary>
     public Func<Task<string?>>? PickFolder { get; set; }
@@ -45,9 +50,14 @@ public partial class SettingsViewModel : PageViewModel
     [ObservableProperty] private bool _ecoMode; // 2.9: тихий фоновый режим для слабых машин
     [ObservableProperty] private bool _portableIndexEnabled; // 3.4: кэш проверки на съёмных носителях
     [ObservableProperty] private int _maxParallelism;
+    [ObservableProperty] private PerformanceModeOption? _selectedPerformanceMode;
+    [ObservableProperty] private bool _useExpertParallelism;
+    [ObservableProperty] private bool _useElevatedMftHelper;
     [ObservableProperty] private bool _computePixelHash;
     [ObservableProperty] private RuleOption? _selectedRule;
     [ObservableProperty] private ThemeOption? _selectedTheme;
+    [ObservableProperty] private UiScaleOption? _selectedUiScale;
+    [ObservableProperty] private bool _reduceMotion;
     [ObservableProperty] private string? _quarantinePath;
     [ObservableProperty] private string? _fpcalcPath;
     [ObservableProperty] private string _fpcalcStatus = "";
@@ -63,6 +73,20 @@ public partial class SettingsViewModel : PageViewModel
     [ObservableProperty] private bool _canOpenRelease;
     [ObservableProperty] private string _currentVersionText = "";
 
+    public bool CanCheckUpdates
+    {
+        get
+        {
+            string repository = (UpdateRepository ?? string.Empty).Trim();
+            int slash = repository.IndexOf('/');
+            if (slash <= 0 || slash != repository.LastIndexOf('/') || slash == repository.Length - 1)
+                return false;
+            string[] parts = [repository[..slash], repository[(slash + 1)..]];
+            return parts.All(static part =>
+                part.Length > 0 && part.All(static ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.'));
+        }
+    }
+
     public ObservableCollection<string> ReferenceFolders { get; } = new();
 
     // Сторожевой режим (Sentinel-lite): следить за новыми дубликатами, пока программа открыта.
@@ -71,14 +95,29 @@ public partial class SettingsViewModel : PageViewModel
 
     public string ImagePercentText => Format.Percent(ImageThreshold);
     public string AudioPercentText => Format.Percent(AudioThreshold);
+    public string PerformanceModeHint => UseExpertParallelism
+        ? $"Ручная настройка: {Math.Max(1, MaxParallelism)} параллельных задач."
+        : SelectedPerformanceMode?.Description ?? "Программа сама подберёт безопасную нагрузку.";
+
+    /// <summary>Обратная сторона «Использовать Корзину»: удалять в выбранную папку. Двусторонне
+    /// связана с UseRecycleBin, чтобы радиокнопки «Корзина» / «Выбранная папка» переключали флаг.</summary>
+    public bool UseCustomFolder
+    {
+        get => !UseRecycleBin;
+        set => UseRecycleBin = !value;
+    }
+
+    partial void OnUseRecycleBinChanged(bool value) => OnPropertyChanged(nameof(UseCustomFolder));
+    partial void OnUpdateRepositoryChanged(string value) => OnPropertyChanged(nameof(CanCheckUpdates));
 
     public SettingsViewModel(ISettingsService settings, IAudioMatchService audio, IUpdateService update,
-        ISentinelService sentinel, AppPaths paths)
+        ISentinelService sentinel, IFileOpsService fileOps, AppPaths paths)
     {
         _settings = settings;
         _audio = audio;
         _update = update;
         _sentinel = sentinel;
+        _fileOps = fileOps;
         _paths = paths;
         CurrentVersionText = $"{Strings.CurrentVersionLabel}: {update.CurrentVersion}";
 
@@ -93,6 +132,24 @@ public partial class SettingsViewModel : PageViewModel
         Themes.Add(new ThemeOption("Default", Strings.ThemeSystem));
         Themes.Add(new ThemeOption("Light", Strings.ThemeLight));
         Themes.Add(new ThemeOption("Dark", Strings.ThemeDark));
+
+        PerformanceModes.Add(new PerformanceModeOption(
+            PerformanceProfiles.Automatic,
+            "Автоматически",
+            "Рекомендуется: программа учитывает возможности компьютера, а обычный жёсткий диск всё равно читает последовательно."));
+        PerformanceModes.Add(new PerformanceModeOption(
+            PerformanceProfiles.Gentle,
+            "Бережный",
+            "Минимальная нагрузка — удобно, когда вы продолжаете работать за компьютером."));
+        PerformanceModes.Add(new PerformanceModeOption(
+            PerformanceProfiles.Maximum,
+            "Максимальная скорость",
+            "Использует доступные ядра активнее; компьютер может сильнее нагреваться и отвечать медленнее."));
+
+        UiScales.Add(new UiScaleOption(1.0, "Обычный — 100%"));
+        UiScales.Add(new UiScaleOption(1.125, "Крупный — 112%"));
+        UiScales.Add(new UiScaleOption(1.25, "Очень крупный — 125%"));
+        UiScales.Add(new UiScaleOption(1.5, "Максимальный — 150%"));
 
         LoadFromSettings();
     }
@@ -113,9 +170,17 @@ public partial class SettingsViewModel : PageViewModel
         EcoMode = s.EcoMode;
         PortableIndexEnabled = s.PortableIndexEnabled;
         MaxParallelism = s.MaxParallelism;
+        var mode = PerformanceProfiles.Normalize(s.PerformanceMode, s.EcoMode);
+        SelectedPerformanceMode = PerformanceModes.FirstOrDefault(p => p.Value == mode) ?? PerformanceModes[0];
+        UseExpertParallelism = string.IsNullOrWhiteSpace(s.PerformanceMode)
+            ? !s.EcoMode // legacy: прежнее ручное MaxParallelism остаётся явно видимым как экспертное переопределение
+            : s.UseExpertParallelism;
+        UseElevatedMftHelper = s.UseElevatedMftHelper;
         ComputePixelHash = s.ComputePixelHash;
         SelectedRule = Rules.FirstOrDefault(r => r.Value == s.DefaultRepresentativeRule) ?? Rules[0];
         SelectedTheme = Themes.FirstOrDefault(t => t.Value == s.Theme) ?? Themes[0];
+        SelectedUiScale = UiScales.OrderBy(x => Math.Abs(x.Value - s.UiScale)).First();
+        ReduceMotion = s.ReduceMotion;
         QuarantinePath = s.QuarantinePath;
         FpcalcPath = s.FpcalcPath;
         FpcalcAvailable = _audio.IsAvailable;
@@ -140,8 +205,17 @@ public partial class SettingsViewModel : PageViewModel
         $"Deduplicator {_update.CurrentVersion}\n" +
         $"{Deduplicator.Core.Engine.EngineBuildInfo.Summary}\n" +
         $"IsAdmin={FastDedup.Engine.EngineEnvironment.IsElevated()} OS={Environment.OSVersion}\n" +
-        $"LogDir={_paths.LogDir}\n" +
-        $"DbPath={_paths.DbPath}";
+        $"RunId={Core.Util.AppLog.RunId}\n" +
+        $"LogDir={RedactUserPath(_paths.LogDir)}\n" +
+        $"DbPath={RedactUserPath(_paths.DbPath)}";
+
+    private static string RedactUserPath(string path)
+    {
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\', '/');
+        return profile.Length > 0 && path.StartsWith(profile, StringComparison.OrdinalIgnoreCase)
+            ? "%USERPROFILE%" + path[profile.Length..]
+            : path;
+    }
 
     /// <summary>Собрать диагностику (версия/режим/права/пути) и скопировать в буфер — для поддержки (ТЗ MVP).</summary>
     [RelayCommand]
@@ -170,16 +244,15 @@ public partial class SettingsViewModel : PageViewModel
     private async Task CheckUpdatesAsync()
     {
         CanOpenRelease = false;
-        if (string.IsNullOrWhiteSpace(UpdateRepository) || !UpdateRepository.Contains('/'))
-        {
-            UpdateStatus = Strings.UpdateError;
-            return;
-        }
+        // Репозиторий скрыт из интерфейса — берём заданный пользователем или официальный по умолчанию.
+        var repo = string.IsNullOrWhiteSpace(UpdateRepository)
+            ? AppSettings.DefaultUpdateRepository
+            : UpdateRepository.Trim();
         UpdateStatus = Strings.UpdateChecking;
         try
         {
             using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
-            var info = await _update.CheckAsync(UpdateRepository, cts.Token);
+            var info = await _update.CheckAsync(repo, cts.Token);
             if (info is null) { UpdateStatus = Strings.UpdateError; return; }
             if (info.IsNewer)
             {
@@ -253,27 +326,58 @@ public partial class SettingsViewModel : PageViewModel
 
     partial void OnImageThresholdChanged(double value) => OnPropertyChanged(nameof(ImagePercentText));
     partial void OnAudioThresholdChanged(double value) => OnPropertyChanged(nameof(AudioPercentText));
+    partial void OnSelectedPerformanceModeChanged(PerformanceModeOption? value) => OnPropertyChanged(nameof(PerformanceModeHint));
+    partial void OnUseExpertParallelismChanged(bool value) => OnPropertyChanged(nameof(PerformanceModeHint));
+    partial void OnMaxParallelismChanged(int value) => OnPropertyChanged(nameof(PerformanceModeHint));
 
     [RelayCommand]
     private async Task BrowseQuarantineAsync()
     {
         if (PickFolder is null) return;
         var folder = await PickFolder();
-        if (!string.IsNullOrEmpty(folder)) QuarantinePath = folder;
+        if (!string.IsNullOrEmpty(folder))
+        {
+            try { folder = System.IO.Path.GetFullPath(folder).TrimEnd('\\', '/'); } catch { }
+            QuarantinePath = folder;
+        }
+    }
+
+    /// <summary>Вернуть папку удалённых файлов к стандартной (в данных приложения).</summary>
+    [RelayCommand]
+    private void ResetQuarantineFolder() => QuarantinePath = _paths.QuarantineDir;
+
+    /// <summary>Открыть папку удалённых файлов в Проводнике.</summary>
+    [RelayCommand]
+    private void OpenQuarantineFolder()
+    {
+        var dir = string.IsNullOrWhiteSpace(QuarantinePath) ? _paths.QuarantineDir : QuarantinePath!;
+        try
+        {
+            System.IO.Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            { FileName = dir, UseShellExecute = true });
+        }
+        catch (Exception ex) { Core.Util.AppLog.Error("OpenQuarantineFolder", ex); }
     }
 
     [RelayCommand]
     private void Save()
     {
+        string performanceMode = SelectedPerformanceMode?.Value ?? PerformanceProfiles.Automatic;
         var s = new AppSettings
         {
             DefaultImageThreshold = Math.Round(ImageThreshold, 2),
             DefaultAudioThreshold = Math.Round(AudioThreshold, 2),
             UseRecycleBin = UseRecycleBin,
             MaxParallelism = Math.Max(1, MaxParallelism),
+            PerformanceMode = performanceMode,
+            UseExpertParallelism = UseExpertParallelism,
+            UseElevatedMftHelper = UseElevatedMftHelper,
             ComputePixelHash = ComputePixelHash,
             DefaultRepresentativeRule = SelectedRule?.Value ?? RepresentativeRule.Oldest,
             Theme = SelectedTheme?.Value ?? "Default",
+            UiScale = SelectedUiScale?.Value ?? 1.0,
+            ReduceMotion = ReduceMotion,
             QuarantinePath = QuarantinePath,
             FpcalcPath = FpcalcPath,
             RotationInvariantImages = RotationInvariant,
@@ -285,23 +389,36 @@ public partial class SettingsViewModel : PageViewModel
             SentinelFolders = SentinelFolders.ToList(),
             CheckUpdatesEnabled = CheckUpdatesEnabled,
             UpdateRepository = UpdateRepository ?? "",
+            UpdatesConfigured = true, // пользователь настроил обновления вручную — миграцию больше не применяем
             // Поля, которых НЕТ на этом экране, обязаны переноситься из текущих настроек —
             // иначе «Сохранить» молча стирает выбор пользователя, сделанный в другом месте
             // (терялись категории с экрана сканирования — аудит 2026-07-02).
-            EcoMode = EcoMode,
+            // Старое поле остаётся синхронизированным: существующие сервисы и старые версии приложения
+            // продолжают понимать бережный режим без знания о новых профилях.
+            EcoMode = !UseExpertParallelism && performanceMode == PerformanceProfiles.Gentle,
             PortableIndexEnabled = PortableIndexEnabled,
             OnboardingCompleted = _settings.Current.OnboardingCompleted,
-            IncludedCategories = _settings.Current.IncludedCategories.ToList()
+            IncludedCategories = _settings.Current.IncludedCategories.ToList(),
+            ExplorerViewMode = _settings.Current.ExplorerViewMode
         };
         _settings.Save(s);
 
         if (Application.Current is App app)
+        {
             app.ApplyTheme(s.Theme);
+            app.ApplyUiPreferences(s.UiScale, s.ReduceMotion);
+        }
 
         // #25: путь к fpcalc применяется сразу, без перезапуска — и статус доступности обновляется.
         _audio.Reconfigure(s.FpcalcPath);
         FpcalcAvailable = _audio.IsAvailable;
         FpcalcStatus = _audio.IsAvailable ? Strings.FpcalcAvailable : Strings.FpcalcMissing;
+
+        // Папка удалённых файлов применяется сразу (тот же паттерн): новые удаления пойдут в неё,
+        // без перезапуска. Пустое значение = стандартная папка в данных приложения.
+        var quarantine = string.IsNullOrWhiteSpace(s.QuarantinePath) ? _paths.QuarantineDir : s.QuarantinePath!;
+        _fileOps.Reconfigure(quarantine);
+        QuarantinePath = quarantine; // показать фактическую папку, если поле было пустым
 
         // Сторож применяется тоже сразу (тот же паттерн, что fpcalc/тема): включили — следим,
         // выключили или убрали все папки — останавливаемся. Ошибки не мешают сохранению настроек.

@@ -23,11 +23,7 @@ public sealed class ConsolidationService : IConsolidationService
     // только почти неразличимые кадры — схожесть ≥ 0.97 означает не более 1 бита различия pHash из 64.
     private const double SimilarCollapseThreshold = 0.97;
 
-    // 3.5: кап числа кандидатов на полный попарный перебор похожести. Консолидация оперирует
-    // тысячами файлов (не миллионами); при аномально большом наборе фото с pHash O(N²) стал бы
-    // неподъёмным — тогда похожие НЕ схлопываем вовсе (консервативно: лишняя копия в архиве
-    // лучше тихо пропавшего кадра).
-    private const int SimilarCollapseCandidatesCap = 20_000;
+    private const int CatalogPageSize = 2_048;
 
     private readonly FileRepository _files;
     private readonly IVolumeService _volumeService;
@@ -43,49 +39,66 @@ public sealed class ConsolidationService : IConsolidationService
         var catalog = _volumeService.SyncAndGetCatalog();
         var byId = catalog.ToDictionary(v => v.Id);
 
-        // Собираем все файлы выбранных источников.
-        var all = new List<FileRecord>();
-        foreach (var vid in options.SourceVolumeIds)
-        {
-            var volFiles = _files.GetByVolume(vid);
-            foreach (var f in volFiles)
-            {
-                if (byId.TryGetValue(vid, out var v)) f.VolumeLabel = v.DisplayName;
-                all.Add(f);
-            }
-        }
-
         var plan = new ConsolidationPlan();
-
-        // Файлы с полным хэшем группируем по содержимому; уникальные (без хэша) — каждый сам по себе.
-        var withHash = all.Where(f => f.FullHash is not null)
-                          .GroupBy(f => Convert.ToHexString(f.FullHash!));
-        var withoutHash = all.Where(f => f.FullHash is null);
 
         // Сначала решаем, ЧТО копировать (эталоны точных групп + бесхэшевые), и только потом
         // назначаем целевые пути: схлопывание похожих (3.5) идёт между этими шагами, чтобы имена
         // схлопнутых не резервировались впустую и не плодили суффиксы __N у оставшихся файлов.
         var chosenToCopy = new List<(FileRecord File, int Siblings)>();
 
-        foreach (var grp in withHash)
-        {
-            var members = grp.ToList();
-            // Предпочитаем копию на ПОДКЛЮЧЁННОМ носителе, чтобы файл реально скопировался
-            // (иначе при отключённом эталоне содержимое не попало бы в архив).
-            var connectedMembers = members
-                .Where(m => byId.TryGetValue(m.VolumeId, out var v) && v.IsConnected)
-                .ToList();
-            var pickFrom = connectedMembers.Count > 0 ? connectedMembers : members;
-            var chosen = RepresentativeSelector.Pick(pickFrom, options.Rule);
-            int siblings = members.Count - 1;
+        var sourceIds = options.SourceVolumeIds.Where(id => id > 0).Distinct().ToArray();
 
-            chosenToCopy.Add((chosen, siblings));
-            foreach (var skip in members.Where(m => m.Id != chosen.Id))
-                plan.ToSkip.Add(new ConsolidationItem { File = skip, WillCopy = false, DuplicateSiblings = siblings });
+        // Бесхэшевые файлы независимы: добавляем их к будущему плану сразу, keyset-страницами.
+        long afterId = 0;
+        while (true)
+        {
+            var page = _files.GetConsolidationPage(
+                volumeIds: sourceIds,
+                withFullHash: false,
+                afterId: afterId,
+                afterFullHash: null,
+                limit: CatalogPageSize);
+            if (page.Count == 0) break;
+            foreach (var f in page)
+            {
+                if (byId.TryGetValue(f.VolumeId, out var v)) f.VolumeLabel = v.DisplayName;
+                chosenToCopy.Add((f, 0));
+            }
+            afterId = page[^1].Id;
         }
 
-        foreach (var f in withoutHash)
-            chosenToCopy.Add((f, 0));
+        // Хэшированные строки отсортированы БД по (full_hash,id). Держим только текущую exact-группу;
+        // на границе хэша сразу публикуем representative/skip в план. Пиковая дополнительная память —
+        // размер крупнейшей группы, а не количество файлов всех выбранных томов.
+        byte[]? cursorHash = null;
+        afterId = 0;
+        var currentExactGroup = new List<FileRecord>();
+        byte[]? currentHash = null;
+        while (true)
+        {
+            var page = _files.GetConsolidationPage(
+                volumeIds: sourceIds,
+                withFullHash: true,
+                afterId: afterId,
+                afterFullHash: cursorHash,
+                limit: CatalogPageSize);
+            if (page.Count == 0) break;
+            foreach (var f in page)
+            {
+                if (byId.TryGetValue(f.VolumeId, out var v)) f.VolumeLabel = v.DisplayName;
+                if (currentHash is not null && !currentHash.AsSpan().SequenceEqual(f.FullHash!))
+                {
+                    FinishExactGroup(currentExactGroup, byId, options.Rule, plan, chosenToCopy);
+                    currentExactGroup.Clear();
+                }
+                currentHash = f.FullHash!;
+                currentExactGroup.Add(f);
+            }
+            var last = page[^1];
+            cursorHash = last.FullHash;
+            afterId = last.Id;
+        }
+        FinishExactGroup(currentExactGroup, byId, options.Rule, plan, chosenToCopy);
 
         // 3.5: из группы почти одинаковых фото в архив едет один кадр; схлопнутые уходят
         // в plan.CollapsedSimilar (копироваться не будут, источники не трогаются).
@@ -107,10 +120,34 @@ public sealed class ConsolidationService : IConsolidationService
         return plan;
     }
 
+    private static void FinishExactGroup(
+        List<FileRecord> members,
+        IReadOnlyDictionary<long, VolumeRecord> volumes,
+        RepresentativeRule rule,
+        ConsolidationPlan plan,
+        List<(FileRecord File, int Siblings)> chosenToCopy)
+    {
+        if (members.Count == 0) return;
+        // Предпочитаем копию на ПОДКЛЮЧЁННОМ носителе, чтобы файл реально скопировался
+        // (иначе при отключённом эталоне содержимое не попало бы в архив).
+        var connectedMembers = members
+            .Where(m => volumes.TryGetValue(m.VolumeId, out var v) && v.IsConnected)
+            .ToList();
+        var pickFrom = connectedMembers.Count > 0 ? connectedMembers : members;
+        var chosen = RepresentativeSelector.Pick(pickFrom, rule);
+        int siblings = members.Count - 1;
+
+        chosenToCopy.Add((chosen, siblings));
+        foreach (var skip in members.Where(m => m.Id != chosen.Id))
+            plan.ToSkip.Add(new ConsolidationItem { File = skip, WillCopy = false, DuplicateSiblings = siblings });
+    }
+
     /// <summary>
     /// 3.5: схлопывание ПОХОЖИХ фото среди файлов К КОПИРОВАНИЮ. Кандидаты — изображения с pHash;
-    /// группируются полным попарным сравнением (PerceptualLsh.Similarity) с консервативным порогом
-    /// <see cref="SimilarCollapseThreshold"/> через DSU (те же механизмы, что в группировке похожих).
+    /// группируются с консервативным порогом <see cref="SimilarCollapseThreshold"/> через DSU.
+    /// При этом пороге 64-битные pHash связаны ребром только при расстоянии Хэмминга 0 или 1,
+    /// поэтому точный индекс «хэш + 64 одно-битных соседа» сохраняет семантику полного попарного
+    /// сравнения (включая транзитивные цепочки), но работает за O(64*N), а не O(N²).
     /// Из каждой группы остаётся самый резкий кадр (Sharpness из 3.7; fallback — больший размер
     /// файла), остальные помечаются схлопнутыми и НЕ копируются. Возвращает прореженный список.
     /// </summary>
@@ -121,24 +158,29 @@ public sealed class ConsolidationService : IConsolidationService
             .Where(c => c.File.Category == FileCategory.Image && c.File.PHash is { Length: >= 8 })
             .ToList();
         if (candidates.Count < 2) return chosen;
-        if (candidates.Count > SimilarCollapseCandidatesCap)
-        {
-            AppLog.Write($"Консолидация: кандидатов на схлопывание похожих {candidates.Count} > капа " +
-                         $"{SimilarCollapseCandidatesCap} — похожие фото не схлопываются (все едут в архив).");
-            return chosen;
-        }
 
         var hashOf = candidates.ToDictionary(c => c.File.Id, c => PerceptualLsh.ToHash(c.File.PHash));
         var dsu = new Dsu();
-        foreach (var c in candidates) dsu.MakeSet(c.File.Id);
-        for (int i = 0; i < candidates.Count; i++)
+        var representativeByHash = new Dictionary<ulong, long>();
+        foreach (var candidate in candidates)
         {
-            for (int j = i + 1; j < candidates.Count; j++)
+            long id = candidate.File.Id;
+            ulong hash = hashOf[id];
+            dsu.MakeSet(id);
+
+            // Все одинаковые хэши уже соединены через одного представителя; сравнивать каждую пару
+            // внутри огромной одинаковой корзины не нужно.
+            if (representativeByHash.TryGetValue(hash, out var same))
+                dsu.Union(id, same);
+
+            for (int bit = 0; bit < PerceptualLsh.TotalBits; bit++)
             {
-                if (PerceptualLsh.Similarity(hashOf[candidates[i].File.Id], hashOf[candidates[j].File.Id])
-                        >= SimilarCollapseThreshold)
-                    dsu.Union(candidates[i].File.Id, candidates[j].File.Id);
+                ulong neighbor = hash ^ (1UL << bit);
+                if (representativeByHash.TryGetValue(neighbor, out var near))
+                    dsu.Union(id, near);
             }
+
+            representativeByHash.TryAdd(hash, id);
         }
 
         var fileById = candidates.ToDictionary(c => c.File.Id, c => c.File);

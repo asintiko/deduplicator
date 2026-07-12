@@ -28,6 +28,11 @@ public interface IFileOpsService
     bool ReplaceWithHardLink(FileRecord duplicate, string duplicatePath, string representativePath, long? groupId);
 
     string QuarantineDir { get; }
+
+    /// <summary>Сменить папку карантина на лету (из настроек, без перезапуска). Пустое значение
+    /// игнорируется. Уже перемещённые файлы не трогаются — их путь хранится в журнале абсолютным,
+    /// поэтому восстановление старых операций продолжает работать.</summary>
+    void Reconfigure(string quarantineDir);
 }
 
 /// <summary>Перемещение в корзину/карантин, журнал операций и восстановление.</summary>
@@ -38,8 +43,10 @@ public sealed class FileOpsService : IFileOpsService
     private readonly GroupRepository _groups;
     private readonly IHashService _hash;
     private readonly object _quarantineLock = new();
+    private string _quarantineDir;
 
-    public string QuarantineDir { get; }
+    /// <summary>Текущая папка карантина (может меняться из настроек — см. <see cref="Reconfigure"/>).</summary>
+    public string QuarantineDir { get { lock (_quarantineLock) { return _quarantineDir; } } }
 
     public FileOpsService(OperationLogRepository log, FileRepository files, GroupRepository groups,
         IHashService hash, string quarantineDir)
@@ -48,8 +55,17 @@ public sealed class FileOpsService : IFileOpsService
         _files = files;
         _groups = groups;
         _hash = hash;
-        QuarantineDir = quarantineDir;
+        _quarantineDir = quarantineDir;
         Directory.CreateDirectory(quarantineDir);
+    }
+
+    public void Reconfigure(string quarantineDir)
+    {
+        if (string.IsNullOrWhiteSpace(quarantineDir)) return;
+        lock (_quarantineLock) { _quarantineDir = quarantineDir; }
+        // Папку создадим сразу, чтобы «Обзор» указывал на готовое место; сбой не критичен —
+        // каталог всё равно создаётся перед первым перемещением.
+        try { Directory.CreateDirectory(quarantineDir); } catch { /* создастся при удалении */ }
     }
 
     public bool Delete(FileRecord file, string fullPath, bool useRecycleBin, long? groupId)

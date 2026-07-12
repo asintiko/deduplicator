@@ -8,6 +8,7 @@ using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.Styling;
+using Deduplicator.App.Infrastructure;
 
 namespace Deduplicator.App.Controls;
 
@@ -58,13 +59,21 @@ public partial class AnimatedLogo : UserControl
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        MotionPreferences.Changed += OnMotionPreferencesChanged;
         UpdateAnimationState();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        MotionPreferences.Changed -= OnMotionPreferencesChanged;
         base.OnDetachedFromVisualTree(e);
         StopAnimations();
+    }
+
+    private void OnMotionPreferencesChanged()
+    {
+        StopAnimations();
+        UpdateAnimationState();
     }
 
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
@@ -82,6 +91,11 @@ public partial class AnimatedLogo : UserControl
     private void StartAnimations()
     {
         if (_cts is not null) return; // уже крутится
+        if (!MotionPreferences.AnimationsEnabled)
+        {
+            ApplyStaticPose();
+            return;
+        }
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
@@ -170,6 +184,18 @@ public partial class AnimatedLogo : UserControl
         _cts?.Cancel();
         _cts?.Dispose();
         _cts = null; // при отмене Avalonia возвращает свойствам базовые значения
+    }
+
+    private void ApplyStaticPose()
+    {
+        if (_front?.RenderTransform is Rotate3DTransform front) front.AngleY = 0;
+        if (_back?.RenderTransform is Rotate3DTransform back) back.AngleY = 0;
+        if (_pulseRoot?.RenderTransform is ScaleTransform scale)
+        {
+            scale.ScaleX = 1;
+            scale.ScaleY = 1;
+        }
+        if (_glow is not null) _glow.Opacity = 0.62;
     }
 
     /// <summary>Бесконечная анимация: задача завершается только отменой — глотаем и её, и сбои.

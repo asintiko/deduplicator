@@ -1,11 +1,11 @@
 ; Installer for Deduplicator (NSIS). Self-contained build — no .NET runtime required on the client.
 ; Compile:
-;   makensis /DPUBDIR=<publish folder> /DOUTFILE=<setup .exe> /DICON=<app.ico> /DVERSION=1.0.0 Deduplicator.nsi
+;   makensis /DPUBDIR=<publish folder> /DOUTFILE=<setup .exe> /DICON=<app.ico> /DVERSION=<version> Deduplicator.nsi
 
 Unicode true
 
 !ifndef VERSION
-  !define VERSION "1.0.0"
+  !error "VERSION is required; use scripts/build-installer.ps1"
 !endif
 !ifndef PUBDIR
   !define PUBDIR "publish"
@@ -47,7 +47,9 @@ UninstPage instfiles
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "${PUBDIR}\*.*"
+  ; The portable marker redirects writable data next to the executable and must never
+  ; be installed under Program Files. The build script rejects it; /x is a second guard.
+  File /r /x "Deduplicator.portable" "${PUBDIR}\*.*"
 
   ; Start Menu + Desktop shortcuts
   CreateDirectory "$SMPROGRAMS\${APPNAME}"

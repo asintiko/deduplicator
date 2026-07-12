@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Deduplicator.Core.Data;
 using Deduplicator.Core.Engine;
 using Deduplicator.Core.Hashing;
@@ -84,9 +85,13 @@ public sealed class PortableIndexService : IPortableIndexService
     /// <summary>Кап записей: у гигантских томов кэш не пишем и не читаем (защита от многосот-МБ
     /// файла на флешке и от подложного файла, раздувающего память при импорте).</summary>
     public const int MaxEntries = 500_000;
+    public const long MaxCompressedBytes = 96L * 1024 * 1024;
+    public const long MaxUncompressedBytes = 192L * 1024 * 1024;
 
     // Страница потоковой выгрузки (keyset по id): весь том в память не материализуется.
     private const int ExportPage = 2000;
+
+    private static readonly JsonSerializerOptions ImportJsonOptions = CreateImportJsonOptions();
 
     private readonly VolumeRepository _volumes;
     private readonly FileRepository _files;
@@ -204,6 +209,13 @@ public sealed class PortableIndexService : IPortableIndexService
         {
             var path = Path.Combine(mountRoot, FileName);
             if (!File.Exists(LongPath.Fix(path))) return null; // нет файла — обычный случай, без лога
+            var compressedLength = new FileInfo(LongPath.Fix(path)).Length;
+            if (compressedLength > MaxCompressedBytes)
+            {
+                AppLog.Write($"Переносимый кэш {path}: сжатый файл {compressedLength:N0} байт больше лимита " +
+                             $"{MaxCompressedBytes:N0} — импорт отклонён.");
+                return null;
+            }
 
             var serial = _volumes.GetById(volumeId)?.Serial;
             if (string.IsNullOrWhiteSpace(serial))
@@ -216,7 +228,8 @@ public sealed class PortableIndexService : IPortableIndexService
             using (var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read,
                        FileShare.ReadWrite | FileShare.Delete))
             using (var gz = new GZipStream(fs, CompressionMode.Decompress))
-                doc = JsonSerializer.Deserialize<PortableIndexDocument>(gz);
+            using (var bounded = new BoundedReadStream(gz, MaxUncompressedBytes))
+                doc = JsonSerializer.Deserialize<PortableIndexDocument>(bounded, ImportJsonOptions);
 
             var header = doc?.Header;
             if (header is null || doc!.Entries is null)
@@ -311,4 +324,91 @@ public sealed class PortableIndexService : IPortableIndexService
         Sharpness = f.Sharpness,
         VerifiedFullHash = f.VerifiedFullHash
     };
+
+    private static JsonSerializerOptions CreateImportJsonOptions()
+    {
+        var options = new JsonSerializerOptions();
+        options.Converters.Add(new CappedEntryListConverter());
+        return options;
+    }
+
+    /// <summary>
+    /// Стандартный List-конвертер узнаёт о превышении лимита только после материализации всего JSON.
+    /// Этот вариант прекращает разбор сразу на MaxEntries+1, поэтому подложный кэш не может создать
+    /// неограниченный список объектов даже при маленьком сжатом файле.
+    /// </summary>
+    private sealed class CappedEntryListConverter : JsonConverter<List<PortableIndexEntry>>
+    {
+        public override List<PortableIndexEntry> Read(ref Utf8JsonReader reader, Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartArray)
+                throw new JsonException("Entries must be an array.");
+
+            var result = new List<PortableIndexEntry>(Math.Min(MaxEntries, 4096));
+            while (reader.Read())
+            {
+                if (reader.TokenType == JsonTokenType.EndArray) return result;
+                if (result.Count >= MaxEntries)
+                    throw new JsonException($"Portable index contains more than {MaxEntries} entries.");
+                var entry = JsonSerializer.Deserialize<PortableIndexEntry>(ref reader, options)
+                            ?? throw new JsonException("Null portable index entry.");
+                result.Add(entry);
+            }
+            throw new JsonException("Unexpected end of portable index entries.");
+        }
+
+        public override void Write(Utf8JsonWriter writer, List<PortableIndexEntry> value,
+            JsonSerializerOptions options) => throw new NotSupportedException();
+    }
+
+    /// <summary>Ограничивает именно распакованный поток, защищая от gzip/decompression bomb.</summary>
+    private sealed class BoundedReadStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _limit;
+        private long _read;
+
+        public BoundedReadStream(Stream inner, long limit)
+        {
+            _inner = inner;
+            _limit = limit;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_read >= _limit)
+            {
+                if (_inner.ReadByte() < 0) return 0;
+                throw new InvalidDataException($"Decompressed portable index exceeds {_limit:N0} bytes.");
+            }
+            int allowed = (int)Math.Min(count, _limit - _read);
+            int read = _inner.Read(buffer, offset, allowed);
+            _read += read;
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (_read >= _limit)
+            {
+                if (_inner.ReadByte() < 0) return 0;
+                throw new InvalidDataException($"Decompressed portable index exceeds {_limit:N0} bytes.");
+            }
+            int allowed = (int)Math.Min(buffer.Length, _limit - _read);
+            int read = _inner.Read(buffer[..allowed]);
+            _read += read;
+            return read;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _read; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

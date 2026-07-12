@@ -30,14 +30,17 @@ public partial class ExplorerNode : ObservableObject
 
     [ObservableProperty] private bool _isExpanded;
 
-    /// <summary>Включить ленивую подгрузку детей (для живого обхода диска).</summary>
-    public void EnableLazyLoading(Func<ExplorerNode, Task> loader)
+    /// <summary>
+    /// Включить ленивую подгрузку детей. Для живой папки наличие детей можно быстро проверить в ФС;
+    /// для сохранённого индекса вызывающая сторона уже знает, что папка выведена из пути потомка.
+    /// </summary>
+    public void EnableLazyLoading(Func<ExplorerNode, Task> loader, bool? hasChildren = null)
     {
         _lazyLoader = loader;
         _loaded = false;
         // Заглушка (и стрелка раскрытия) — только если внутри реально что-то есть.
         // Пустые и недоступные папки не показывают «ложный» треугольник.
-        if (HasAnyChild())
+        if (hasChildren ?? HasAnyChild())
             Children.Add(new ExplorerNode { Name = "…" });
     }
 
@@ -81,6 +84,8 @@ public partial class ExplorerNode : ObservableObject
     }
 
     public string SizeText => IsFolder ? "" : Format.Bytes(Size);
+    /// <summary>Подпись под плиткой значков: «Папка» для каталогов, размер — для файлов.</summary>
+    public string SizeOrKind => IsFolder ? "Папка" : Format.Bytes(Size);
     public string ModifiedText => IsFolder ? "" : Format.DateShort(Modified);
     public string CreatedText => IsFolder ? "" : Format.DateShort(Created == default ? Modified : Created);
     public string CategoryText => IsFolder ? "" : Strings.Category(Category);
@@ -94,12 +99,31 @@ public partial class ExplorerNode : ObservableObject
         _ => "IconFile"
     });
 
+    /// <summary>Цвет иконки: папки — акцентные (сразу выделяются), файлы — по типу (спокойная палитра).</summary>
+    public IBrush? IconBrush => ResourceBrush(IsFolder ? "AccentBrush" : Category switch
+    {
+        FileCategory.Image => "AccentBrush",
+        FileCategory.Audio => "PurpleBrush",
+        FileCategory.Video => "WarningBrush",
+        FileCategory.Document => "IndigoBrush",
+        _ => "TextTertiary"
+    });
+
     private static Geometry? ResourceGeometry(string key)
     {
         if (Application.Current is { } app &&
             app.TryGetResource(key, app.ActualThemeVariant, out var value) &&
             value is Geometry g)
             return g;
+        return null;
+    }
+
+    private static IBrush? ResourceBrush(string key)
+    {
+        if (Application.Current is { } app &&
+            app.TryGetResource(key, app.ActualThemeVariant, out var value) &&
+            value is IBrush b)
+            return b;
         return null;
     }
 }

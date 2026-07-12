@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Deduplicator.Core.Util;
 
 namespace Deduplicator.Core.Audio;
 
@@ -20,11 +21,26 @@ public interface IAudioMatchService
 /// <summary>Интеграция с Chromaprint через внешний fpcalc.exe (AcoustID).</summary>
 public sealed class AudioMatchService : IAudioMatchService
 {
-    private string? _fpcalcPath;
+    internal static readonly TimeSpan DefaultPerFileTimeout = TimeSpan.FromMinutes(2);
 
-    public AudioMatchService(string? configuredPath = null)
+    private string? _fpcalcPath;
+    private readonly TimeSpan _perFileTimeout;
+    private readonly Func<string, string, ProcessStartInfo> _startInfoFactory;
+
+    public AudioMatchService(string? configuredPath = null, TimeSpan? perFileTimeout = null)
+        : this(configuredPath, perFileTimeout ?? DefaultPerFileTimeout, CreateStartInfo)
     {
+    }
+
+    internal AudioMatchService(string? configuredPath, TimeSpan perFileTimeout,
+        Func<string, string, ProcessStartInfo> startInfoFactory)
+    {
+        if (perFileTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(perFileTimeout));
+
         _fpcalcPath = ResolveFpcalc(configuredPath);
+        _perFileTimeout = perFileTimeout;
+        _startInfoFactory = startInfoFactory ?? throw new ArgumentNullException(nameof(startInfoFactory));
     }
 
     public bool IsAvailable => _fpcalcPath is not null && File.Exists(_fpcalcPath);
@@ -35,47 +51,129 @@ public sealed class AudioMatchService : IAudioMatchService
     public byte[]? ComputeFingerprint(string fullPath, CancellationToken ct = default)
     {
         if (!IsAvailable) return null;
+        ct.ThrowIfCancellationRequested();
+
+        Process? process = null;
         try
         {
-            var psi = new ProcessStartInfo
+            var psi = _startInfoFactory(_fpcalcPath!, fullPath);
+            process = Process.Start(psi);
+            if (process is null)
             {
-                FileName = _fpcalcPath!,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            psi.ArgumentList.Add("-raw");
-            psi.ArgumentList.Add("-length");
-            psi.ArgumentList.Add("120");
-            psi.ArgumentList.Add(fullPath);
+                AppLog.Write("WARN AudioMatch fpcalc could not be started");
+                return null;
+            }
 
-            using var p = Process.Start(psi);
-            if (p is null) return null;
-
+            using var timeout = new CancellationTokenSource(_perFileTimeout);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             // Читаем stdout и stderr параллельно, чтобы не было взаимоблокировки при
-            // переполнении буфера одного из потоков.
-            var stdoutTask = p.StandardOutput.ReadToEndAsync();
-            var stderrTask = p.StandardError.ReadToEndAsync();
-
-            // Ждём с учётом отмены.
-            while (!p.WaitForExit(200))
+            // переполнении буфера одного из потоков. В памяти держим только ограниченный префикс:
+            // повреждённый/подменённый декодер не должен раздувать процесс гигабайтами вывода.
+            var stdoutTask = ReadBoundedAsync(process.StandardOutput, 4 * 1024 * 1024, linked.Token);
+            var stderrTask = ReadBoundedAsync(process.StandardError, 64 * 1024, linked.Token);
+            try
             {
-                if (ct.IsCancellationRequested)
-                {
-                    try { p.Kill(entireProcessTree: true); } catch { }
-                    ct.ThrowIfCancellationRequested();
-                }
+                process.WaitForExitAsync(linked.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                TerminateProcessTree(process);
+                DrainAfterTermination(stdoutTask, stderrTask);
+                AppLog.Write($"WARN AudioMatch fpcalc timed out after {_perFileTimeout.TotalSeconds:N0} seconds");
+                return null;
+            }
+            catch (OperationCanceledException)
+            {
+                TerminateProcessTree(process);
+                DrainAfterTermination(stdoutTask, stderrTask);
+                AppLog.Write("INFO AudioMatch fpcalc cancelled; process tree terminated");
+                throw;
             }
 
             string output = stdoutTask.GetAwaiter().GetResult();
-            _ = stderrTask.GetAwaiter().GetResult();
+            string error = stderrTask.GetAwaiter().GetResult();
 
-            if (p.ExitCode != 0) return null;
-            return ParseFingerprint(output);
+            if (process.ExitCode != 0)
+            {
+                AppLog.Write($"WARN AudioMatch fpcalc exited with code {process.ExitCode}: {ForLog(error)}");
+                return null;
+            }
+            var fingerprint = ParseFingerprint(output);
+            if (fingerprint is null)
+                AppLog.Write("WARN AudioMatch fpcalc returned no valid fingerprint");
+            return fingerprint;
         }
         catch (OperationCanceledException) { throw; }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            AppLog.Error("AudioMatch.ComputeFingerprint", ex);
+            return null;
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static ProcessStartInfo CreateStartInfo(string executablePath, string fullPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        psi.ArgumentList.Add("-raw");
+        psi.ArgumentList.Add("-length");
+        psi.ArgumentList.Add("120");
+        psi.ArgumentList.Add(fullPath);
+        return psi;
+    }
+
+    private static void TerminateProcessTree(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("AudioMatch.TerminateFpcalc", ex);
+        }
+
+        try { process.WaitForExit(5_000); }
+        catch { /* best effort: the original timeout/cancellation must still complete */ }
+    }
+
+    private static void DrainAfterTermination(Task<string> stdoutTask, Task<string> stderrTask)
+    {
+        try { Task.WaitAll([stdoutTask, stderrTask], TimeSpan.FromSeconds(5)); }
+        catch { /* readers are diagnostic only after the process has been terminated */ }
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, int retainedCharacters,
+        CancellationToken ct)
+    {
+        var output = new System.Text.StringBuilder(Math.Min(retainedCharacters, 16 * 1024));
+        var buffer = new char[8 * 1024];
+        while (true)
+        {
+            int read = await reader.ReadAsync(buffer.AsMemory(), ct);
+            if (read == 0) return output.ToString();
+            int keep = Math.Min(read, retainedCharacters - output.Length);
+            if (keep > 0) output.Append(buffer, 0, keep);
+            // После достижения лимита поток всё равно дренируется, иначе дочерний процесс может
+            // заблокироваться на заполненном pipe и никогда не завершиться.
+        }
+    }
+
+    private static string ForLog(string value)
+    {
+        const int maxLength = 512;
+        var trimmed = value.Trim();
+        return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength] + "…";
     }
 
     private static byte[]? ParseFingerprint(string output)

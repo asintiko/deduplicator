@@ -13,11 +13,18 @@ using Deduplicator.Core.Services;
 
 namespace Deduplicator.Core.Tests;
 
+[CollectionDefinition(AppLogSensitiveCollection.Name, DisableParallelization = true)]
+public sealed class AppLogSensitiveCollection
+{
+    public const string Name = "AppLog-sensitive tests";
+}
+
 /// <summary>
 /// Правки по аудиту projact(7): сохранение прошлых завершённых результатов при отмене/сбое,
 /// scope-aware перцептивные запросы, постраничная выдача похожих групп, гарантия различения
 /// «тот же размер — другое содержимое» полным хэшем (основа ревалидации удаления P0.1).
 /// </summary>
+[Collection(AppLogSensitiveCollection.Name)]
 public class Sprint11Projact7Tests : IDisposable
 {
     private readonly string _dir;

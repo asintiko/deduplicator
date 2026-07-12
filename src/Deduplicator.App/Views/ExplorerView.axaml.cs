@@ -95,6 +95,12 @@ public partial class ExplorerView : UserControl
             this.FindControl<ListBox>("IconsList")?.Selection.Clear();
             this.FindControl<ListBox>("RowsList")?.Selection.Clear();
         }
+        if (e.PropertyName == nameof(ExplorerViewModel.ShowTransferConfirm) && _vm?.ShowTransferConfirm == true)
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                this.FindControl<Button>("TransferCancelButton")?.Focus());
+        if (e.PropertyName == nameof(ExplorerViewModel.IsTransferring) && _vm?.IsTransferring == true)
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                this.FindControl<Button>("TransferProgressCancelButton")?.Focus());
     }
 
     /// <summary>Новая колонка Миллера — прокручиваем панораму вправо, чтобы её было видно.</summary>

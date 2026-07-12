@@ -441,6 +441,31 @@ public class Sprint22PortableIndexTests : IDisposable
         Assert.Null(svc.TryImport(vid, mount));
     }
 
+    [Fact]
+    public void Import_rejects_decompression_bomb_before_materializing_json()
+    {
+        var mount = NewMount("usb_bomb");
+        var db = new Database(Path.Combine(_root, "bomb.db"));
+        db.Initialize();
+        var volumes = new VolumeRepository(db);
+        var files = new FileRepository(db);
+        long vid = volumes.Upsert(new VolumeRecord { Serial = "USB-BOMB", Label = "t" });
+        var svc = new PortableIndexService(volumes, files);
+        var path = Path.Combine(mount, PortableIndexService.FileName);
+
+        // Валидный для JSON whitespace, который раздувается далеко за лимит. Физический gzip
+        // остаётся маленьким, поэтому тест действительно проверяет распакованный, а не файловый кап.
+        var block = Enumerable.Repeat((byte)' ', 1024 * 1024).ToArray();
+        using (var fs = File.Create(path))
+        using (var gzip = new GZipStream(fs, CompressionLevel.SmallestSize))
+        {
+            int blocks = checked((int)(PortableIndexService.MaxUncompressedBytes / block.Length) + 1);
+            for (int i = 0; i < blocks; i++) gzip.Write(block);
+        }
+
+        Assert.Null(svc.TryImport(vid, mount));
+    }
+
     // ---------------- (е) Изменённый файл (другой mtime) не переиспользуется из кэша ----------------
 
     [Fact]

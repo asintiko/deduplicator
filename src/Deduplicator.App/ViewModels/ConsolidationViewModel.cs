@@ -48,6 +48,8 @@ public partial class ConsolidationViewModel : PageViewModel
     [ObservableProperty] private double _execProgress;
     [ObservableProperty] private string? _execCurrent;
     [ObservableProperty] private string? _reportText;
+    [ObservableProperty] private bool _isLoadingSources;
+    [ObservableProperty] private string? _sourceLoadError;
 
     private ConsolidationPlan? _plan;
 
@@ -64,11 +66,29 @@ public partial class ConsolidationViewModel : PageViewModel
 
     public override void OnNavigatedTo() => _ = LoadVolumesAsync();
 
+    [RelayCommand]
     private async Task LoadVolumesAsync()
     {
-        var catalog = await Task.Run(() => _volumes.SyncAndGetCatalog());
-        Sources.Clear();
-        foreach (var v in catalog) Sources.Add(new VolumeCheckItem(v));
+        if (IsLoadingSources) return;
+        IsLoadingSources = true;
+        SourceLoadError = null;
+
+        try
+        {
+            var catalog = await Task.Run(() => _volumes.SyncAndGetCatalog());
+            Sources.Clear();
+            foreach (var v in catalog) Sources.Add(new VolumeCheckItem(v));
+        }
+        catch (Exception ex)
+        {
+            SourceLoadError = UserFacingError.Describe(ex,
+                "Не удалось загрузить список дисков. Проверьте подключение и нажмите «Повторить».");
+            Deduplicator.Core.Util.AppLog.Error("Consolidation.LoadVolumes", ex);
+        }
+        finally
+        {
+            IsLoadingSources = false;
+        }
     }
 
     [RelayCommand]
@@ -174,7 +194,8 @@ public partial class ConsolidationViewModel : PageViewModel
         }
         catch (Exception ex)
         {
-            ReportText = $"{Strings.FailedItems}: {ex.Message}";
+            ReportText = UserFacingError.Describe(ex, "Не удалось выполнить план. Исходные файлы сохранены.");
+            Deduplicator.Core.Util.AppLog.Error("Consolidation.Execute", ex);
         }
         finally
         {

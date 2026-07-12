@@ -19,6 +19,13 @@ public class MigrationTests : IDisposable
         db.Initialize();
         db.Initialize(); // повторно — не должно бросать (миграция применяется только при отсутствии колонки)
 
+        using (var conn = db.Open())
+        using (var version = conn.CreateCommand())
+        {
+            version.CommandText = "PRAGMA user_version";
+            Assert.Equal(Database.CurrentSchemaVersion, Convert.ToInt32(version.ExecuteScalar()));
+        }
+
         var volumes = new VolumeRepository(db);
         var files = new FileRepository(db);
 
@@ -105,6 +112,9 @@ public class MigrationTests : IDisposable
         var db = new Database(path);
         db.Initialize();
 
+        Assert.NotNull(db.LastMigrationBackupPath);
+        Assert.True(File.Exists(db.LastMigrationBackupPath), "Перед обновлением legacy-БД должен быть создан backup");
+
         var volumes = new VolumeRepository(db);
         var rows = volumes.GetAll().Where(v => v.Serial == "DUP-XYZ").ToList();
         Assert.Single(rows);                       // дубликат схлопнут
@@ -114,6 +124,32 @@ public class MigrationTests : IDisposable
         db.Initialize();
         volumes.Upsert(new VolumeRecord { Serial = "DUP-XYZ", Label = "Disk" });
         Assert.Single(volumes.GetAll().Where(v => v.Serial == "DUP-XYZ"));
+    }
+
+    [Fact]
+    public void Initialize_rejects_database_from_newer_application_without_rewriting_it()
+    {
+        var path = Path.Combine(_dir, "future.db");
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"CREATE TABLE sentinel(value TEXT); " +
+                              "INSERT INTO sentinel VALUES('keep'); " +
+                              $"PRAGMA user_version={Database.CurrentSchemaVersion + 1};";
+            cmd.ExecuteNonQuery();
+        }
+
+        var db = new Database(path);
+        var error = Assert.Throws<InvalidOperationException>(db.Initialize);
+        Assert.Contains("более новой версией", error.Message);
+        Assert.Null(db.LastMigrationBackupPath);
+
+        using var verify = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}");
+        verify.Open();
+        using var read = verify.CreateCommand();
+        read.CommandText = "SELECT value FROM sentinel";
+        Assert.Equal("keep", read.ExecuteScalar());
     }
 
     public void Dispose()

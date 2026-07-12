@@ -154,12 +154,23 @@ public static class UsnDeltaReader
         List<UsnDeltaRecord> records, out long nextCursor, out string? anomalyReason)
     {
         anomalyReason = null;
-        nextCursor = length >= 8 ? BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(0, 8)) : 0;
-
-        var span = buffer.AsSpan(0, Math.Min(length, buffer.Length));
-        int offset = 8;
-        while (UsnRecordParser.TryParse(span, offset, out var rec))
+        if (length < 8 || length > buffer.Length)
         {
+            nextCursor = 0;
+            anomalyReason = "журнал вернул некорректную длину буфера";
+            return false;
+        }
+        nextCursor = BinaryPrimitives.ReadInt64LittleEndian(buffer.AsSpan(0, 8));
+
+        var span = buffer.AsSpan(0, length);
+        int offset = 8;
+        while (offset < span.Length)
+        {
+            if (!UsnRecordParser.TryParse(span, offset, out var rec))
+            {
+                anomalyReason = $"неполная или повреждённая запись журнала по смещению {offset}";
+                return false;
+            }
             if (rec.Major != 2)
             {
                 anomalyReason = $"запись журнала неподдерживаемой версии V{rec.Major} — точечный реконсайл невозможен";
@@ -181,7 +192,7 @@ public static class UsnDeltaReader
             }
             offset += rec.Length;
         }
-        return true;
+        return offset == span.Length;
     }
 
     /// <summary>

@@ -63,6 +63,7 @@ public partial class ResultsViewModel : PageViewModel
     private bool _imageBuilt, _audioBuilt;
     private string[] _referenceFolders = Array.Empty<string>();
     private bool _isLoading;
+    private bool _loadErrorVisible;
 
     /// <summary>Сколько групп показываем за раз (первая страница + «Показать ещё») — ТЗ MVP.</summary>
     private const int PageSize = 100;
@@ -71,6 +72,9 @@ public partial class ResultsViewModel : PageViewModel
     [ObservableProperty] private bool _canShowMoreSimilarAudio;
     // Текст индикатора загрузки (по умолчанию «Загрузка…»; на ревалидации удаления — отдельное сообщение).
     [ObservableProperty] private string _busyStatus = Strings.Loading;
+    [ObservableProperty] private string? _busySubText;
+    private CancellationTokenSource? _busyOperationCts;
+    private Stopwatch? _busyOperationStopwatch;
 
     /// <summary>Устанавливается представлением — выбор файла для сохранения отчёта.</summary>
     public Func<string, Task<string?>>? PickSaveFile { get; set; }
@@ -124,6 +128,11 @@ public partial class ResultsViewModel : PageViewModel
     [ObservableProperty] private string _freeUpGbText = "5";
 
     public string ManualHint => Strings.SimilarManualHint;
+    public bool IsExactTab => SelectedTab == 0;
+    public bool IsSimilarTab => SelectedTab != 0;
+    public string SelectionSafetyText => IsExactTab
+        ? "В каждой группе останется минимум одна копия"
+        : "Это похожие, а не одинаковые файлы — проверяйте вручную";
 
     public ResultsViewModel(GroupRepository groups, IVolumeService volumes, IImageMatchService thumbs,
         IFileOpsService fileOps, IHashService hash, ISettingsService settings, IBatchRenameService rename,
@@ -134,6 +143,10 @@ public partial class ResultsViewModel : PageViewModel
         _groups = groups;
         _volumes = volumes;
         _thumbs = thumbs;
+        // The comparison overlay is created even while hidden. Non-null inert items keep
+        // its deferred bindings quiet until a real pair is selected.
+        _viewerLeft = CreateViewerPlaceholder();
+        _viewerRight = CreateViewerPlaceholder();
         _fileOps = fileOps;
         _hash = hash;
         _settings = settings;
@@ -198,6 +211,7 @@ public partial class ResultsViewModel : PageViewModel
     public override void OnNavigatedFrom()
     {
         _isActive = false;
+        _busyOperationCts?.Cancel();
         ShowDeleteConfirm = false;
         ShowRenameDialog = false;
         ShowDistributeDialog = false;
@@ -211,13 +225,14 @@ public partial class ResultsViewModel : PageViewModel
     /// <summary>Просмотрщик тоже участвует: его Esc обрабатывается глобально (локальный хендлер
     /// вьюхи оставляет себе только стрелки ←/→).</summary>
     public override bool HasOpenDialog =>
-        ShowDeleteConfirm || ShowRenameDialog || ShowDistributeDialog || ShowHardlinkConfirm || ShowViewer;
+        IsBusy || ShowDeleteConfirm || ShowRenameDialog || ShowDistributeDialog || ShowHardlinkConfirm || ShowViewer;
 
     /// <summary>Esc закрывает верхний диалог. Одновременно открыт максимум один (кнопки других
     /// недоступны под оверлеем), порядок веток — на случай гонки состояний.</summary>
     public override void CloseDialog()
     {
-        if (ShowDeleteConfirm) CancelDelete();
+        if (IsBusy && CanCancelBusy()) CancelBusy();
+        else if (ShowDeleteConfirm) CancelDelete();
         else if (ShowRenameDialog) CancelRename();
         else if (ShowDistributeDialog) CancelDistribute();
         else if (ShowHardlinkConfirm) CancelHardlink();
@@ -229,12 +244,86 @@ public partial class ResultsViewModel : PageViewModel
     partial void OnShowDistributeDialogChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
     partial void OnShowHardlinkConfirmChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
     partial void OnShowViewerChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+    partial void OnIsBusyChanged(bool value) => OnPropertyChanged(nameof(HasOpenDialog));
+
+    private bool CanCancelBusy() => _busyOperationCts is { IsCancellationRequested: false };
+    public System.Windows.Input.ICommand? BusyCancelCommand => CanCancelBusy() ? CancelBusyCommand : null;
+
+    [RelayCommand(CanExecute = nameof(CanCancelBusy))]
+    private void CancelBusy()
+    {
+        if (_busyOperationCts is not { IsCancellationRequested: false } cts) return;
+        cts.Cancel();
+        BusyStatus = "Останавливаем операцию…";
+        BusySubText = "Текущий файл будет безопасно завершён";
+        CancelBusyCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(BusyCancelCommand));
+    }
+
+    private CancellationTokenSource BeginCancellableBusy(string status)
+    {
+        _busyOperationCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _busyOperationCts = cts;
+        _busyOperationStopwatch = Stopwatch.StartNew();
+        BusyStatus = status;
+        BusySubText = "Подготавливаем…";
+        IsBusy = true;
+        CancelBusyCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(BusyCancelCommand));
+        return cts;
+    }
+
+    private IProgress<TransferProgress> BusyProgress(CancellationTokenSource owner) =>
+        new Progress<TransferProgress>(p =>
+        {
+            if (!ReferenceEquals(_busyOperationCts, owner) || p.Total <= 0) return;
+            int done = Math.Clamp(p.Done, 0, p.Total);
+            double percent = done * 100.0 / p.Total;
+            var elapsed = _busyOperationStopwatch?.Elapsed ?? TimeSpan.Zero;
+            string eta = done > 0 && done < p.Total
+                ? " · осталось ~" + FormatShortDuration(TimeSpan.FromSeconds(
+                    elapsed.TotalSeconds / done * (p.Total - done)))
+                : "";
+            BusySubText = $"{done:N0} из {p.Total:N0} · {percent:0}%{eta}" +
+                          (string.IsNullOrWhiteSpace(p.CurrentName) ? "" : $"\n{p.CurrentName}");
+        });
+
+    private void EndCancellableBusy(CancellationTokenSource owner)
+    {
+        if (!ReferenceEquals(_busyOperationCts, owner)) return;
+        _busyOperationStopwatch?.Stop();
+        _busyOperationStopwatch = null;
+        _busyOperationCts = null;
+        owner.Dispose();
+        BusySubText = null;
+        IsBusy = false;
+        CancelBusyCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(BusyCancelCommand));
+    }
+
+    private static string FormatShortDuration(TimeSpan value)
+    {
+        if (value < TimeSpan.Zero) value = TimeSpan.Zero;
+        if (value.TotalHours >= 1) return $"{(int)value.TotalHours} ч {value.Minutes:00} мин";
+        if (value.TotalMinutes >= 1) return $"{(int)value.TotalMinutes} мин {value.Seconds:00} с";
+        return $"{Math.Max(0, value.Seconds)} с";
+    }
 
     [RelayCommand]
     private async Task LoadAsync()
     {
+        if (_isLoading || _busyOperationCts is not null) return;
         IsBusy = true;
         BusyStatus = Strings.Loading;
+        BusySubText = null;
+        // Стираем только ошибку ПРЕДЫДУЩЕЙ загрузки. Баннеры файловых операций должны пережить
+        // последующее обновление коллекций (это их подтверждение/квитанция для пользователя).
+        if (_loadErrorVisible)
+        {
+            OperationErrorText = null;
+            _loadErrorVisible = false;
+        }
         _isLoading = true;
         // Просмотрщик ссылается на VM файлов, которые ниже будут выброшены (Dispose миниатюр,
         // очистка коллекций) — закрываем и освобождаем его Bitmap-ы ДО перезагрузки.
@@ -308,12 +397,49 @@ public partial class ResultsViewModel : PageViewModel
             DeleteSelectedCommand.NotifyCanExecuteChanged();
             UpdateMarkedSummary();
         }
+        catch (Exception ex)
+        {
+            // LoadAsync вызывается из навигации и событий скана fire-and-forget. Поглощаем сбой
+            // здесь, чтобы Task не остался ненаблюдаемым, и убираем потенциально устаревшие
+            // карточки: после ошибки сопоставления томов действия над ними небезопасны.
+            AppLog.Error("Results.Load", ex);
+            OperationErrorText = UserFacingError.Describe(ex,
+                "Не удалось загрузить результаты. Проверьте подключение дисков и повторите.");
+            _loadErrorVisible = true;
+            try { ClearLoadedResultsAfterFailure(); }
+            catch (Exception cleanupEx) { AppLog.Error("Results.Load.Cleanup", cleanupEx); }
+        }
         finally
         {
             // Без этого блок «Загрузка…» оставался бы навсегда при сбое чтения БД/тома.
             _isLoading = false;
             IsBusy = false;
         }
+    }
+
+    private void ClearLoadedResultsAfterFailure()
+    {
+        DisposeGroupThumbnails(_allImage);
+        DisposeGroupThumbnails(_allAudio);
+        DisposeGroupThumbnails(ExactGroups);
+        _allImage.Clear();
+        _allAudio.Clear();
+        ExactGroups.Clear();
+        SimilarImageGroups.Clear();
+        SimilarAudioGroups.Clear();
+
+        _sessionFilter = null;
+        _exactTotal = _exactOffset = 0;
+        _imageTotal = _imageOffset = 0;
+        _audioTotal = _audioOffset = 0;
+        _imageBuilt = _audioBuilt = false;
+        CanShowMoreExact = CanShowMoreSimilarImages = CanShowMoreSimilarAudio = false;
+        ExactCountText = ImageCountText = AudioCountText = "0";
+        ExactEmpty = ImageEmpty = AudioEmpty = "Результаты временно недоступны.";
+        IsPreview = false;
+        PreviewBannerText = null;
+        DeleteSelectedCommand.NotifyCanExecuteChanged();
+        UpdateMarkedSummary();
     }
 
     private static void DisposeGroupThumbnails(IEnumerable<GroupItemViewModel> groups)
@@ -555,8 +681,14 @@ public partial class ResultsViewModel : PageViewModel
 
     private void RefilterImages()
     {
+        var visible = _allImage.Where(g => g.TopSimilarity >= ImageThreshold).ToList();
+        // Скрытая фильтром отметка опасна: пользователь больше не видит файл, но после обратного
+        // сдвига порога она внезапно возвращалась. При скрытии группы безопасно снимаем её выбор.
+        foreach (var g in _allImage.Except(visible))
+            foreach (var f in g.Files)
+                f.IsMarked = false;
         SimilarImageGroups.Clear();
-        foreach (var g in _allImage.Where(g => g.TopSimilarity >= ImageThreshold))
+        foreach (var g in visible)
             SimilarImageGroups.Add(g);
         // Счётчик в заголовке — ВСЕГО найдено сканом (стабилен, как у точной вкладки), а не отфильтрованная
         // страница (ревью P7: иначе число «сколько найдено» молча падало бы при пейджинге/слайдере).
@@ -571,12 +703,17 @@ public partial class ResultsViewModel : PageViewModel
         DeleteSelectedCommand.NotifyCanExecuteChanged();
         RenameSelectedCommand.NotifyCanExecuteChanged();
         DistributeSelectedCommand.NotifyCanExecuteChanged();
+        UpdateMarkedSummary();
     }
 
     private void RefilterAudio()
     {
+        var visible = _allAudio.Where(g => g.TopSimilarity >= AudioThreshold).ToList();
+        foreach (var g in _allAudio.Except(visible))
+            foreach (var f in g.Files)
+                f.IsMarked = false;
         SimilarAudioGroups.Clear();
-        foreach (var g in _allAudio.Where(g => g.TopSimilarity >= AudioThreshold))
+        foreach (var g in visible)
             SimilarAudioGroups.Add(g);
         AudioEmpty = IsPreview ? PreviewSimilarPendingMessage
             : _audioTotal == 0 ? Strings.NoGroups
@@ -585,6 +722,7 @@ public partial class ResultsViewModel : PageViewModel
         DeleteSelectedCommand.NotifyCanExecuteChanged();
         RenameSelectedCommand.NotifyCanExecuteChanged();
         DistributeSelectedCommand.NotifyCanExecuteChanged();
+        UpdateMarkedSummary();
     }
 
     private IReadOnlyList<GroupItemViewModel> CurrentGroups() => SelectedTab switch
@@ -634,6 +772,9 @@ public partial class ResultsViewModel : PageViewModel
 
     partial void OnSelectedTabChanged(int value)
     {
+        OnPropertyChanged(nameof(IsExactTab));
+        OnPropertyChanged(nameof(IsSimilarTab));
+        OnPropertyChanged(nameof(SelectionSafetyText));
         DeleteSelectedCommand.NotifyCanExecuteChanged();
         RenameSelectedCommand.NotifyCanExecuteChanged();
         DistributeSelectedCommand.NotifyCanExecuteChanged();
@@ -740,8 +881,6 @@ public partial class ResultsViewModel : PageViewModel
             return;
         }
         ShowDeleteConfirm = false;
-        IsBusy = true;
-        BusyStatus = "Проверяем выбранные файлы перед перемещением...";
         bool useRecycle = _settings.Current.UseRecycleBin;
 
         OperationErrorText = null; OperationSuccessText = null;
@@ -753,30 +892,49 @@ public partial class ResultsViewModel : PageViewModel
             .Where(x => x.file.CanMark)
             .Where(x => !x.file.IsRepresentative) // эталон не удаляем никогда
             .ToList();
+        if (toDelete.Count == 0) return;
 
         int moved = 0, failed = 0, blocked = 0, missing = 0;
-        await Task.Run(() =>
+        bool cancelled = false;
+        var busy = BeginCancellableBusy("Проверяем и перемещаем выбранные файлы…");
+        var progress = BusyProgress(busy);
+        try
         {
-            foreach (var (group, file) in toDelete)
+            await Task.Run(() =>
             {
-                // P0.1: ПОЛНАЯ ПРОВЕРКА НА МОМЕНТ ДЕЙСТВИЯ — между сканом и удалением файл могли заменить,
-                // переместить или изменить (в т.ч. на содержимое ТОГО ЖЕ размера). Сверяем размер + время,
-                // а для точных/видео-групп — пересчитанный полный хэш. Не прошёл проверку — НЕ трогаем.
-                switch (RevalidateBeforeDelete(group, file))
+                for (int i = 0; i < toDelete.Count; i++)
                 {
-                    case RevalidateResult.Missing: missing++; continue; // файла нет (диск отключён?) — не «изменился»
-                    case RevalidateResult.Changed: blocked++; continue;
-                }
+                    busy.Token.ThrowIfCancellationRequested();
+                    var (group, file) = toDelete[i];
+                    try
+                    {
+                        // P0.1: ПОЛНАЯ ПРОВЕРКА НА МОМЕНТ ДЕЙСТВИЯ — между сканом и удалением файл могли заменить,
+                        // переместить или изменить (в т.ч. на содержимое ТОГО ЖЕ размера). Сверяем размер + время,
+                        // а для точных/видео-групп — пересчитанный полный хэш. Не прошёл проверку — НЕ трогаем.
+                        switch (RevalidateBeforeDelete(group, file))
+                        {
+                            case RevalidateResult.Missing: missing++; continue;
+                            case RevalidateResult.Changed: blocked++; continue;
+                        }
 
-                if (_fileOps.Delete(file.Model, file.FullPath!, useRecycle, group.Model.Id)) moved++;
-                else failed++;
-            }
-        });
+                        if (_fileOps.Delete(file.Model, file.FullPath!, useRecycle, group.Model.Id)) moved++;
+                        else failed++;
+                    }
+                    finally
+                    {
+                        progress.Report(new TransferProgress(i + 1, toDelete.Count, file.Model.Name));
+                    }
+                }
+            });
+        }
+        catch (OperationCanceledException) { cancelled = true; }
+        finally { EndCancellableBusy(busy); }
 
         string destDone = useRecycle ? "в Корзину" : "в карантин";
-        if (blocked > 0 || failed > 0 || missing > 0)
+        if (cancelled || blocked > 0 || failed > 0 || missing > 0)
         {
             var msg = $"Перемещено {destDone}: {moved}.";
+            if (cancelled) msg += " Операция остановлена по вашему запросу; остальные файлы не тронуты.";
             // Ночь-1: выдернутый диск — не «сбой»: файлы недоступны, но ничего не потеряно.
             if (missing > 0)
                 msg += $" Недоступно — возможно, диск отключён (эти файлы не тронуты): {missing}.";
@@ -790,7 +948,7 @@ public partial class ResultsViewModel : PageViewModel
                 ? $"Перемещено в Корзину: {moved}. Восстановить можно из Корзины Windows."
                 : $"Перемещено в карантин: {moved}. Отменить можно в разделе «История».";
 
-        await LoadAsync();
+        if (_isActive) await LoadAsync();
     }
 
     /// <summary>Итог ревалидации перед удалением: Ok — можно удалять; Missing — файла уже нет
@@ -966,21 +1124,40 @@ public partial class ResultsViewModel : PageViewModel
         if (IsPreview) { ShowDistributeDialog = false; OperationErrorText = PreviewActionBlockedMessage; return; }
         if (string.IsNullOrWhiteSpace(DistributeDestination)) return;
         ShowDistributeDialog = false;
-        IsBusy = true;
+        bool copyMode = DistributeCopyMode;
         var req = new DistributionRequest(_distributeSources, DistributeDestination!,
-            DistributeCopyMode ? DistributionMode.CopyFiles : DistributionMode.ReportOnly);
-        var result = await Task.Run(() =>
+            copyMode ? DistributionMode.CopyFiles : DistributionMode.ReportOnly);
+        var busy = BeginCancellableBusy(copyMode ? "Копируем файлы…" : "Создаём отчёт…");
+        DistributionResult? result = null;
+        try
         {
-            var plan = _distribute.BuildPlan(req);
-            return _distribute.Execute(plan, req, default);
-        });
-        IsBusy = false;
+            var progress = BusyProgress(busy);
+            result = await Task.Run(() =>
+            {
+                var plan = _distribute.BuildPlan(req);
+                return _distribute.Execute(plan, req, busy.Token, progress);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            OperationErrorText = "Операция остановлена. Уже созданные копии сохранены, оригиналы не тронуты.";
+            return;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Results.Distribute", ex);
+            OperationErrorText = UserFacingError.Describe(ex,
+                "Распределение не удалось. Проверьте папку назначения и свободное место.");
+            return;
+        }
+        finally { EndCancellableBusy(busy); }
+        if (result is null) return;
         if (result.Error is not null)
             // Часть работы могла быть сделана (файлы скопированы, но отчёт не записался) — не теряем это.
             OperationErrorText = result.Copied > 0
                 ? $"Скопировано: {result.Copied}, но {result.Error}"
                 : $"Распределение не удалось: {result.Error}";
-        else if (DistributeCopyMode)
+        else if (copyMode)
         {
             var msg = $"Скопировано: {result.Copied}";
             // Ночь-1: исчезнувший источник (диск отключён) отделяем от прочих сбоев копирования.
@@ -1004,10 +1181,23 @@ public partial class ResultsViewModel : PageViewModel
         if (IsPreview) { ShowRenameDialog = false; OperationErrorText = PreviewActionBlockedMessage; return; }
         if (_renamePlanField is null || !_renamePlanField.CanExecute) return;
         ShowRenameDialog = false;
-        IsBusy = true;
         OperationErrorText = null; OperationSuccessText = null;
         var plan = _renamePlanField;
-        var result = await Task.Run(() => _rename.Execute(plan, default));
+        var busy = BeginCancellableBusy("Переименовываем файлы…");
+        BatchRenameResult result;
+        try
+        {
+            var progress = BusyProgress(busy);
+            result = await Task.Run(() => _rename.Execute(plan, busy.Token, progress));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("Results.Rename", ex);
+            OperationErrorText = UserFacingError.Describe(ex,
+                "Переименование не удалось. Исходные имена сохранены или будут восстановлены при следующем запуске.");
+            return;
+        }
+        finally { EndCancellableBusy(busy); }
 
         if (result.RolledBack)
         {
@@ -1018,7 +1208,7 @@ public partial class ResultsViewModel : PageViewModel
                        string.Join("\n", result.Orphans.Select(o =>
                            $"{o.CurrentPath}  →  исходное имя: {Path.GetFileName(o.OriginalPath)}"));
             OperationErrorText = msg;
-            await LoadAsync();
+            if (_isActive) await LoadAsync();
             return;
         }
 
@@ -1031,7 +1221,7 @@ public partial class ResultsViewModel : PageViewModel
         else
             OperationSuccessText = $"Переименовано: {result.Renamed}. Список файлов обновлён.";
 
-        await LoadAsync(); // перечитать (пути изменились)
+        if (_isActive) await LoadAsync(); // перечитать (пути изменились)
     }
 
     /// <summary>Обновить строки БД по факту переименования. Возвращает число неудачных обновлений.</summary>
@@ -1089,7 +1279,7 @@ public partial class ResultsViewModel : PageViewModel
                 Directory.CreateDirectory(dir);
                 var file = Path.Combine(dir, "rename_" + Guid.NewGuid().ToString("N") + ".json");
                 var payload = failures.Select(f => new { f.pair.FileId, f.pair.OldFullPath, f.pair.NewFullPath, Reason = f.reason });
-                File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(payload,
+                SafeIo.WriteAllTextAtomic(file, System.Text.Json.JsonSerializer.Serialize(payload,
                     new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
             }
             catch { /* recovery — вспомогательное, не мешаем */ }
@@ -1126,46 +1316,82 @@ public partial class ResultsViewModel : PageViewModel
         var path = await PickSaveFile("deduplicator-report.csv");
         if (string.IsNullOrEmpty(path)) return;
 
-        var sb = new StringBuilder();
-        sb.AppendLine("Тип;Группа;Эталон;Схожесть;Диск;Путь;Размер(байт)");
-        // Экспорт полный: достраиваем ВСЕ страницы точных и похожих групп, если их ещё не открывали.
-        EnsureAllExactBuilt();
-        EnsureAllSimilarImagesBuilt();
-        EnsureAllSimilarAudioBuilt();
-        // Экспортируем ПОЛНЫЕ наборы (_allImage/_allAudio), а не отфильтрованные слайдером порога коллекции
-        // (ревью P7: иначе «полный» отчёт молча терял бы похожие группы ниже текущего порога).
-        AppendGroups(sb, ExactGroups, Strings.TabExact);
-        AppendGroups(sb, _allImage, Strings.TabSimilarImages);
-        AppendGroups(sb, _allAudio, Strings.TabSimilarAudio);
-
+        OperationErrorText = null;
+        string tempPath = path + ".dedup-" + Guid.NewGuid().ToString("N") + ".tmp";
+        var busy = BeginCancellableBusy("Сохраняем отчёт…");
         try
         {
-            await File.WriteAllTextAsync(path, sb.ToString(), new UTF8Encoding(true));
+            // Страницы читаются непосредственно из БД и сразу уходят в файл. Экспорт миллиона
+            // строк больше не строит все UI-модели и один гигантский StringBuilder в памяти.
+            int total = _sessionFilter is long sid
+                ? await Task.Run(() => _groups.GetGroupCount(ExactTypes, sid) +
+                                           _groups.GetGroupCount(MatchType.SimilarImage, sid) +
+                                           _groups.GetGroupCount(MatchType.SimilarAudio, sid), busy.Token)
+                : 0;
+            var progress = BusyProgress(busy);
+            int completed = 0;
+            await using (var writer = new StreamWriter(tempPath, append: false, new UTF8Encoding(true), 64 * 1024))
+            {
+                await writer.WriteLineAsync("Тип;Группа;Эталон;Схожесть;Диск;Путь;Размер(байт)");
+                completed = await AppendGroupsCsvAsync(writer, ExactTypes, Strings.TabExact,
+                    completed, total, progress, busy.Token);
+                completed = await AppendGroupsCsvAsync(writer, new[] { MatchType.SimilarImage }, Strings.TabSimilarImages,
+                    completed, total, progress, busy.Token);
+                await AppendGroupsCsvAsync(writer, new[] { MatchType.SimilarAudio }, Strings.TabSimilarAudio,
+                    completed, total, progress, busy.Token);
+            }
+            File.Move(tempPath, path, overwrite: true);
             OperationSuccessText = $"Отчёт сохранён: {path}";
+        }
+        catch (OperationCanceledException)
+        {
+            OperationErrorText = "Сохранение отчёта остановлено. Незавершённый файл удалён.";
         }
         catch (Exception ex)
         {
-            // Молчаливый провал (файл открыт в Excel, носитель защищён от записи) оставлял
-            // пользователя в уверенности, что отчёт обновлён (B9).
-            OperationErrorText = $"Не удалось сохранить отчёт: {ex.Message}";
+            OperationErrorText = "Не удалось сохранить отчёт. Проверьте, не открыт ли файл в другой программе, и свободное место на диске.";
+            AppLog.Error("Results.ExportCsv", ex);
+        }
+        finally
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            EndCancellableBusy(busy);
         }
     }
 
-    private static void AppendGroups(StringBuilder sb, IEnumerable<GroupItemViewModel> groups, string type)
+    private async Task<int> AppendGroupsCsvAsync(StreamWriter writer, IReadOnlyList<MatchType> types, string type,
+        int completedBefore, int total, IProgress<TransferProgress> progress, CancellationToken ct)
     {
-        int n = 0;
-        foreach (var g in groups)
+        if (_sessionFilter is not long sessionId) return completedBefore;
+        int offset = 0, groupNumber = 0;
+        while (true)
         {
-            n++;
-            foreach (var f in g.Files)
+            ct.ThrowIfCancellationRequested();
+            var page = await Task.Run(() => _groups.GetGroupsPage(types, sessionId, offset, PageSize), ct);
+            if (page.Count == 0) return completedBefore + groupNumber;
+            offset += page.Count;
+            foreach (var group in page)
             {
-                sb.Append(Csv(type)).Append(';')
-                  .Append(n).Append(';')
-                  .Append(f.IsRepresentative ? "да" : "").Append(';')
-                  .Append(f.IsRepresentative ? "" : f.SimilarityText).Append(';')
-                  .Append(Csv(f.VolumeText)).Append(';')
-                  .Append(Csv(f.RelPath)).Append(';')
-                  .Append(f.Model.Size).AppendLine();
+                ct.ThrowIfCancellationRequested();
+                groupNumber++;
+                foreach (var member in group.Members)
+                {
+                    var file = member.File;
+                    if (file is null) continue;
+                    bool representative = member.IsRepresentative || member.FileId == group.RepresentativeId;
+                    string volume = _labelById.TryGetValue(file.VolumeId, out var label)
+                        ? label : $"Диск №{file.VolumeId}";
+                    var line = string.Join(';',
+                        Csv(type),
+                        groupNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        representative ? "да" : "",
+                        representative ? "" : Format.Percent(member.Similarity),
+                        Csv(volume),
+                        Csv(file.RelPath),
+                        file.Size.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    await writer.WriteLineAsync(line);
+                }
+                progress.Report(new TransferProgress(completedBefore + groupNumber, Math.Max(1, total), type));
             }
         }
     }
@@ -1229,27 +1455,39 @@ public partial class ResultsViewModel : PageViewModel
             .ToList();
         if (targets.Count == 0) return;
 
-        IsBusy = true;
         int linked = 0, notLinked = 0;
-        await Task.Run(() =>
+        bool cancelled = false;
+        var busy = BeginCancellableBusy("Заменяем копии жёсткими ссылками…");
+        var progress = BusyProgress(busy);
+        try
         {
-            foreach (var f in targets)
+            await Task.Run(() =>
             {
-                // Сбой одного файла (в т.ч. исчезновение посреди пакета) не валит остальные:
-                // ReplaceWithHardLink сам проверяет пути/том/содержимое и без replaced-оригинала
-                // ничего не удаляет; страховочный catch — на случай сбоя БД при записи журнала.
-                bool ok;
-                try { ok = _fileOps.ReplaceWithHardLink(f.Model, f.FullPath!, rep.FullPath!, group.Model.Id); }
-                catch { ok = false; }
-                if (ok) linked++; else notLinked++;
-            }
-        });
-        if (notLinked > 0)
+                for (int i = 0; i < targets.Count; i++)
+                {
+                    busy.Token.ThrowIfCancellationRequested();
+                    var f = targets[i];
+                    // Сбой одного файла (в т.ч. исчезновение посреди пакета) не валит остальные:
+                    // ReplaceWithHardLink сам проверяет пути/том/содержимое и без replaced-оригинала
+                    // ничего не удаляет; страховочный catch — на случай сбоя БД при записи журнала.
+                    bool ok;
+                    try { ok = _fileOps.ReplaceWithHardLink(f.Model, f.FullPath!, rep.FullPath!, group.Model.Id); }
+                    catch { ok = false; }
+                    if (ok) linked++; else notLinked++;
+                    progress.Report(new TransferProgress(i + 1, targets.Count, f.Model.Name));
+                }
+            });
+        }
+        catch (OperationCanceledException) { cancelled = true; }
+        finally { EndCancellableBusy(busy); }
+        if (cancelled || notLinked > 0)
             OperationErrorText = $"Заменено ссылками: {linked}. Пропущено: {notLinked} " +
-                                 "(файл недоступен — возможно, диск отключён, содержимое изменилось или файл лежит на другом диске). Эти файлы не тронуты.";
+                                 (cancelled
+                                     ? "Операция остановлена; остальные файлы не тронуты."
+                                     : "(файл недоступен — возможно, диск отключён, содержимое изменилось или файл лежит на другом диске). Эти файлы не тронуты.");
         else if (linked > 0)
             OperationSuccessText = $"Заменено ссылками: {linked}. Место освобождено, содержимое файлов сохранено.";
-        await LoadAsync();
+        if (_isActive) await LoadAsync();
     }
 
     // --- UI-аудит must №5: просмотрщик сравнения (текущий файл слева, эталон закреплён справа) ---
@@ -1355,12 +1593,18 @@ public partial class ResultsViewModel : PageViewModel
         _viewerLeftGen++; _viewerRightGen++;
         _viewerFiles = new List<FileItemViewModel>();
         _viewerSimilarImageGroup = false;
-        ViewerLeft = null; ViewerRight = null;
+        ViewerLeft = CreateViewerPlaceholder();
+        ViewerRight = CreateViewerPlaceholder();
         var l = ViewerLeftImage; ViewerLeftImage = null; l?.Dispose();
         var r = ViewerRightImage; ViewerRightImage = null; r?.Dispose();
         ViewerLeftResolution = "—"; ViewerRightResolution = "—";
         ViewerLeftSharpnessText = null; ViewerRightSharpnessText = null;
     }
+
+    private FileItemViewModel CreateViewerPlaceholder() => new(
+        new FileRecord(), similarity: 1.0, isRepresentative: false,
+        fullPath: null, volumeLabel: null, _thumbs,
+        groupAllowsDeletion: false, loadThumbnail: false);
 
     /// <summary>
     /// Фоновая загрузка одной стороны: честное разрешение через Image.Identify (пиксели не

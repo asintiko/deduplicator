@@ -12,6 +12,13 @@ namespace Deduplicator.App.ViewModels;
 /// <summary>Пункт боковой навигации.</summary>
 public sealed record NavItem(string Title, string IconKey, PageViewModel Page, string Tip);
 
+public enum OnboardingStepKind
+{
+    Welcome,
+    Spotlight,
+    Final
+}
+
 /// <summary>Шаг обучения: заголовок, текст, на какой раздел переключиться,
 /// имя подсвечиваемого контрола (x:Name) и короткая подсказка-указатель.</summary>
 public sealed record OnboardingStep(
@@ -19,17 +26,22 @@ public sealed record OnboardingStep(
     string Body,
     int NavIndex,
     string TargetName,
-    string Hint);
+    string Hint,
+    OnboardingStepKind Kind = OnboardingStepKind.Spotlight,
+    bool WaitForAction = false);
 
 /// <summary>Главная вью-модель: боковая навигация и активная страница.</summary>
 public partial class MainWindowViewModel : ObservableObject
 {
     private readonly ISettingsService _settings;
+    private readonly ScanViewModel _scan;
     private readonly IReadOnlyList<OnboardingStep> _onboardingSteps;
+    private readonly Stack<PageViewModel> _backStack = new();
 
     public string AppName => Strings.AppName;
     public string AppTagline => Strings.AppTagline;
     public string HelpText => Strings.HelpButton;
+    public FeedbackPickerViewModel Feedback { get; }
 
     public ObservableCollection<NavItem> NavItems { get; }
 
@@ -44,10 +56,12 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private bool _isDialogOpen;
 
     private bool _suppress;
+    private bool _suppressHistory;
 
     public MainWindowViewModel(
         NavigationService nav,
         ISettingsService settingsService,
+        FeedbackPickerViewModel feedback,
         HomeViewModel home,
         VolumesViewModel volumes,
         ExplorerViewModel explorer,
@@ -62,62 +76,46 @@ public partial class MainWindowViewModel : ObservableObject
         CrossDiskViewModel crossDisk)
     {
         _settings = settingsService;
+        _scan = scan;
+        Feedback = feedback;
         NavItems = new ObservableCollection<NavItem>
         {
             new("Главная", "IconGrid", home, "Крупные действия и краткая сводка"),
-            new("Найти дубликаты", "IconSearch", scan, "Проверить выбранные диски на копии файлов"),
+            new("Найти копии", "IconSearch", scan, "Проверить выбранные диски на одинаковые и похожие файлы"),
             new("Результаты", "IconLayers", results, "Посмотреть найденные копии и убрать лишнее"),
-            new("Мои диски", "IconHdd", volumes, "Запомненные диски и сохранённые списки файлов"),
-            new("Мусор", "IconBroom", cleanup, "Найти временные файлы, пустые папки и битые ярлыки"),
-            new("Здоровье дисков", "IconHealth", diskHealth, "Состояние дисков и предупреждения"),
-            // UI-аудит 2026-07-02 (must №1, №10): «История» — видимый путь к отмене удаления
-            // (восстановление из карантина было фактически недоступно); «Между дисками» и
-            // «Файлы в архиве» — реализованные экраны, до которых не было навигации.
+            new("Мои диски", "IconHdd", volumes, "Подключённые и сохранённые диски"),
+            // История остаётся на первом уровне: восстановление удалённого нельзя прятать.
+            // Специализированные инструменты доступны крупными карточками на Главной — десять
+            // равноправных пунктов перегружали первого пользователя.
             new("История", "IconHistory", journal, "Что было убрано и куда — отсюда можно вернуть файлы"),
-            new("Между дисками", "IconCopy", crossDisk, "Одинаковые файлы на разных дисках"),
-            new("Файлы в архиве", "IconArchive", explorer, "Файлы с запомненных дисков — даже если диск отключён"),
             new(Strings.NavSettings, "IconSettings", settings, "Основные параметры безопасности и поиска"),
         };
 
         _onboardingSteps = new[]
         {
             new OnboardingStep(
-                "Начните отсюда",
-                "Эта кнопка запускает поиск дублей — одинаковые файлы, похожие фото, музыка и документы. Это главное действие программы.",
-                0, "OnboardingHomeDuplicates", "Нажмите сюда, чтобы начать"),
+                "Добро пожаловать!",
+                "Deduplicator помогает спокойно находить лишние копии файлов и освобождать место. Рекомендуемые безопасные настройки уже включены — для первого поиска ничего настраивать не нужно.",
+                0, "", "", OnboardingStepKind.Welcome),
             new OnboardingStep(
-                "Выберите диски",
-                "Отметьте диски для проверки. Внешние выбираются автоматически, системный — вручную, если это действительно нужно.",
-                1, "OnboardingScanDisks", "Проверьте галочки дисков"),
+                "1. Выберите, где искать",
+                "Теперь можно работать прямо под подсказкой. Проверьте автоматически выбранный диск, при необходимости выберите другой и нажмите «Далее».",
+                1, "OnboardingScanDisks", "Проверьте выбранный диск и продолжайте"),
             new OnboardingStep(
-                "Сначала отметить",
-                "После поиска эта кнопка отметит лишние точные копии. В каждой группе одна копия всегда останется — программа не даст удалить всё.",
-                2, "OnboardingAutoSelect", "Отмечает лишние копии"),
+                "2. Запустите безопасную проверку",
+                "Нажмите «Начать поиск». На этом этапе программа только читает файлы и ищет совпадения — ничего не удаляется.",
+                1, "OnboardingScanStart", "Нажмите кнопку — следующий шаг откроется сам",
+                WaitForAction: true),
             new OnboardingStep(
-                "Потом удалить",
-                "Удаление срабатывает только после подтверждения и уходит в Корзину. Ничего не пропадает внезапно.",
-                2, "OnboardingDeleteSelected", "Удаляет только отмеченное"),
-            new OnboardingStep(
-                "Архив дисков",
-                "Программа запоминает диски и файлы. Список остаётся доступен даже после того, как диск отключили.",
-                3, "OnboardingVolumeList", "Сохранённые диски"),
-            new OnboardingStep(
-                "Очистка мусора",
-                "Пустые папки, временные файлы и битые ярлыки. Тоже удаляются только после подтверждения и уходят в Корзину.",
-                4, "OnboardingCleanupOptions", "Что искать"),
-            new OnboardingStep(
-                "Здоровье дисков",
-                "Программа показывает состояние ваших дисков. Если оно станет жёлтым или красным — заранее сделайте копию важных файлов.",
-                5, "OnboardingHealthList", "Состояние ваших дисков"),
-            new OnboardingStep(
-                "Главное меню",
-                "Слева — основные разделы. Это короткое обучение всегда можно повторить кнопкой внизу слева.",
-                0, "OnboardingMainNav", "Разделы программы"),
+                "Всё готово",
+                "Всё готово к первой проверке. Если поиск уже запущен, следите за процентом и оставшимся временем — программу можно свернуть. Если вы пропустили шаг, начать можно большой кнопкой ниже. После завершения откройте «Результаты» и спокойно проверьте список перед удалением.",
+                1, "", "", OnboardingStepKind.Final),
         };
 
         nav.Navigator = SetPage;
         SelectedNav = NavItems[0];
         IsOnboardingVisible = !_settings.Current.OnboardingCompleted;
+        _scan.PropertyChanged += OnScanOnboardingChanged;
         RefreshOnboardingProperties();
     }
 
@@ -130,8 +128,19 @@ public partial class MainWindowViewModel : ObservableObject
     public string OnboardingHint => _onboardingSteps[OnboardingIndex].Hint;
     public string OnboardingTargetName => _onboardingSteps[OnboardingIndex].TargetName;
     public bool OnboardingHasTarget => !string.IsNullOrEmpty(OnboardingTargetName);
-    public string OnboardingNextText => OnboardingIndex == _onboardingSteps.Count - 1 ? "Готово" : "Далее";
+    public bool IsOnboardingWelcome => _onboardingSteps[OnboardingIndex].Kind == OnboardingStepKind.Welcome;
+    public bool IsOnboardingFinal => _onboardingSteps[OnboardingIndex].Kind == OnboardingStepKind.Final;
+    public bool IsOnboardingActionStep => _onboardingSteps[OnboardingIndex].WaitForAction;
+    public string OnboardingNextText => IsOnboardingFinal
+        ? "Готово"
+        : IsOnboardingActionStep
+            ? "Сделаю позже"
+            : IsOnboardingWelcome ? "Начать знакомство" : "Далее";
     public bool CanGoBack => OnboardingIndex > 0;
+    public bool CanNavigateBack => _backStack.Count > 0;
+    public string BackButtonText => _backStack.TryPeek(out var page) ? $"Назад: {page.Title}" : "Назад";
+    public bool IsToolPage => CurrentPage is not null &&
+                              NavItems.All(n => !ReferenceEquals(n.Page, CurrentPage));
 
     partial void OnSelectedNavChanged(NavItem? value)
     {
@@ -142,6 +151,9 @@ public partial class MainWindowViewModel : ObservableObject
     private void SetPage(PageViewModel page)
     {
         var previous = CurrentPage;
+        if (ReferenceEquals(previous, page)) return;
+        if (previous is not null && !_suppressHistory)
+            _backStack.Push(previous);
         if (!ReferenceEquals(previous, page)) previous?.OnNavigatedFrom();
 
         // must №7: следим за HasOpenDialog ТЕКУЩЕЙ страницы (отписка от прежней обязательна —
@@ -154,6 +166,8 @@ public partial class MainWindowViewModel : ObservableObject
         SelectedNav = NavItems.FirstOrDefault(n => ReferenceEquals(n.Page, page));
         _suppress = false;
         IsDialogOpen = page.HasOpenDialog;
+        OnPropertyChanged(nameof(IsToolPage));
+        RefreshNavigationProperties();
         page.OnNavigatedTo();
     }
 
@@ -163,12 +177,33 @@ public partial class MainWindowViewModel : ObservableObject
             IsDialogOpen = CurrentPage?.HasOpenDialog ?? false;
     }
 
+    partial void OnIsDialogOpenChanged(bool value)
+    {
+        if (value) Feedback.ClosePanelCommand.Execute(null);
+    }
+
+    partial void OnIsOnboardingVisibleChanged(bool value)
+    {
+        if (value) Feedback.ClosePanelCommand.Execute(null);
+    }
+
     /// <summary>Esc из MainWindow: закрыть верхний диалог активной страницы.</summary>
     public void CloseCurrentDialog() => CurrentPage?.CloseDialog();
 
     [RelayCommand]
+    private void NavigateBack()
+    {
+        if (!_backStack.TryPop(out var page)) return;
+        _suppressHistory = true;
+        try { SetPage(page); }
+        finally { _suppressHistory = false; }
+        RefreshNavigationProperties();
+    }
+
+    [RelayCommand]
     private void ShowOnboarding()
     {
+        Feedback.ClosePanelCommand.Execute(null);
         OnboardingIndex = 0;
         IsOnboardingVisible = true;
         ApplyOnboardingStep();
@@ -180,7 +215,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (OnboardingIndex >= _onboardingSteps.Count - 1)
         {
-            CompleteOnboarding();
+            CompleteOnboarding(openSearch: false);
             return;
         }
 
@@ -195,7 +230,10 @@ public partial class MainWindowViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void SkipOnboarding() => CompleteOnboarding();
+    private void SkipOnboarding() => CompleteOnboarding(openSearch: false);
+
+    /// <summary>Закрытие обучения по Esc. Повтор остаётся доступен в боковом меню.</summary>
+    public void CloseOnboarding() => CompleteOnboarding(openSearch: false);
 
     partial void OnOnboardingIndexChanged(int value)
     {
@@ -209,15 +247,26 @@ public partial class MainWindowViewModel : ObservableObject
         // Переключаемся на соответствующий шагу раздел — он виден затемнённым позади карточки.
         var index = _onboardingSteps[OnboardingIndex].NavIndex;
         if (index >= 0 && index < NavItems.Count)
-            SelectedNav = NavItems[index];
+        {
+            _suppressHistory = true;
+            try { SelectedNav = NavItems[index]; }
+            finally { _suppressHistory = false; }
+        }
     }
 
-    private void CompleteOnboarding()
+    private void CompleteOnboarding(bool openSearch)
     {
         IsOnboardingVisible = false;
         var s = _settings.Current;
         s.OnboardingCompleted = true;
         _settings.Save(s);
+
+        if (openSearch && NavItems.Count > 1)
+        {
+            _suppressHistory = true;
+            try { SelectedNav = NavItems[1]; }
+            finally { _suppressHistory = false; }
+        }
     }
 
     private void RefreshOnboardingProperties()
@@ -231,7 +280,31 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(OnboardingHint));
         OnPropertyChanged(nameof(OnboardingTargetName));
         OnPropertyChanged(nameof(OnboardingHasTarget));
+        OnPropertyChanged(nameof(IsOnboardingWelcome));
+        OnPropertyChanged(nameof(IsOnboardingFinal));
+        OnPropertyChanged(nameof(IsOnboardingActionStep));
         OnPropertyChanged(nameof(OnboardingNextText));
         OnPropertyChanged(nameof(CanGoBack));
+    }
+
+    private void OnScanOnboardingChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (!IsOnboardingVisible || !IsOnboardingActionStep) return;
+
+        bool selectedDisk = OnboardingIndex == 1 &&
+                            e.PropertyName == nameof(ScanViewModel.SelectedVolumesSummary) &&
+                            _scan.Volumes.Any(v => v.IsChecked);
+        bool startedScan = OnboardingIndex == 2 &&
+                           e.PropertyName == nameof(ScanViewModel.IsRunning) &&
+                           _scan.IsRunning;
+
+        if (selectedDisk || startedScan)
+            OnboardingIndex++;
+    }
+
+    private void RefreshNavigationProperties()
+    {
+        OnPropertyChanged(nameof(CanNavigateBack));
+        OnPropertyChanged(nameof(BackButtonText));
     }
 }

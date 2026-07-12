@@ -73,6 +73,30 @@ public class Sprint19UsnDeltaTests : IDisposable
     public void Classify_file_modifications_are_restat(uint reason)
         => Assert.Equal(UsnDeltaAction.Restat, UsnDeltaPlanner.Classify(reason, isDirectory: false));
 
+    [Theory]
+    [InlineData(UsnReason.DataOverwrite)]
+    [InlineData(UsnReason.DataExtend | UsnReason.Close)]
+    [InlineData(UsnReason.NamedDataTruncation)]
+    [InlineData(UsnReason.StreamChange)]
+    [InlineData(UsnReason.HardLinkChange)]
+    [InlineData(UsnReason.FileCreate)]
+    [InlineData(UsnReason.RenameNewName | UsnReason.Close)]
+    [InlineData(UsnReason.CompressionChange)]
+    [InlineData(UsnReason.EncryptionChange)]
+    [InlineData(UsnReason.ReparsePointChange)]
+    [InlineData(0u)]                    // отсутствующая причина — неоднозначность
+    [InlineData(0x00400000u)]           // неизвестный движку бит — консервативный сброс
+    public void Hash_invalidation_policy_rejects_content_and_ambiguous_reasons(uint reason)
+        => Assert.True(UsnDeltaPlanner.RequiresHashInvalidation(reason));
+
+    [Theory]
+    [InlineData(UsnReason.Close)]
+    [InlineData(UsnReason.BasicInfoChange | UsnReason.Close)]
+    [InlineData(UsnReason.SecurityChange)]
+    [InlineData(UsnReason.EaChange | UsnReason.IndexableChange | UsnReason.ObjectIdChange)]
+    public void Hash_invalidation_policy_allows_only_known_metadata_reasons(uint reason)
+        => Assert.False(UsnDeltaPlanner.RequiresHashInvalidation(reason));
+
     // ---------------- (а) Классификация: каталожные записи ----------------
 
     [Theory]
@@ -105,7 +129,9 @@ public class Sprint19UsnDeltaTests : IDisposable
         });
         Assert.Null(plan1.AnomalyReason);
         Assert.Empty(plan1.Deletes);
-        Assert.Equal(new[] { p }, plan1.Restats);
+        Assert.Equal(new[] { p }, plan1.Restats.Select(r => r.FullPath));
+        Assert.Equal(UsnReason.FileDelete | UsnReason.FileCreate | UsnReason.Close,
+            Assert.Single(plan1.Restats).Reason);
 
         // Обратный порядок (создан → удалён) даёт ТОТ ЖЕ план: stat промахнётся и строка удалится.
         var plan2 = UsnDeltaPlanner.Build(new[]
@@ -115,7 +141,9 @@ public class Sprint19UsnDeltaTests : IDisposable
         });
         Assert.Null(plan2.AnomalyReason);
         Assert.Empty(plan2.Deletes);
-        Assert.Equal(new[] { p }, plan2.Restats);
+        Assert.Equal(new[] { p }, plan2.Restats.Select(r => r.FullPath));
+        Assert.Equal(UsnReason.FileDelete | UsnReason.FileCreate | UsnReason.Close,
+            Assert.Single(plan2.Restats).Reason);
     }
 
     [Fact]
@@ -132,7 +160,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         });
         Assert.Null(plan.AnomalyReason);
         Assert.Equal(new[] { gone, oldP }.OrderBy(x => x), plan.Deletes.OrderBy(x => x));
-        Assert.Equal(new[] { newP }, plan.Restats);
+        Assert.Equal(new[] { newP }, plan.Restats.Select(r => r.FullPath));
     }
 
     [Fact]
@@ -158,7 +186,7 @@ public class Sprint19UsnDeltaTests : IDisposable
             new Fde.UsnDeltaChange(f, UsnReason.FileCreate | UsnReason.Close, false)
         });
         Assert.Null(plan.AnomalyReason);
-        Assert.Equal(new[] { f }, plan.Restats);
+        Assert.Equal(new[] { f }, plan.Restats.Select(r => r.FullPath));
     }
 
     [Fact]
@@ -181,7 +209,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         });
         Assert.Null(plan.AnomalyReason);
         Assert.Equal(new[] { oldP }, plan.Deletes);
-        Assert.Equal(new[] { newP }, plan.Restats);
+        Assert.Equal(new[] { newP }, plan.Restats.Select(r => r.FullPath));
     }
 
     // ---------------- (в) Разбор буфера журнала (без FSCTL) ----------------
@@ -239,6 +267,22 @@ public class Sprint19UsnDeltaTests : IDisposable
         Assert.Equal(UsnReason.DataOverwrite | UsnReason.Close, records[0].Reason);
         Assert.Equal("старый файл.jpg", records[1].FileName); // Unicode-имя не искажается
         Assert.Equal(UsnReason.FileDelete | UsnReason.Close, records[1].Reason);
+    }
+
+    [Fact]
+    public void TryAppendRecords_rejects_truncated_tail_instead_of_silent_partial_success()
+    {
+        var complete = BuildJournalBuffer(nextCursor: 500,
+            (2, 0x10ul, 0x5ul, 100, UsnReason.DataOverwrite, 0x20, "doc.txt"),
+            (2, 0x11ul, 0x5ul, 200, UsnReason.DataOverwrite, 0x20, "second.txt"));
+        var truncated = complete[..^3];
+
+        var records = new List<Fde.UsnDeltaRecord>();
+        bool ok = Fde.UsnDeltaReader.TryAppendRecords(truncated, truncated.Length, 1000, 100,
+            records, out _, out string? anomaly);
+
+        Assert.False(ok);
+        Assert.Contains("неполная", anomaly);
     }
 
     [Fact]
@@ -348,7 +392,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         => new()
         {
             Stat = p => Fde.FileStatReader.TryGet(p),
-            TryIndexFile = ef =>
+            TryIndexFile = (ef, _) =>
             {
                 if (filter is not null && !filter(ef)) return false;
                 IndexFromDisk(ctx, ef.FullPath);
@@ -397,6 +441,56 @@ public class Sprint19UsnDeltaTests : IDisposable
         Assert.Null(updated.FullHash);                             // хэши сброшены (перехэш в воронке)
         Assert.Null(updated.PartialHash);
         Assert.Null(updated.VerifiedFullHash);                     // кэш побайтовой сверки сброшен
+    }
+
+    [Fact]
+    public void Apply_data_change_with_same_metadata_preserves_reason_and_forces_hash_reset()
+    {
+        var ctx = BuildDb("same_meta_changed");
+        var full = Path.Combine(ctx.MountRoot, "same-size.txt");
+        File.WriteAllText(full, "AAAA");
+        var row = IndexFromDisk(ctx, full);
+
+        var hash = Enumerable.Repeat((byte)0xCD, 16).ToArray();
+        row.PartialHash = hash;
+        row.FullHash = hash;
+        row.ScanState = ScanState.Full;
+        ctx.Files.UpdateComputedBatch(new[] { row });
+        ctx.Files.UpdateVerifiedFullHashBatch(new[] { (row.Id, hash) });
+
+        // Переписываем содержимое тем же числом байтов и возвращаем mtime. Обычная строгая
+        // metadata-сверка сочла бы файл неизменившимся, но USN DataOverwrite сильнее метаданных.
+        var originalMtime = File.GetLastWriteTimeUtc(full);
+        File.WriteAllText(full, "BBBB");
+        File.SetLastWriteTimeUtc(full, originalMtime);
+        Assert.Equal(row.Size, new FileInfo(full).Length);
+
+        const uint reason = UsnReason.DataOverwrite | UsnReason.Close;
+        uint observedReason = 0;
+        var plan = UsnDeltaPlanner.Build(new[] { new Fde.UsnDeltaChange(full, reason, false) });
+        var hooks = new UsnDeltaApplyHooks
+        {
+            Stat = p => Fde.FileStatReader.TryGet(p),
+            TryIndexFile = (ef, changeReason) =>
+            {
+                observedReason = changeReason;
+                if (!UsnDeltaPlanner.RequiresHashInvalidation(changeReason)) return true;
+                IndexFromDisk(ctx, ef.FullPath); // production-путь: UpsertMetaBatch сбрасывает хэши
+                return true;
+            },
+            DeleteByRelPath = rel => ctx.Files.DeleteByVolumeAndPath(ctx.VolumeId, rel),
+            VolumeAlive = () => true
+        };
+
+        var outcome = UsnDeltaExecutor.Apply(plan, ctx.MountRoot, hooks);
+
+        Assert.True(outcome.Success);
+        Assert.Equal(reason, observedReason);
+        var updated = ctx.Row("same-size.txt");
+        Assert.NotNull(updated);
+        Assert.Null(updated!.PartialHash);
+        Assert.Null(updated.FullHash);
+        Assert.Null(updated.VerifiedFullHash);
     }
 
     [Fact]
@@ -548,7 +642,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         var hooks = new UsnDeltaApplyHooks
         {
             Stat = _ => null,                 // «файла нет»
-            TryIndexFile = _ => true,
+            TryIndexFile = (_, _) => true,
             DeleteByRelPath = rel => ctx.Files.DeleteByVolumeAndPath(ctx.VolumeId, rel),
             VolumeAlive = () => false         // …потому что тома больше нет
         };
@@ -572,7 +666,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         var hooks = new UsnDeltaApplyHooks
         {
             Stat = p => Fde.FileStatReader.TryGet(p),
-            TryIndexFile = _ => throw new IOException("диск закапризничал"),
+            TryIndexFile = (_, _) => throw new IOException("диск закапризничал"),
             DeleteByRelPath = _ => { },
             VolumeAlive = () => true
         };
@@ -596,7 +690,7 @@ public class Sprint19UsnDeltaTests : IDisposable
         var hooks = new UsnDeltaApplyHooks
         {
             Stat = p => Fde.FileStatReader.TryGet(p),
-            TryIndexFile = _ => throw new OperationCanceledException(),
+            TryIndexFile = (_, _) => throw new OperationCanceledException(),
             DeleteByRelPath = _ => { },
             VolumeAlive = () => true
         };

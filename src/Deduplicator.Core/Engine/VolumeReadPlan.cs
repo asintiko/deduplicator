@@ -8,6 +8,7 @@ namespace Deduplicator.Core.Engine;
 /// </summary>
 public sealed record VolumeReadPlan(
     long VolumeId,
+    string PhysicalDeviceKey,
     string Label,
     bool PreferSequential,
     int MetadataDop,
@@ -26,7 +27,11 @@ public static class VolumeReadPlanner
         bool sequential = v?.PreferSequentialReads ?? false;
         int contentDop = sequential ? 1 : req;
         int metaDop = sequential ? Math.Min(req, 2) : req;
-        return new VolumeReadPlan(volumeId, v?.DisplayName ?? $"#{volumeId}", sequential, metaDop, contentDop);
+        string physicalKey = string.IsNullOrWhiteSpace(v?.PhysicalDeviceKey)
+            ? $"volume:{volumeId}"
+            : v.PhysicalDeviceKey!;
+        return new VolumeReadPlan(volumeId, physicalKey, v?.DisplayName ?? $"#{volumeId}",
+            sequential, metaDop, contentDop);
     }
 
     public static Dictionary<long, VolumeReadPlan> Build(

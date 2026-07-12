@@ -15,6 +15,12 @@ public sealed class ImagePipelineOptions
     /// сюда подаётся план тома с клэмпом губернатора (2.6).</summary>
     public required Func<long, int> ReadDopFor { get; init; }
 
+    /// <summary>Runtime-only physical-device key тома; null включает безопасный fallback по volume id.</summary>
+    public Func<long, string?>? PhysicalDeviceKeyFor { get; init; }
+
+    /// <summary>Последовательный ли план тома (HDD/медленный съёмный/сеть).</summary>
+    public Func<long, bool>? PreferSequentialFor { get; init; }
+
     /// <summary>Бюджет канала (суммарные байты «в полёте») и число декодеров — от губернатора (2.6).</summary>
     public required PipelineBudget Budget { get; init; }
 
@@ -72,6 +78,8 @@ public static class ImagePerceptualPipeline
         try
         {
             VolumeParallelExecutor.RunByVolume(files, f => f.VolumeId, opts.ReadDopFor,
+                vid => opts.PhysicalDeviceKeyFor?.Invoke(vid) ?? $"volume:{vid}",
+                vid => opts.PreferSequentialFor?.Invoke(vid) ?? false,
                 opts.MaxVolumeParallelism, ct,
                 f => Produce(f, images, opts, budget, channel.Writer, ct));
         }

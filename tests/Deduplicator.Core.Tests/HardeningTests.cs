@@ -39,6 +39,33 @@ public class HardeningTests : IDisposable
     }
 
     [Fact]
+    public void Oversized_settings_are_rejected_without_large_json_materialization()
+    {
+        var paths = new AppPaths(_dir);
+        using (var stream = new FileStream(paths.SettingsPath, FileMode.Create, FileAccess.Write))
+        {
+            stream.SetLength(1024 * 1024 + 1);
+        }
+
+        var svc = new SettingsService(paths);
+
+        Assert.Equal(0.90, svc.Current.DefaultImageThreshold, 3);
+    }
+
+    [Fact]
+    public void Settings_save_is_atomic_and_leaves_no_temporary_file()
+    {
+        var paths = new AppPaths(_dir);
+        var svc = new SettingsService(paths);
+
+        svc.Current.Theme = "Dark";
+        svc.Save(svc.Current);
+
+        Assert.Contains("Dark", File.ReadAllText(paths.SettingsPath));
+        Assert.Empty(Directory.EnumerateFiles(_dir, "*" + SafeIo.TempSuffix));
+    }
+
+    [Fact]
     public void LongPath_prefixes_drive_and_unc_paths_on_windows()
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;

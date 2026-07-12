@@ -85,74 +85,74 @@ public sealed class DuplicateGrouper : IDuplicateGrouper
 
         // 1.5: файлы выбираем ПАЧКАМИ хэшей (200 за запрос), а не по одному хэшу (N+1):
         // на больших библиотеках стадия Grouping была SQL-bound из-за десятков тысяч запросов.
-        var sharedHashes = _files.GetSharedFullHashes();
+        var sharedHashes = _files.GetSharedFullHashes(sessionId);
         const int HashBatch = 200;
         for (int bi = 0; bi < sharedHashes.Count; bi += HashBatch)
         {
-        var hashBatch = sharedHashes.GetRange(bi, Math.Min(HashBatch, sharedHashes.Count - bi));
-        foreach (var hashGroup in _files.GetByFullHashes(hashBatch)
-                     .GroupBy(f => System.IO.Hashing.XxHash128.HashToUInt128(f.FullHash!)))
-        {
-            ct.ThrowIfCancellationRequested();
-            waitGate?.Invoke();
-            // Scope-aware: группу строим ТОЛЬКО из файлов текущей области. Файлы с тем же хэшем из
-            // старого индекса/других дисков сюда не попадают, поэтому результат соответствует именно
-            // тому, что пользователь выбрал сейчас (нельзя удалить то, что не сканировали).
-            var files = hashGroup.Where(inScope).ToList();
-            if (files.Count < 2) continue;
-
-            foreach (var vc in ByteVerifyClusters(files, volumes, ct, waitGate, pendingVerified))
+            var hashBatch = sharedHashes.GetRange(bi, Math.Min(HashBatch, sharedHashes.Count - bi));
+            foreach (var hashGroup in _files.GetByFullHashes(hashBatch, sessionId)
+                         .GroupBy(f => System.IO.Hashing.XxHash128.HashToUInt128(f.FullHash!)))
             {
-                if (vc.Members.Count < 2) continue;
+                ct.ThrowIfCancellationRequested();
+                waitGate?.Invoke();
+                // Scope-aware: группу строим ТОЛЬКО из файлов текущей области. Файлы с тем же хэшем из
+                // старого индекса/других дисков сюда не попадают, поэтому результат соответствует именно
+                // тому, что пользователь выбрал сейчас (нельзя удалить то, что не сканировали).
+                var files = hashGroup.Where(inScope).ToList();
+                if (files.Count < 2) continue;
 
-                // Hardlink-aware: схлопываем алиасы (один физический файл под несколькими путями),
-                // иначе reclaimable завышается, а ссылки показываются как «лишние копии».
-                var (physical, linkCounts) = CollapseHardlinks(vc.Members, volumes);
-                if (physical.Count < 2) continue; // вся группа — hardlink-и на один файл: удалять нечего
-
-                var rep = RepresentativeSelector.Pick(physical, rule, isPreferredKeep);
-                bool isVideo = physical[0].Category == FileCategory.Video;
-
-                // Освобождаемое место: размер не-эталонного файла считаем ТОЛЬКО если у его inode нет
-                // других ссылок (LinkCount<=1). Если файл — один из нескольких hardlink-ов (в т.ч.
-                // схлопнутых или внешних), удаление одного пути не освободит блоки — не завышаем оценку.
-                // Для подключённых файлов берём РАЗМЕР НА ДИСКЕ (GetCompressedFileSize): sparse и
-                // NTFS-сжатые файлы освобождают выделенные блоки, а не логический размер — иначе
-                // «можно освободить 10 ГБ» при реальных 100 МБ (аудит 2026-07-02).
-                long reclaimable = 0;
-                foreach (var f in physical)
+                foreach (var vc in ByteVerifyClusters(files, volumes, ct, waitGate, pendingVerified))
                 {
-                    if (f.Id == rep.Id) continue;
-                    bool freeable = !linkCounts.TryGetValue(f.Id, out var lc) || lc <= 1;
-                    if (!freeable) continue;
-                    var fPath = Resolve(f, volumes);
-                    reclaimable += fPath is not null ? SizeOnDisk(fPath, f.Size) : f.Size;
+                    if (vc.Members.Count < 2) continue;
+
+                    // Hardlink-aware: схлопываем алиасы (один физический файл под несколькими путями),
+                    // иначе reclaimable завышается, а ссылки показываются как «лишние копии».
+                    var (physical, linkCounts) = CollapseHardlinks(vc.Members, volumes);
+                    if (physical.Count < 2) continue; // вся группа — hardlink-и на один файл: удалять нечего
+
+                    var rep = RepresentativeSelector.Pick(physical, rule, isPreferredKeep);
+                    bool isVideo = physical[0].Category == FileCategory.Video;
+
+                    // Освобождаемое место: размер не-эталонного файла считаем ТОЛЬКО если у его inode нет
+                    // других ссылок (LinkCount<=1). Если файл — один из нескольких hardlink-ов (в т.ч.
+                    // схлопнутых или внешних), удаление одного пути не освободит блоки — не завышаем оценку.
+                    // Для подключённых файлов берём РАЗМЕР НА ДИСКЕ (GetCompressedFileSize): sparse и
+                    // NTFS-сжатые файлы освобождают выделенные блоки, а не логический размер — иначе
+                    // «можно освободить 10 ГБ» при реальных 100 МБ (аудит 2026-07-02).
+                    long reclaimable = 0;
+                    foreach (var f in physical)
+                    {
+                        if (f.Id == rep.Id) continue;
+                        bool freeable = !linkCounts.TryGetValue(f.Id, out var lc) || lc <= 1;
+                        if (!freeable) continue;
+                        var fPath = Resolve(f, volumes);
+                        reclaimable += fPath is not null ? SizeOnDisk(fPath, f.Size) : f.Size;
+                    }
+
+                    var group = new DuplicateGroup
+                    {
+                        MatchType = isVideo ? MatchType.ExactVideo : MatchType.Exact,
+                        // Полностью сверенные байт-в-байт группы — 1.0; hash-only (есть члены, которые
+                        // нельзя было прочитать/сверить) помечаем < 1.0, чтобы их нельзя было автоудалять.
+                        Confidence = vc.ByteVerified ? 1.0 : HashOnlyExactConfidence,
+                        RepresentativeId = rep.Id,
+                        ReclaimableBytes = reclaimable
+                    };
+                    foreach (var f in physical)
+                        group.Members.Add(new DuplicateMember { FileId = f.Id, Similarity = 1.0, File = f });
+
+                    pending.Add(group);
+                    created++;
                 }
 
-                var group = new DuplicateGroup
+                if (pending.Count >= FlushEvery)
                 {
-                    MatchType = isVideo ? MatchType.ExactVideo : MatchType.Exact,
-                    // Полностью сверенные байт-в-байт группы — 1.0; hash-only (есть члены, которые
-                    // нельзя было прочитать/сверить) помечаем < 1.0, чтобы их нельзя было автоудалять.
-                    Confidence = vc.ByteVerified ? 1.0 : HashOnlyExactConfidence,
-                    RepresentativeId = rep.Id,
-                    ReclaimableBytes = reclaimable
-                };
-                foreach (var f in physical)
-                    group.Members.Add(new DuplicateMember { FileId = f.Id, Similarity = 1.0, File = f });
-
-                pending.Add(group);
-                created++;
+                    _groups.InsertGroups(pending, sessionId);
+                    pending.Clear();
+                    FlushVerified(pendingVerified);
+                    onGroups?.Invoke(created);
+                }
             }
-
-            if (pending.Count >= FlushEvery)
-            {
-                _groups.InsertGroups(pending, sessionId);
-                pending.Clear();
-                FlushVerified(pendingVerified);
-                onGroups?.Invoke(created);
-            }
-        }
         }
         if (pending.Count > 0) _groups.InsertGroups(pending, sessionId);
         FlushVerified(pendingVerified);

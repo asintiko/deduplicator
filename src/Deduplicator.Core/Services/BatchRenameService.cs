@@ -10,7 +10,8 @@ public interface IBatchRenameService
     BatchRenamePlan BuildPlan(BatchRenameRequest request);
 
     /// <summary>Выполнить план двухфазно с откатом при ошибке.</summary>
-    BatchRenameResult Execute(BatchRenamePlan plan, CancellationToken ct);
+    BatchRenameResult Execute(BatchRenamePlan plan, CancellationToken ct,
+        IProgress<TransferProgress>? progress = null);
 }
 
 /// <summary>
@@ -85,7 +86,8 @@ public sealed class BatchRenameService : IBatchRenameService
         return new BatchRenamePlan(items, conflicts, canExecute);
     }
 
-    public BatchRenameResult Execute(BatchRenamePlan plan, CancellationToken ct)
+    public BatchRenameResult Execute(BatchRenamePlan plan, CancellationToken ct,
+        IProgress<TransferProgress>? progress = null)
     {
         int skipped = plan.Items.Count(i => i.Skipped);
         if (!plan.CanExecute)
@@ -118,6 +120,8 @@ public sealed class BatchRenameService : IBatchRenameService
                 ct.ThrowIfCancellationRequested();
                 File.Move(LongPath.Fix(todo[i].OldFullPath), LongPath.Fix(temps[i]));
                 moved.Add((temps[i], todo[i].OldFullPath));
+                progress?.Report(new TransferProgress(i + 1, todo.Count * 2,
+                    "Подготовка: " + Path.GetFileName(todo[i].OldFullPath)));
             }
 
             // Фаза 2: временные → финальные.
@@ -129,6 +133,8 @@ public sealed class BatchRenameService : IBatchRenameService
                 File.Move(LongPath.Fix(temps[i]), LongPath.Fix(it.NewFullPath));
                 moved[i] = (it.NewFullPath, it.OldFullPath); // теперь файл на финальном месте
                 done.Add(new RenamePair(it.FileId, it.OldFullPath, it.NewFullPath));
+                progress?.Report(new TransferProgress(todo.Count + i + 1, todo.Count * 2,
+                    Path.GetFileName(it.NewFullPath)));
             }
 
             RenameJournal.TryComplete(journal);
@@ -137,6 +143,7 @@ public sealed class BatchRenameService : IBatchRenameService
         }
         catch (Exception ex)
         {
+            AppLog.Error("BatchRename.Execute", ex);
             // Откат двухпроходный. Прямой откат «в обратном порядке» ломался на цепочках имён
             // (новое имя одного файла = старое имя другого): первый же возврат упирался в занятое
             // имя, и полностью восстановимый файл становился «сиротой». Поэтому: (1) все файлы,
@@ -168,9 +175,13 @@ public sealed class BatchRenameService : IBatchRenameService
 
             // Файл/папка исчезли посреди операции (удалили или выдернули диск) — системное
             // сообщение об этом малопонятно; говорим простыми словами (ночь-1).
-            string error = ex is FileNotFoundException or DirectoryNotFoundException or DriveNotFoundException
-                ? "Файл недоступен — возможно, диск отключён."
-                : ex.Message;
+            string error = ex switch
+            {
+                OperationCanceledException => "Операция остановлена. Выполненные переименования отменены.",
+                FileNotFoundException or DirectoryNotFoundException or DriveNotFoundException =>
+                    "Файл недоступен — возможно, диск отключён.",
+                _ => "Переименование не завершено. Исходные имена восстановлены; подробности сохранены в журнале."
+            };
 
             return new BatchRenameResult(0, skipped, todo.Count, RolledBack: true, Error: error,
                 RenamedPairs: Array.Empty<RenamePair>(), Orphans: orphans);

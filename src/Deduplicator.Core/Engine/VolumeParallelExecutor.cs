@@ -1,5 +1,15 @@
 namespace Deduplicator.Core.Engine;
 
+/// <summary>Профиль логического тома для чистого планирования по физическим устройствам.</summary>
+public readonly record struct VolumeExecutionProfile(
+    long VolumeId, string PhysicalDeviceKey, int ContentDop, bool PreferSequential);
+
+/// <summary>
+/// Итоговый бюджет одного физического устройства. Несколько разделов одного диска делят общий DOP.
+/// </summary>
+public sealed record PhysicalDeviceExecutionPlan(
+    string PhysicalDeviceKey, IReadOnlyList<long> VolumeIds, int ContentDop, bool PreferSequential);
+
 /// <summary>
 /// Запускает работу над набором элементов с параллелизмом НА КАЖДЫЙ ТОМ: разные тома обрабатываются
 /// одновременно, но внутри тома — со своим DOP (HDD=1 последовательно, SSD высокий). Глобальный
@@ -17,25 +27,90 @@ public static class VolumeParallelExecutor
         int maxVolumeParallelism,
         CancellationToken ct,
         Action<T> body)
+        => RunByVolume(items, volumeKey, contentDopFor,
+            vid => $"volume:{vid}", _ => false, maxVolumeParallelism, ct, body);
+
+    /// <summary>
+    /// Физически осведомлённый запуск. Независимые устройства работают параллельно; разделы одного
+    /// устройства делят единый DOP. Если хотя бы один план устройства последовательный, весь девайс
+    /// читается строго в один поток — это исключает seek-шторм между разделами HDD.
+    /// </summary>
+    public static void RunByVolume<T>(
+        IReadOnlyCollection<T> items,
+        Func<T, long> volumeKey,
+        Func<long, int> contentDopFor,
+        Func<long, string?> physicalDeviceKeyFor,
+        Func<long, bool> preferSequentialFor,
+        int maxPhysicalDeviceParallelism,
+        CancellationToken ct,
+        Action<T> body)
     {
         if (items.Count == 0) return;
 
-        var byVolume = items.GroupBy(volumeKey).ToList();
-        var requested = byVolume.Select(g => (g.Key, Dop: contentDopFor(g.Key))).ToList();
-        var quotas = DistributeCap(requested, GlobalCap(requested.Select(r => r.Dop).ToList()));
+        var byVolume = items.GroupBy(volumeKey).ToDictionary(g => g.Key, g => g);
+        var profiles = byVolume.Keys.Select(vid => new VolumeExecutionProfile(
+            vid,
+            physicalDeviceKeyFor(vid) ?? $"volume:{vid}",
+            contentDopFor(vid),
+            preferSequentialFor(vid))).ToList();
+        var devices = GroupPhysicalDevices(profiles);
+        var requested = devices.Select(d => (d.PhysicalDeviceKey, Dop: d.ContentDop)).ToList();
+        int globalCap = GlobalCap(requested.Select(r => r.Dop).ToList());
+        var quotas = DistributeCap(requested, globalCap);
 
         var outer = new ParallelOptions
         {
             CancellationToken = ct,
-            MaxDegreeOfParallelism = Math.Max(1, Math.Min(byVolume.Count, maxVolumeParallelism))
+            MaxDegreeOfParallelism = Math.Max(1,
+                Math.Min(devices.Count, Math.Min(Math.Max(1, maxPhysicalDeviceParallelism), globalCap)))
         };
 
-        Parallel.ForEach(byVolume, outer, group =>
+        Parallel.ForEach(devices, outer, device =>
         {
-            int dop = quotas.TryGetValue(group.Key, out var q) ? q : 1;
+            int dop = quotas.TryGetValue(device.PhysicalDeviceKey, out var q) ? q : 1;
+            var deviceItems = device.VolumeIds.SelectMany(vid => byVolume[vid]);
+
+            if (device.PreferSequential || dop <= 1)
+            {
+                foreach (var item in deviceItems)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    body(item);
+                }
+                return;
+            }
+
             var inner = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = dop };
-            Parallel.ForEach(group, inner, body);
+            Parallel.ForEach(deviceItems, inner, body);
         });
+    }
+
+    /// <summary>
+    /// Чистая группировка томов по физическому ключу. У SSD/NVMe разделы делят минимальный из
+    /// запрошенных DOP (динамический governor одного раздела тем самым сжимает весь девайс), а HDD
+    /// получает DOP=1 независимо от числа разделов.
+    /// </summary>
+    public static List<PhysicalDeviceExecutionPlan> GroupPhysicalDevices(
+        IEnumerable<VolumeExecutionProfile> volumes)
+    {
+        var normalized = volumes
+            .GroupBy(v => v.VolumeId)
+            .Select(g => g.First())
+            .Select(v => string.IsNullOrWhiteSpace(v.PhysicalDeviceKey)
+                ? v with { PhysicalDeviceKey = $"volume:{v.VolumeId}" }
+                : v)
+            .ToList();
+
+        var result = new List<PhysicalDeviceExecutionPlan>();
+        foreach (var device in normalized.GroupBy(v => v.PhysicalDeviceKey, StringComparer.OrdinalIgnoreCase))
+        {
+            var members = device.ToList();
+            bool sequential = members.Any(v => v.PreferSequential);
+            int dop = sequential ? 1 : members.Min(v => Math.Max(1, v.ContentDop));
+            result.Add(new PhysicalDeviceExecutionPlan(device.Key,
+                members.Select(v => v.VolumeId).ToList(), dop, sequential));
+        }
+        return result;
     }
 
     /// <summary>
@@ -57,15 +132,16 @@ public static class VolumeParallelExecutor
     /// Чистая функция — тестируема. Спроектирована так, чтобы губернатор ресурсов (этап 2.6)
     /// мог динамически сжимать cap между пачками работы.
     /// </summary>
-    public static Dictionary<long, int> DistributeCap(IReadOnlyList<(long Key, int Dop)> volumes, int cap)
+    public static Dictionary<TKey, int> DistributeCap<TKey>(
+        IReadOnlyList<(TKey Key, int Dop)> volumes, int cap) where TKey : notnull
     {
-        var result = new Dictionary<long, int>(volumes.Count);
+        var result = new Dictionary<TKey, int>(volumes.Count);
         foreach (var (key, dop) in volumes) result[key] = Math.Max(1, dop);
 
         int total = result.Values.Sum();
         while (total > Math.Max(cap, volumes.Count)) // ниже 1 на том не ужимаем
         {
-            long topKey = 0;
+            TKey topKey = default!;
             int topVal = 1;
             foreach (var kv in result)
                 if (kv.Value > topVal) { topKey = kv.Key; topVal = kv.Value; }

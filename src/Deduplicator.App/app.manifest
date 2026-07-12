@@ -5,14 +5,13 @@
        For more details visit https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests -->
   <assemblyIdentity version="1.0.0.0" name="Deduplicator.App.Desktop"/>
 
-  <!-- Запрос прав администратора при запуске (UAC). Нужно для быстрого перечисления через
-       MFT/USN-журнал (FSCTL) на NTFS, чтения SMART/WMI и т.п. Без админа приложение всё равно
-       работает (бэкенд падает на безопасный Win32Find), но с этим манифестом Windows показывает
-       запрос повышения прав при каждом запуске и Deduplicator.exe стартует уже под админом. -->
+  <!-- Основной интерфейс работает с обычными правами. Для MFT/USN/SMART движок уже имеет
+       безопасные Win32/WMI fallback-пути; привилегированные операции должны запрашивать
+       повышение отдельно, а не держать весь UI-процесс администратором. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

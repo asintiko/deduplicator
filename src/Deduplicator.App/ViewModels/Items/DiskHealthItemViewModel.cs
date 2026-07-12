@@ -30,13 +30,21 @@ public sealed class DiskHealthItemViewModel
     // UI-аудит must №9: статусные цвета берём из ресурсов темы (раньше — хардкоды светлой палитры).
     // Карточки пересоздаются при заходе на экран, поэтому смена темы подхватывается при навигации
     // (тот же компромисс, что у ResourceGeometry в ExplorerNode).
-    public IBrush HealthBrush => ResourceBrush(Model.Health switch
+    public IBrush HealthBackground => ResourceBrush(Model.Health switch
+    {
+        DiskHealth.Healthy => "SuccessSoft",
+        DiskHealth.Warning => "WarningSoft",
+        DiskHealth.Unhealthy => "DangerSoft",
+        _ => "SurfaceAlt"
+    }, "#EEF1F6");
+
+    public IBrush HealthForeground => ResourceBrush(Model.Health switch
     {
         DiskHealth.Healthy => "SuccessBrush",
         DiskHealth.Warning => "WarningBrush",
         DiskHealth.Unhealthy => "DangerBrush",
-        _ => "TextTertiary"
-    }, "#8E8E93");
+        _ => "TextSecondary"
+    }, "#536074");
 
     private static IBrush ResourceBrush(string key, string fallback)
     {

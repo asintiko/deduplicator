@@ -63,8 +63,29 @@ public sealed class ScanProgress
 {
     public ScanStage Stage { get; set; } = ScanStage.Idle;
 
-    /// <summary>0..1 в пределах текущего этапа; null — неопределённый прогресс.</summary>
+    /// <summary>
+    /// Совместимое поле 0..1. Начиная с Engine v2 это общий монотонный прогресс всего скана
+    /// (зеркало <see cref="OverallFraction"/>), а не локальный процент текущего этапа.
+    /// </summary>
     public double? Fraction { get; set; }
+
+    /// <summary>Общий монотонный прогресс всего скана, 0..1; null, пока total ещё нельзя честно оценить.</summary>
+    public double? OverallFraction { get; set; }
+
+    /// <summary>Активное время скана; время на паузе не учитывается.</summary>
+    public TimeSpan Elapsed { get; set; }
+
+    /// <summary>Оценка оставшегося активного времени; null, пока данных недостаточно.</summary>
+    public TimeSpan? EstimatedRemaining { get; set; }
+
+    /// <summary>Сглаженная скорость реально прочитанных байтов в секунду.</summary>
+    public double BytesPerSecond { get; set; }
+
+    /// <summary>Сглаженная скорость обработанных файловых операций в секунду.</summary>
+    public double FilesPerSecond { get; set; }
+
+    /// <summary>Оценка общего числа файлов; может уточняться во время первого обхода.</summary>
+    public long? EstimatedTotalFiles { get; set; }
 
     public string? CurrentFile { get; set; }
 
